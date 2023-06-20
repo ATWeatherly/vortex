@@ -100,3 +100,4 @@ module VX_icache_stage #(
 `endif
 
 endmodule
+

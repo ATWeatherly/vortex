@@ -208,3 +208,4 @@ module VX_ibuffer #(
     assign ibuffer_if.rs3_n = deq_instr_n[0*`NR_BITS +: `NR_BITS];
 
 endmodule
+

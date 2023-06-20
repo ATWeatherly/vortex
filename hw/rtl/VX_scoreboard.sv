@@ -83,3 +83,4 @@ module VX_scoreboard  #(
     end
 
 endmodule
+

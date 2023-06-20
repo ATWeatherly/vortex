@@ -62,3 +62,4 @@ module VX_tex_format #(
     assign texel_out = texel_out_r;
 
 endmodule
+

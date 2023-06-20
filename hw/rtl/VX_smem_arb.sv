@@ -158,3 +158,4 @@ module VX_smem_arb #(
     end
 
 endmodule
+

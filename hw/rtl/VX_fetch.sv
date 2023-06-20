@@ -66,3 +66,4 @@ module VX_fetch #(
     );
 
 endmodule
+

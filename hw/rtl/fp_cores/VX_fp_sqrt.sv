@@ -81,3 +81,4 @@ module VX_fp_sqrt #(
     assign fflags = 0;
 
 endmodule
+

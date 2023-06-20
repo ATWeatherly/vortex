@@ -169,3 +169,4 @@ void dpi_fsgnjx(bool enable, int a, int b, int* result) {
     return;
   *result = rv_fsgnjx_s(a, b);
 }
+

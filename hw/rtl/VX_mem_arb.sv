@@ -144,3 +144,4 @@ module VX_mem_arb #(
     end
 
 endmodule
+

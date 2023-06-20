@@ -493,3 +493,4 @@ module VX_decode  #(
 `endif
 
 endmodule
+

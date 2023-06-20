@@ -164,3 +164,4 @@ void dpi_trace_start() {
 void dpi_trace_stop() { 
   sim_trace_enable(false);
 }
+

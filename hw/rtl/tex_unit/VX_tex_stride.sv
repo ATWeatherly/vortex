@@ -26,3 +26,4 @@ module VX_tex_stride #(
     assign log_stride = log_stride_r;
 
 endmodule
+

@@ -235,3 +235,4 @@ module VX_execute #(
                   || `INST_BR_BITS'(alu_req_if.op_type) == `INST_BR_ECALL);
 
 endmodule
+

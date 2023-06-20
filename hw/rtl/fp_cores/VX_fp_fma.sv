@@ -113,3 +113,4 @@ module VX_fp_fma #(
     assign fflags = 0;
 
 endmodule
+

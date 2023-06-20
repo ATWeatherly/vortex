@@ -66,3 +66,4 @@ module VX_ipdom_stack #(
     assign full  = (ADDRW'(DEPTH-1) == wr_ptr);
 
 endmodule
+

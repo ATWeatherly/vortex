@@ -217,3 +217,4 @@ module VX_fpu_unit #(
     assign pending = pending_r;
 
 endmodule
+

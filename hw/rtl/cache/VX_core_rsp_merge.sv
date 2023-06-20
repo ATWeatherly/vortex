@@ -348,3 +348,4 @@ module VX_core_rsp_merge #(
     end
 
 endmodule
+

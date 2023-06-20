@@ -252,3 +252,4 @@ module VX_warp_sched #(
     `SCOPE_ASSIGN (wsched_schedule_pc,    schedule_pc);
 
 endmodule
+

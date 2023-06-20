@@ -199,7 +199,7 @@ void MemoryUnit::read(void *data, uint64_t addr, uint64_t size, ACCESS_TYPE type
   if (this->mode == VA_MODE::BARE) {
     pAddr = addr;
   } else {
-     pAddr = vAddr_to_pAddr(addr, type);
+    pAddr = vAddr_to_pAddr(addr, type);
   }
   return decoder_.read(data, pAddr, size);
 }

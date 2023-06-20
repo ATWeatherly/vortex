@@ -315,3 +315,4 @@ module VX_tex_mem #(
 `endif
 
 endmodule
+

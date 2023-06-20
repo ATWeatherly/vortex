@@ -72,3 +72,4 @@ module acl_fmadd (
     assign q = fpMultAddTest_impl_q0;
 
 endmodule
+

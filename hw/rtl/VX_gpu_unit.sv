@@ -218,3 +218,4 @@ module VX_gpu_unit #(
     `SCOPE_ASSIGN (gpu_rsp_barrier, warp_ctl_if.barrier.valid);
 
 endmodule
+

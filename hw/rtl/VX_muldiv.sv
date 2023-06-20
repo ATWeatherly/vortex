@@ -224,3 +224,4 @@ module VX_muldiv (
     assign ready_in = is_div_op ? div_ready_in : mul_ready_in;
     
 endmodule
+
