@@ -99,6 +99,10 @@
 `define VX_CSR_MPM_SCRB_CSRS_H          12'hB8C
 `define VX_CSR_MPM_SCRB_WCTL            12'hB0D
 `define VX_CSR_MPM_SCRB_WCTL_H          12'hB8D
+`define VX_CSR_MPM_SCRB_VPU             12'hB13
+`define VX_CSR_MPM_SCRB_VPU_H           12'hB93
+`define VX_CSR_MPM_SCRB_TCU             12'hB14
+`define VX_CSR_MPM_SCRB_TCU_H           12'hB94
 // PERF: memory
 `define VX_CSR_MPM_IFETCHES             12'hB0E
 `define VX_CSR_MPM_IFETCHES_H           12'hB8E
@@ -179,7 +183,6 @@
 `define VX_CSR_MPM_COALESCER_MISS       12'hB1F     // coalescer misses
 `define VX_CSR_MPM_COALESCER_MISS_H     12'hB9F
 
-// Machine Performance-monitoring memory counters (class 3) ///////////////////
 // <Add your own counters: use addresses hB03..B1F, hB83..hB9F>
 
 // Machine Information Registers //////////////////////////////////////////////
@@ -198,9 +201,6 @@
 `define VX_CSR_VL                       12'hC20
 `define VX_CSR_VTYPE                    12'hC21
 `define VX_CSR_VLENB                    12'hC22
-`define VX_CSR_VCYCLE                   12'hC00
-`define VX_CSR_VTIME                    12'hC01
-`define VX_CSR_VINSTRET                 12'hC02
 
 // GPGU CSRs
 
@@ -214,11 +214,5 @@
 `define VX_CSR_NUM_WARPS                12'hFC1
 `define VX_CSR_NUM_CORES                12'hFC2
 `define VX_CSR_LOCAL_MEM_BASE           12'hFC3
-
-`define VX_MAT_MUL_SIZE                 12'hFC4     // VX_MAT_MUL_SIZE = Matrix Size / TC Size
-`define VX_TC_NUM                       12'hFC5
-`define VX_TC_SIZE                      12'hFC6
-
-
 
 `endif // VX_TYPES_VH

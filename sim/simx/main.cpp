@@ -111,17 +111,17 @@ int main(int argc, char **argv) {
       } else if (program_ext == "hex") {
         ram.loadHexImage(program);
       } else {
-        std::cout << "*** error: only *.bin or *.hex images supported." << std::endl;
+        std::cerr << "Error: only *.bin or *.hex images supported." << std::endl;
         return -1;
       }
     }
-#ifndef NDEBUG
+  #ifndef NDEBUG
     std::cout << "[VXDRV] START: program=" << program << std::endl;
-#endif
+  #endif
     // run simulation
-    // vector test exitcode is a special case
   #ifdef EXT_V_ENABLE
-    if (vector_test) return processor.run();
+    // vector test exitcode is a special case
+    if (vector_test) return (processor.run() != 1);
   #endif
     // else continue as normal
     processor.run();

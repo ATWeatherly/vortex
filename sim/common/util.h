@@ -13,18 +13,34 @@
 
 #pragma once
 
-#include <cstdint>
 #include <algorithm>
+#include <array>
 #include <assert.h>
 #include <bitmanip.h>
+#include <cstdint>
+#include <sstream>
+#include <string>
+#include <utility>
+#include <variant>
+
+namespace vortex {
 
 template <typename... Args>
-void unused(Args&&...) {}
+void unused(Args &&...) {}
 
 #define __unused(...) unused(__VA_ARGS__)
 
+#define __assert(cond, msg)                           \
+  if (!(cond)) {                                      \
+    std::cerr << "Assertion failed: " << msg << "\n"; \
+    std::cerr << "File: " << __FILE__ << "\n";        \
+    std::cerr << "Line: " << __LINE__ << "\n";        \
+    std::cerr << "Function: " << __func__ << "\n";    \
+    std::abort();                                     \
+  }
+
 // return file extension
-const char* fileExtension(const char* filepath);
+const char *fileExtension(const char *filepath);
 
 #if defined(_MSC_VER)
 #define DISABLE_WARNING_PUSH __pragma(warning(push))
@@ -48,6 +64,8 @@ const char* fileExtension(const char* filepath);
   _Pragma("GCC diagnostic ignored \"-Wunused-but-set-variable\"")
 #define DISABLE_WARNING_MISSING_FIELD_INITIALIZERS \
   _Pragma("GCC diagnostic ignored \"-Wmissing-field-initializers\"")
+#define DISABLE_WARNING_STRICT_ALIASING \
+  _Pragma("GCC diagnostic ignored \"-Wstrict-aliasing\"")
 #elif defined(__clang__)
 #define DISABLE_WARNING_PUSH _Pragma("clang diagnostic push")
 #define DISABLE_WARNING_POP _Pragma("clang diagnostic pop")
@@ -61,18 +79,19 @@ const char* fileExtension(const char* filepath);
   _Pragma("clang diagnostic ignored \"-Wunused-but-set-variable\"")
 #define DISABLE_WARNING_MISSING_FIELD_INITIALIZERS \
   _Pragma("clang diagnostic ignored \"-Wmissing-field-initializers\"")
+#define DISABLE_WARNING_STRICT_ALIASING \
+  _Pragma("clang diagnostic ignored \"-Wstrict-aliasing\"")
 #else
 #define DISABLE_WARNING_PUSH
 #define DISABLE_WARNING_POP
 #define DISABLE_WARNING_UNUSED_PARAMETER
 #define DISABLE_WARNING_UNREFERENCED_FUNCTION
 #define DISABLE_WARNING_ANONYMOUS_STRUCT
+#define DISABLE_WARNING_STRICT_ALIASING
 #endif
 
 void *aligned_malloc(size_t size, size_t alignment);
 void aligned_free(void *ptr);
-
-namespace vortex {
 
 // Verilator data type casting
 template <typename R, size_t W, typename Enable = void>
@@ -81,7 +100,7 @@ template <typename R, size_t W>
 class VDataCast<R, W, typename std::enable_if<(W > 8)>::type> {
 public:
   template <typename T>
-  static R get(T& obj) {
+  static R get(T &obj) {
     return reinterpret_cast<R>(obj.data());
   }
 };
@@ -89,9 +108,50 @@ template <typename R, size_t W>
 class VDataCast<R, W, typename std::enable_if<(W <= 8)>::type> {
 public:
   template <typename T>
-  static R get(T& obj) {
+  static R get(T &obj) {
     return reinterpret_cast<R>(&obj);
   }
 };
 
+template <typename T, std::size_t N, typename... Args, std::size_t... Is>
+constexpr std::array<T, N> make_array_impl(std::index_sequence<Is...>, Args &&...args) {
+  return {{(static_cast<void>(Is), T(std::forward<Args>(args)...))...}};
 }
+
+template <typename T, std::size_t N, typename... Args>
+constexpr std::array<T, N> make_array(Args &&...args) {
+  return make_array_impl<T, N>(std::make_index_sequence<N>{}, std::forward<Args>(args)...);
+}
+
+// visit_var(variant, f1, f2, f3, ...)
+//   - deduces a closure type that inherits all your lambdas
+//   - forwards them into std::visit
+//   - works in C++17 without any extra global templates
+template <typename Variant, typename... Fs>
+auto visit_var(Variant &&var, Fs &&...fs) {
+  // define a local visitor type that inherits all your lambdas
+  struct Visitor : std::decay_t<Fs>... {
+    // inherit ctors
+    Visitor(Fs &&...f) : std::decay_t<Fs>(std::forward<Fs>(f))... {}
+    // pull in operator() into this scope
+    using std::decay_t<Fs>::operator()...;
+  };
+
+  return std::visit(
+      Visitor{std::forward<Fs>(fs)...},
+      std::forward<Variant>(var));
+}
+
+template <typename To, typename From>
+To bit_cast(const From& src) {
+  union cast_t { From from; To to; };
+  cast_t cast{0};
+  cast.from = src;
+  return cast.to;
+}
+
+std::string to_hex_str(uint32_t v);
+
+std::string resolve_file_path(const std::string &filename, const std::string &searchPaths);
+
+} // namespace vortex

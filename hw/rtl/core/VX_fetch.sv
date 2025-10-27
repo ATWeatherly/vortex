@@ -38,8 +38,8 @@ module VX_fetch import VX_gpu_pkg::*; #(
     wire [ICACHE_TAG_WIDTH-1:0] icache_req_tag;
     wire icache_req_ready;
 
-    wire [`UUID_WIDTH-1:0] rsp_uuid;
-    wire [`NW_WIDTH-1:0] req_tag, rsp_tag;
+    wire [UUID_WIDTH-1:0] rsp_uuid;
+    wire [NW_WIDTH-1:0] req_tag, rsp_tag;
 
     wire icache_req_fire = icache_req_valid && icache_req_ready;
 
@@ -47,11 +47,11 @@ module VX_fetch import VX_gpu_pkg::*; #(
 
     assign {rsp_uuid, rsp_tag} = icache_bus_if.rsp_data.tag;
 
-    wire [`PC_BITS-1:0] rsp_PC;
+    wire [PC_BITS-1:0] rsp_PC;
     wire [`NUM_THREADS-1:0] rsp_tmask;
 
     VX_dp_ram #(
-        .DATAW (`PC_BITS + `NUM_THREADS),
+        .DATAW (PC_BITS + `NUM_THREADS),
         .SIZE  (`NUM_WARPS),
         .RDW_MODE ("R"),
         .LUTRAM (1)
@@ -93,12 +93,12 @@ module VX_fetch import VX_gpu_pkg::*; #(
 `endif
 
     `RUNTIME_ASSERT((!schedule_if.valid || schedule_if.data.PC != 0),
-        ("%t: *** %s invalid PC=0x%0h, wid=%0d, tmask=%b (#%0d)", $time, INSTANCE_ID, {schedule_if.data.PC, 1'b0}, schedule_if.data.wid, schedule_if.data.tmask, schedule_if.data.uuid))
+        ("%t: *** %s invalid PC=0x%0h, wid=%0d, tmask=%b (#%0d)", $time, INSTANCE_ID, to_fullPC(schedule_if.data.PC), schedule_if.data.wid, schedule_if.data.tmask, schedule_if.data.uuid))
 
     // Icache Request
 
     assign icache_req_valid = schedule_if.valid && ibuf_ready;
-    assign icache_req_addr  = schedule_if.data.PC[1 +: ICACHE_ADDR_WIDTH];
+    assign icache_req_addr  = schedule_if.data.PC[2-(`XLEN-PC_BITS) +: ICACHE_ADDR_WIDTH]; // 4-byte aligned addresses
     assign icache_req_tag   = {schedule_if.data.uuid, req_tag};
     assign schedule_if.ready = icache_req_ready && ibuf_ready;
 
@@ -141,9 +141,9 @@ module VX_fetch import VX_gpu_pkg::*; #(
     wire reset_negedge;
     `NEG_EDGE (reset_negedge, reset);
     `SCOPE_TAP_EX (0, 1, 6, 3, (
-            `UUID_WIDTH + `NW_WIDTH + `NUM_THREADS + `PC_BITS +
-            `UUID_WIDTH + ICACHE_WORD_SIZE + ICACHE_ADDR_WIDTH +
-            `UUID_WIDTH + (ICACHE_WORD_SIZE * 8)
+            UUID_WIDTH + NW_WIDTH + `NUM_THREADS + PC_BITS +
+            UUID_WIDTH + ICACHE_WORD_SIZE + ICACHE_ADDR_WIDTH +
+            UUID_WIDTH + (ICACHE_WORD_SIZE * 8)
         ), {
             schedule_if.valid,
             schedule_if.ready,
@@ -181,10 +181,10 @@ module VX_fetch import VX_gpu_pkg::*; #(
 `ifdef DBG_TRACE_MEM
     always @(posedge clk) begin
         if (schedule_if.valid && schedule_if.ready) begin
-            `TRACE(1, ("%t: %s req: wid=%0d, PC=0x%0h, tmask=%b (#%0d)\n", $time, INSTANCE_ID, schedule_if.data.wid, {schedule_if.data.PC, 1'b0}, schedule_if.data.tmask, schedule_if.data.uuid))
+            `TRACE(1, ("%t: %s req: wid=%0d, PC=0x%0h, tmask=%b (#%0d)\n", $time, INSTANCE_ID, schedule_if.data.wid, to_fullPC(schedule_if.data.PC), schedule_if.data.tmask, schedule_if.data.uuid))
         end
         if (fetch_if.valid && fetch_if.ready) begin
-            `TRACE(1, ("%t: %s rsp: wid=%0d, PC=0x%0h, tmask=%b, instr=0x%0h (#%0d)\n", $time, INSTANCE_ID, fetch_if.data.wid, {fetch_if.data.PC, 1'b0}, fetch_if.data.tmask, fetch_if.data.instr, fetch_if.data.uuid))
+            `TRACE(1, ("%t: %s rsp: wid=%0d, PC=0x%0h, tmask=%b, instr=0x%0h (#%0d)\n", $time, INSTANCE_ID, fetch_if.data.wid, to_fullPC(fetch_if.data.PC), fetch_if.data.tmask, fetch_if.data.instr, fetch_if.data.uuid))
         end
     end
 `endif

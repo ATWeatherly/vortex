@@ -137,8 +137,8 @@ int run_kernel_test(const kernel_arg_t& kernel_arg) {
     h_src[i] = shuffle(i, NONCE);
   }
 
-  // upload program
-  std::cout << "upload program" << std::endl;
+  // Upload kernel binary
+  std::cout << "Upload kernel binary" << std::endl;
   RT_CHECK(vx_upload_kernel_file(device, kernel_file, &krnl_buffer));
 
   // upload kernel argument
@@ -220,7 +220,7 @@ int main(int argc, char *argv[]) {
   RT_CHECK(vx_mem_alloc(device, buf_size, VX_MEM_WRITE, &dst_buffer));
   RT_CHECK(vx_mem_address(dst_buffer, &kernel_arg.dst_addr));
 
-  kernel_arg.count = num_points;
+  kernel_arg.count = count;
 
   std::cout << "dev_src=0x" << std::hex << kernel_arg.src_addr << std::endl;
   std::cout << "dev_dst=0x" << std::hex << kernel_arg.dst_addr << std::endl;

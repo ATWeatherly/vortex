@@ -86,6 +86,8 @@ proc run_setup {} {
     add_files -norecurse -verbose ${ip_dir}/xil_fma/xil_fma.xci
     add_files -norecurse -verbose ${ip_dir}/xil_fdiv/xil_fdiv.xci
     add_files -norecurse -verbose ${ip_dir}/xil_fsqrt/xil_fsqrt.xci
+    add_files -norecurse -verbose ${ip_dir}/xil_fmul/xil_fmul.xci
+    add_files -norecurse -verbose ${ip_dir}/xil_fadd/xil_fadd.xci
   }
 
   # Synthesis
@@ -150,7 +152,7 @@ proc run_report {} {
   report_route_status -file route.rpt
 
   # Generate timing report
-  report_timing -nworst 100 -delay_type max -sort_by group -file timing.rpt
+  report_timing -unique_pins -nworst 100 -delay_type max -sort_by group -file timing.rpt
 
   # Generate power and drc reports
   report_power -file power.rpt

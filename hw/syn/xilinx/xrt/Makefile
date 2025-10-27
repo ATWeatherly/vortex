@@ -56,6 +56,7 @@ DBG_TRACE_FLAGS += -DDBG_TRACE_TEX
 DBG_TRACE_FLAGS += -DDBG_TRACE_RASTER
 DBG_TRACE_FLAGS += -DDBG_TRACE_OM
 DBG_TRACE_FLAGS += -DDBG_TRACE_GBAR
+DBG_TRACE_FLAGS += -DDBG_TRACE_TCU
 
 # Control logic analyzer monitors
 DBG_SCOPE_FLAGS += -DDBG_SCOPE_AFU
@@ -78,12 +79,28 @@ endif
 # include sources
 RTL_PKGS = $(RTL_DIR)/VX_gpu_pkg.sv $(RTL_DIR)/fpu/VX_fpu_pkg.sv
 FPU_INCLUDE = -I$(RTL_DIR)/fpu
-ifneq (,$(findstring FPU_FPNEW,$(CONFIGS)))
+ifneq (,$(findstring -DFPU_FPNEW, $(CONFIGS)))
 	RTL_PKGS += $(THIRD_PARTY_DIR)/cvfpu/src/fpnew_pkg.sv $(THIRD_PARTY_DIR)/cvfpu/src/common_cells/src/cf_math_pkg $(THIRD_PARTY_DIR)/cvfpu/src/fpu_div_sqrt_mvp/hdl/defs_div_sqrt_mvp.sv
 	FPU_INCLUDE += -J$(THIRD_PARTY_DIR)/cvfpu/src/common_cells/include -J$(THIRD_PARTY_DIR)/cvfpu/src/common_cells/src -J$(THIRD_PARTY_DIR)/cvfpu/src/fpu_div_sqrt_mvp/hdl -J$(THIRD_PARTY_DIR)/cvfpu/src
 endif
 RTL_INCLUDE = -I$(RTL_DIR) -I$(RTL_DIR)/libs -I$(RTL_DIR)/interfaces -I$(RTL_DIR)/core -I$(RTL_DIR)/mem -I$(RTL_DIR)/cache -I$(AFU_DIR)
 RTL_INCLUDE += $(FPU_INCLUDE)
+
+# Add V extension sources
+ifneq (,$(findstring -DEXT_V_ENABLE, $(CONFIGS)))
+	RTL_PKGS += $(RTL_DIR)/vpu/VX_vpu_pkg.sv
+	RTL_INCLUDE += -I$(RTL_DIR)/vpu
+endif
+
+# Add TCU extension sources
+ifneq (,$(findstring -DEXT_TCU_ENABLE, $(CONFIGS)))
+	RTL_PKGS += $(RTL_DIR)/tcu/VX_tcu_pkg.sv
+	RTL_INCLUDE += -I$(RTL_DIR)/tcu
+	RTL_INCLUDE += -I$(RTL_DIR)/tcu/bhf
+	RTL_INCLUDE += -J$(THIRD_PARTY_DIR)/hardfloat/source/RISCV
+	RTL_INCLUDE += -I$(THIRD_PARTY_DIR)/hardfloat/source
+endif
+
 
 # Kernel compiler global settings
 VPP_FLAGS += --link --target $(TARGET) --platform $(PLATFORM) --save-temps --no_ip_cache

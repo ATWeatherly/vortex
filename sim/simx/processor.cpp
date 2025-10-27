@@ -46,7 +46,6 @@ ProcessorImpl::ProcessorImpl(const Arch& arch)
     log2ceil(L3_NUM_WAYS),    // A
     log2ceil(L3_NUM_BANKS),   // B
     XLEN,                     // address bits
-    1,                        // number of ports
     L3_NUM_REQS,              // request size
     L3_MEM_PORTS,             // memory ports
     L3_WRITEBACK,             // write-back
@@ -131,9 +130,7 @@ int ProcessorImpl::run() {
         done = false;
         continue;
       }
-    #ifdef EXT_V_ENABLE
       exitcode |= cluster->get_exitcode();
-    #endif
     }
     perf_mem_latency_ += perf_mem_pending_reads_;
   } while (!done);
@@ -185,7 +182,14 @@ void Processor::attach_ram(RAM* mem) {
 }
 
 int Processor::run() {
-  return impl_->run();
+  try {
+    return impl_->run();
+  } catch (const std::exception& e) {
+    std::cerr << "Error: exception: " << e.what() << std::endl;
+  } catch (...) {
+    std::cerr << "Error: unknown exception." << std::endl;
+  }
+  return -1;
 }
 
 void Processor::dcr_write(uint32_t addr, uint32_t value) {

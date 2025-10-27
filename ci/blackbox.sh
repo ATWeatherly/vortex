@@ -19,7 +19,7 @@ ROOT_DIR=$SCRIPT_DIR/..
 show_usage()
 {
     echo "Vortex BlackBox Test Driver v1.0"
-    echo "Usage: $0 [[--clusters=#n] [--cores=#n] [--warps=#n] [--threads=#n] [--l2cache] [--l3cache] [[--driver=#name] [--app=#app] [--args=#args] [--debug=#level] [--scope] [--perf=#class] [--rebuild=#n] [--log=logfile] [--help]]"
+    echo "Usage: $0 [[--clusters=#n] [--cores=#n] [--warps=#n] [--threads=#n] [--l2cache] [--l3cache] [[--driver=#name] [--app=#app] [--args=#args] [--debug=#level] [--scope] [--perf=#class] [--log=logfile] [--nohup] [--help]]"
 }
 
 show_help()
@@ -29,7 +29,7 @@ show_help()
     echo "--driver: gpu, simx, rtlsim, oape, xrt"
     echo "--app: any subfolder test under regression or opencl"
     echo "--class: 0=disable, 1=pipeline, 2=memsys"
-    echo "--rebuild: 0=disable, 1=force, 2=auto, 3=temp"
+    echo "--nohup: build and run in temp directory"
 }
 
 add_option() {
@@ -49,7 +49,6 @@ DEFAULTS() {
     HAS_ARGS=0
     PERF_CLASS=0
     CONFIGS="$CONFIGS"
-    REBUILD=2
     TEMPBUILD=0
     LOGFILE=run.log
 }
@@ -70,18 +69,12 @@ parse_args() {
             --debug=*)  DEBUG=1; DEBUG_LEVEL=${i#*=} ;;
             --scope)    SCOPE=1; ;;
             --args=*)   HAS_ARGS=1; ARGS=${i#*=} ;;
-            --rebuild=*) REBUILD=${i#*=} ;;
             --log=*)    LOGFILE=${i#*=} ;;
+            --nohup)    TEMPBUILD=1 ;;
             --help)     show_help; exit 0 ;;
             *)          show_usage; exit 1 ;;
         esac
     done
-
-    if [ $REBUILD -eq 3 ];
-    then
-        REBUILD=1
-        TEMPBUILD=1
-    fi
 }
 
 set_driver_path() {
@@ -93,10 +86,16 @@ set_driver_path() {
 }
 
 set_app_path() {
-    if [ -d "$ROOT_DIR/tests/opencl/$APP" ]; then
-        APP_PATH="$ROOT_DIR/tests/opencl/$APP"
+    if [ -d "$APP" ]; then
+        APP_PATH="$APP"
+    elif [ -d "$ROOT_DIR/tests/$APP" ]; then
+        APP_PATH="$ROOT_DIR/tests/$APP"
     elif [ -d "$ROOT_DIR/tests/regression/$APP" ]; then
         APP_PATH="$ROOT_DIR/tests/regression/$APP"
+    elif [ -d "$ROOT_DIR/tests/opencl/$APP" ]; then
+        APP_PATH="$ROOT_DIR/tests/opencl/$APP"
+    elif [ -d "$ROOT_DIR/tests/hip/$APP" ]; then
+        APP_PATH="$ROOT_DIR/tests/hip/$APP"
     else
         echo "Application folder not found: $APP"
         exit 1
@@ -109,13 +108,13 @@ build_driver() {
     [ $SCOPE -eq 1 ] && cmd_opts=$(add_option "$cmd_opts" "SCOPE=1")
     [ $TEMPBUILD -eq 1 ] && cmd_opts=$(add_option "$cmd_opts" "DESTDIR=\"$TEMPDIR\"")
     [ -n "$CONFIGS" ] && cmd_opts=$(add_option "$cmd_opts" "CONFIGS=\"$CONFIGS\"")
-
-    if [ -n "$cmd_opts" ]; then
-        echo "Running: $cmd_opts make -C $DRIVER_PATH > /dev/null"
-        eval "$cmd_opts make -C $DRIVER_PATH > /dev/null"
-    else
-        echo "Running: make -C $DRIVER_PATH > /dev/null"
-        make -C $DRIVER_PATH > /dev/null
+    cmd_opts=$(add_option "$cmd_opts" "make -C $DRIVER_PATH > /dev/null")
+    echo "Running: $cmd_opts"
+    eval "$cmd_opts"
+    status=$?
+    if [ $status -ne 0 ]; then
+        echo "Error building driver: $DRIVER_PATH"
+        exit $status
     fi
 }
 
@@ -124,24 +123,10 @@ run_app() {
     [ $DEBUG -eq 1 ] && cmd_opts=$(add_option "$cmd_opts" "DEBUG=1")
     [ $TEMPBUILD -eq 1 ] && cmd_opts=$(add_option "$cmd_opts" "VORTEX_RT_PATH=\"$TEMPDIR\"")
     [ $HAS_ARGS -eq 1 ] && cmd_opts=$(add_option "$cmd_opts" "OPTS=\"$ARGS\"")
-
-    if [ $DEBUG -ne 0 ]; then
-        if [ -n "$cmd_opts" ]; then
-            echo "Running: $cmd_opts make -C $APP_PATH run-$DRIVER > $LOGFILE 2>&1"
-            eval "$cmd_opts make -C $APP_PATH run-$DRIVER > $LOGFILE 2>&1"
-        else
-            echo "Running: make -C $APP_PATH run-$DRIVER > $LOGFILE 2>&1"
-            make -C $APP_PATH run-$DRIVER > $LOGFILE 2>&1
-        fi
-    else
-        if [ -n "$cmd_opts" ]; then
-            echo "Running: $cmd_opts make -C $APP_PATH run-$DRIVER"
-            eval "$cmd_opts make -C $APP_PATH run-$DRIVER"
-        else
-            echo "Running: make -C $APP_PATH run-$DRIVER"
-            make -C $APP_PATH run-$DRIVER
-        fi
-    fi
+    cmd_opts=$(add_option "$cmd_opts" "make -C \"$APP_PATH\" run-$DRIVER")
+    [ $DEBUG -ne 0 ] && cmd_opts=$(add_option "$cmd_opts" "> $LOGFILE 2>&1")
+    echo "Running: $cmd_opts"
+    eval "$cmd_opts"
     status=$?
     return $status
 }
@@ -161,16 +146,6 @@ main() {
         echo "CONFIGS=$CONFIGS"
     fi
 
-    if [ $REBUILD -ne 0 ]; then
-        BLACKBOX_CACHE=blackbox.$DRIVER.cache
-        LAST_CONFIGS=$(cat "$BLACKBOX_CACHE" 2>/dev/null || echo "")
-
-        if [ $REBUILD -eq 1 ] || [ "$CONFIGS+$DEBUG+$SCOPE" != "$LAST_CONFIGS" ]; then
-            make -C $DRIVER_PATH clean-driver > /dev/null
-            echo "$CONFIGS+$DEBUG+$SCOPE" > "$BLACKBOX_CACHE"
-        fi
-    fi
-
     export VORTEX_PROFILING=$PERF_CLASS
 
     make -C "$ROOT_DIR/hw" config > /dev/null
@@ -181,7 +156,7 @@ main() {
         TEMPDIR=$(mktemp -d)
         mkdir -p "$TEMPDIR"
         # build stub driver
-        echo "running: DESTDIR=$TEMPDIR make -C $ROOT_DIR/runtime/stub"
+        echo "Running: DESTDIR=$TEMPDIR make -C $ROOT_DIR/runtime/stub"
         DESTDIR="$TEMPDIR" make -C $ROOT_DIR/runtime/stub > /dev/null
         # register tempdir cleanup on exit
         trap "rm -rf $TEMPDIR" EXIT

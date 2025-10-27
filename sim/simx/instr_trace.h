@@ -33,26 +33,21 @@ public:
 struct LsuTraceData : public ITraceData {
   using Ptr = std::shared_ptr<LsuTraceData>;
   std::vector<mem_addr_size_t> mem_addrs;
-  LsuTraceData(uint32_t num_threads) : mem_addrs(num_threads) {}
+  LsuTraceData(uint32_t num_threads = 0) : mem_addrs(num_threads) {}
 };
 
-struct SFUTraceData : public ITraceData {
-  using Ptr = std::shared_ptr<SFUTraceData>;
+struct SfuTraceData : public ITraceData {
+  using Ptr = std::shared_ptr<SfuTraceData>;
   Word arg1;
   Word arg2;
-  SFUTraceData(Word arg1, Word arg2) : arg1(arg1), arg2(arg2) {}
+  SfuTraceData(Word arg1, Word arg2) : arg1(arg1), arg2(arg2) {}
 };
 
 struct instr_trace_t {
 public:
-  struct reg_t {
-    RegType  type;
-    uint32_t idx;
-  };
-
   //--
   const uint64_t uuid;
-  const Arch&    arch;
+  const Arch& arch;
 
   //--
   uint32_t    cid;
@@ -62,23 +57,16 @@ public:
   bool        wb;
 
   //--
-  reg_t       dst_reg;
+  RegOpd      dst_reg;
 
   //--
-  std::vector<reg_t> src_regs;
+  std::vector<RegOpd> src_regs;
 
   //-
   FUType     fu_type;
 
   //--
-  union {
-    uint32_t unit_type;
-    LsuType  lsu_type;
-    AluType  alu_type;
-    FpuType  fpu_type;
-    SfuType  sfu_type;
-    TCUType  tcu_type; 
-  };
+  OpType     op_type;
 
   ITraceData::Ptr data;
 
@@ -87,6 +75,8 @@ public:
   bool eop;
 
   bool fetch_stall;
+
+  uint64_t issue_time ;
 
   instr_trace_t(uint64_t uuid, const Arch& arch)
     : uuid(uuid)
@@ -99,12 +89,13 @@ public:
     , dst_reg({RegType::None, 0})
     , src_regs(NUM_SRC_REGS, {RegType::None, 0})
     , fu_type(FUType::ALU)
-    , unit_type(0)
+    , op_type({})
     , data(nullptr)
     , pid(-1)
     , sop(true)
     , eop(true)
     , fetch_stall(false)
+    , issue_time(SimPlatform::instance().cycles())
     , log_once_(false)
   {}
 
@@ -119,12 +110,13 @@ public:
     , dst_reg(rhs.dst_reg)
     , src_regs(rhs.src_regs)
     , fu_type(rhs.fu_type)
-    , unit_type(rhs.unit_type)
+    , op_type(rhs.op_type)
     , data(rhs.data)
     , pid(rhs.pid)
     , sop(rhs.sop)
     , eop(rhs.eop)
     , fetch_stall(rhs.fetch_stall)
+    , issue_time(rhs.issue_time)
     , log_once_(false)
   {}
 
@@ -136,35 +128,37 @@ public:
     return old;
   }
 
+  friend std::ostream &operator<<(std::ostream &os, const instr_trace_t& trace) {
+    os << "cid=" << trace.cid;
+    os << ", wid=" << trace.wid;
+    os << ", tmask=";
+    for (uint32_t i = 0, n = trace.arch.num_threads(); i < n; ++i) {
+      os << trace.tmask.test(i);
+    }
+    os << ", PC=0x" << std::hex << trace.PC << std::dec;
+    os << ", wb=" << trace.wb;
+    if (trace.dst_reg.type != RegType::None) {
+      os << ", rd=" << trace.dst_reg;
+    }
+    for (uint32_t i = 0; i < trace.src_regs.size(); ++i) {
+      if (trace.src_regs[i].type != RegType::None) {
+        os << ", rs" << i << "=" << trace.src_regs[i];
+      }
+    }
+    os << ", ex=" << trace.fu_type;
+    if (trace.pid != -1) {
+      os << ", pid=" << trace.pid;
+      os << ", sop=" << trace.sop;
+      os << ", eop=" << trace.eop;
+    }
+    os << " (#" << trace.uuid << ")";
+    return os;
+  }
+
 private:
   bool log_once_;
 };
 
-inline std::ostream &operator<<(std::ostream &os, const instr_trace_t& trace) {
-  os << "cid=" << trace.cid;
-  os << ", wid=" << trace.wid;
-  os << ", tmask=";
-  for (uint32_t i = 0, n = trace.arch.num_threads(); i < n; ++i) {
-      os << trace.tmask.test(i);
-  }
-  os << ", PC=0x" << std::hex << trace.PC << std::dec;
-  os << ", wb=" << trace.wb;
-  if (trace.dst_reg.type != RegType::None) {
-     os << ", rd=" << trace.dst_reg.type << trace.dst_reg.idx;
-  }
-  for (uint32_t i = 0; i < trace.src_regs.size(); ++i) {
-    if (trace.src_regs[i].type != RegType::None) {
-      os << ", rs" << i << "=" << trace.src_regs[i].type << trace.src_regs[i].idx;
-    }
-  }
-  os << ", ex=" << trace.fu_type;
-  if (trace.pid != -1) {
-    os << ", pid=" << trace.pid;
-    os << ", sop=" << trace.sop;
-    os << ", eop=" << trace.eop;
-  }
-  os << " (#" << trace.uuid << ")";
-  return os;
-}
+using TraceArbiter = TxArbiter<instr_trace_t*>;
 
 }

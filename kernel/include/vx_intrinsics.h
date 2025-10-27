@@ -38,25 +38,25 @@ extern "C" {
 
 #define csr_read(csr) ({                        \
 	size_t __r;	               		            \
-	__asm__ __volatile__ ("csrr %0, %1" : "=r" (__r) : "i" (csr) : "memory"); \
+	__asm__ __volatile__ ("csrr %0, %1" : "=r" (__r) : "i" (csr)); \
 	__r;							            \
 })
 
 #define csr_write(csr, val)	({                  \
 	size_t __v = (size_t)(val);                 \
 	if (__builtin_constant_p(val) && __v < 32)  \
-        __asm__ __volatile__ ("csrw %0, %1" :: "i" (csr), "i" (__v) : "memory");  \
+        __asm__ __volatile__ ("csrwi %0, %1" :: "i" (csr), "i" (__v));  \
     else                                        \
-        __asm__ __volatile__ ("csrw %0, %1"	:: "i" (csr), "r" (__v) : "memory");  \
+        __asm__ __volatile__ ("csrw %0, %1"	:: "i" (csr), "r" (__v));  \
 })
 
 #define csr_swap(csr, val) ({                   \
     size_t __r;                                 \
 	size_t __v = (size_t)(val);	                \
 	if (__builtin_constant_p(val) && __v < 32)  \
-        __asm__ __volatile__ ("csrrw %0, %1, %2" : "=r" (__r) : "i" (csr), "i" (__v) : "memory"); \
+        __asm__ __volatile__ ("csrrwi %0, %1, %2" : "=r" (__r) : "i" (csr), "i" (__v)); \
     else                                        \
-        __asm__ __volatile__ ("csrrw %0, %1, %2" : "=r" (__r) : "i" (csr), "r" (__v) : "memory"); \
+        __asm__ __volatile__ ("csrrw %0, %1, %2" : "=r" (__r) : "i" (csr), "r" (__v)); \
 	__r;						                \
 })
 
@@ -64,36 +64,36 @@ extern "C" {
 	size_t __r;                                 \
 	size_t __v = (size_t)(val);	                \
     if (__builtin_constant_p(val) && __v < 32)  \
-	    __asm__ __volatile__ ("csrrs %0, %1, %2" : "=r" (__r) : "i" (csr), "i" (__v) : "memory"); \
+	    __asm__ __volatile__ ("csrrsi %0, %1, %2" : "=r" (__r) : "i" (csr), "i" (__v)); \
     else                                        \
-        __asm__ __volatile__ ("csrrs %0, %1, %2" : "=r" (__r) : "i" (csr), "r" (__v) : "memory"); \
+        __asm__ __volatile__ ("csrrs %0, %1, %2" : "=r" (__r) : "i" (csr), "r" (__v)); \
 	__r;							            \
 })
 
 #define csr_set(csr, val) ({                    \
 	size_t __v = (size_t)(val);	                \
     if (__builtin_constant_p(val) && __v < 32)  \
-	    __asm__ __volatile__ ("csrs %0, %1"	:: "i" (csr), "i" (__v) : "memory");  \
+	    __asm__ __volatile__ ("csrsi %0, %1" :: "i" (csr), "i" (__v));  \
     else                                        \
-        __asm__ __volatile__ ("csrs %0, %1"	:: "i" (csr), "r" (__v) : "memory");  \
+        __asm__ __volatile__ ("csrs %0, %1"	:: "i" (csr), "r" (__v));  \
 })
 
 #define csr_read_clear(csr, val) ({             \
 	size_t __r;                                 \
 	size_t __v = (size_t)(val);	                \
     if (__builtin_constant_p(val) && __v < 32)  \
-	    __asm__ __volatile__ ("csrrc %0, %1, %2" : "=r" (__r) : "i" (csr), "i" (__v) : "memory"); \
+	    __asm__ __volatile__ ("csrrci %0, %1, %2" : "=r" (__r) : "i" (csr), "i" (__v)); \
     else                                        \
-        __asm__ __volatile__ ("csrrc %0, %1, %2" : "=r" (__r) : "i" (csr), "r" (__v) : "memory"); \
+        __asm__ __volatile__ ("csrrc %0, %1, %2" : "=r" (__r) : "i" (csr), "r" (__v)); \
 	__r;							            \
 })
 
 #define csr_clear(csr, val)	({                  \
 	size_t __v = (size_t)(val);                 \
 	if (__builtin_constant_p(val) && __v < 32)  \
-        __asm__ __volatile__ ("csrc %0, %1" :: "i" (csr), "i" (__v) : "memory"); \
+        __asm__ __volatile__ ("csrci %0, %1" :: "i" (csr), "i" (__v)); \
     else                                        \
-        __asm__ __volatile__ ("csrc %0, %1"	:: "i" (csr), "r" (__v) : "memory"); \
+        __asm__ __volatile__ ("csrc %0, %1"	:: "i" (csr), "r" (__v)); \
 })
 
 // Set thread mask
@@ -106,7 +106,7 @@ inline void vx_tmc_zero() {
     __asm__ volatile (".insn r %0, 0, 0, x0, x0, x0" :: "i"(RISCV_CUSTOM0));
 }
 
-// switch execution to single thread zero
+// switch execution to single thread0
 inline void vx_tmc_one() {
     __asm__ volatile (
         "li a0, 1\n\t"  // Load immediate value 1 into a0 (x10) register
@@ -155,63 +155,63 @@ inline void vx_barrier(int barried_id, int num_warps) {
 }
 
 // Return current thread identifier
-inline int vx_thread_id() {
+inline __attribute__((const)) int vx_thread_id() {
     int ret;
     __asm__ volatile ("csrr %0, %1" : "=r"(ret) : "i"(VX_CSR_THREAD_ID));
     return ret;
 }
 
 // Return current warp identifier
-inline int vx_warp_id() {
+inline __attribute__((const)) int vx_warp_id() {
     int ret;
     __asm__ volatile ("csrr %0, %1" : "=r"(ret) : "i"(VX_CSR_WARP_ID));
     return ret;
 }
 
 // Return current core identifier
-inline int vx_core_id() {
+inline __attribute__((const)) int vx_core_id() {
     int ret;
     __asm__ volatile ("csrr %0, %1" : "=r"(ret) : "i"(VX_CSR_CORE_ID));
     return ret;
 }
 
 // Return active threads mask
-inline int vx_active_threads() {
+inline __attribute__((const)) int vx_active_threads() {
     int ret;
     __asm__ volatile ("csrr %0, %1" : "=r"(ret) : "i"(VX_CSR_ACTIVE_THREADS));
     return ret;
 }
 
 // Return active warps mask
-inline int vx_active_warps() {
+inline __attribute__((const)) int vx_active_warps() {
     int ret;
     __asm__ volatile ("csrr %0, %1" : "=r"(ret) : "i"(VX_CSR_ACTIVE_WARPS));
     return ret;
 }
 
 // Return the number of threads per warp
-inline int vx_num_threads() {
+inline __attribute__((const)) int vx_num_threads() {
     int ret;
     __asm__ volatile ("csrr %0, %1" : "=r"(ret) : "i"(VX_CSR_NUM_THREADS));
     return ret;
 }
 
 // Return the number of warps per core
-inline int vx_num_warps() {
+inline __attribute__((const)) int vx_num_warps() {
     int ret;
     __asm__ volatile ("csrr %0, %1" : "=r"(ret) : "i"(VX_CSR_NUM_WARPS));
     return ret;
 }
 
 // Return the number of cores per cluster
-inline int vx_num_cores() {
+inline __attribute__((const)) int vx_num_cores() {
     int ret;
     __asm__ volatile ("csrr %0, %1" : "=r"(ret) : "i"(VX_CSR_NUM_CORES));
     return ret;
 }
 
 // Return the hart identifier (thread id accross the processor)
-inline int vx_hart_id() {
+inline __attribute__((const)) int vx_hart_id() {
     int ret;
     __asm__ volatile ("csrr %0, %1" : "=r"(ret) : "i"(VX_CSR_MHARTID));
     return ret;
@@ -221,22 +221,64 @@ inline void vx_fence() {
     __asm__ volatile ("fence iorw, iorw");
 }
 
-//Matrix load
-inline void vx_matrix_load(unsigned dest, unsigned  addr)
-{
-    __asm__ volatile (".insn i 0x7b, 0, x0, %0(%1)" :: "i"(dest), "r"(addr));
+// Returns 1 if every active lane’s predicate is true, 0 otherwise.
+inline __attribute__((const)) int vx_vote_all(int predicate) {
+    int ret;
+    __asm__ volatile (".insn r %1, 0, 1, %0, %2, x0" : "=r"(ret) : "i"(RISCV_CUSTOM0), "r"(predicate));
+    return ret;
 }
 
-//Matrix Store
-inline void vx_matrix_store(unsigned  addr)
-{
-    __asm__ volatile (".insn i 0x7b, 1, x0, 0(%0)" :: "r"(addr));
+// Returns 1 if any active lane’s predicate is true, 0 if none are true.
+inline __attribute__((const)) int vx_vote_any(int predicate) {
+    int ret;
+    __asm__ volatile (".insn r %1, 1, 1, %0, %2, x0" : "=r"(ret) : "i"(RISCV_CUSTOM0), "r"(predicate));
+    return ret;
 }
 
-//Matrix Mul
-inline void vx_matrix_mul()
-{
-    __asm__ volatile (".insn i 0x7b, 2, x0, 0(x0)");
+//  Returns 1 if the predicate is uniform across all active lanes.
+inline __attribute__((const)) int vx_vote_uni(int predicate) {
+    int ret;
+    __asm__ volatile (".insn r %1, 2, 1, %0, %2, x0" : "=r"(ret) : "i"(RISCV_CUSTOM0), "r"(predicate));
+    return ret;
+}
+
+// Returns a bitmask of the warp, with bit i set if lane i’s predicate is true.
+inline __attribute__((const)) int vx_vote_ballot(int predicate) {
+    int ret;
+    __asm__ volatile (".insn r %1, 3, 1, %0, %2, x0" : "=r"(ret) : "i"(RISCV_CUSTOM0), "r"(predicate));
+    return ret;
+}
+
+// Shift values up by b lanes within each sub-group; out-of-range lanes keep their own value.
+inline __attribute__((const)) int vx_shfl_up(size_t value, int bval, int cval, int mask) {
+    int ret;
+    int bc = (mask << 12) | (cval << 6) | bval;
+    __asm__ volatile (".insn r %1, 4, 1, %0, %2, %3" : "=r"(ret) : "i"(RISCV_CUSTOM0), "r"(value), "r"(bc));
+    return ret;
+}
+
+// Shift values down by b lanes within each sub-group; out-of-range lanes keep their own value.
+inline __attribute__((const)) int vx_shfl_down(size_t value, int bval, int cval, int mask) {
+    int ret;
+    int bc = (mask << 12) | (cval << 6) | bval;
+    __asm__ volatile (".insn r %1, 5, 1, %0, %2, %3" : "=r"(ret) : "i"(RISCV_CUSTOM0), "r"(value), "r"(bc));
+    return ret;
+}
+
+// “Butterfly” exchange using XOR with b as a bit‐mask: each lane swaps with lane ⊕ b.
+inline __attribute__((const)) int vx_shfl_bfly(size_t value, int bval, int cval, int mask) {
+    int ret;
+    int bc = (mask << 12) | (cval << 6) | bval;
+    __asm__ volatile (".insn r %1, 6, 1, %0, %2, %3" : "=r"(ret) : "i"(RISCV_CUSTOM0), "r"(value), "r"(bc));
+    return ret;
+}
+
+// Gather from an explicit index: every lane reads the value from base + idx, where idx = b[i].
+inline __attribute__((const)) int vx_shfl_idx(size_t value, int bval, int cval, int mask) {
+    int ret;
+    int bc = (mask << 12) | (cval << 6) | bval;
+    __asm__ volatile (".insn r %1, 7, 1, %0, %2, %3" : "=r"(ret) : "i"(RISCV_CUSTOM0), "r"(value), "r"(bc));
+    return ret;
 }
 
 #ifdef __cplusplus

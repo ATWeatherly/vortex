@@ -78,6 +78,13 @@ void gen_ref_data(std::vector<int>& ref_data, const std::vector<int>& src_data, 
   for (int i = 0; i < (int)size; ++i) {
     int value = src_data.at(i);
 
+    uint32_t samples = size;
+    while (samples--) {
+      if ((i & 0x1) == 0) {
+        value += 1;
+      }
+    }
+
     // none taken
     if (i >= 0x7fffffff) {
       value = 0;
@@ -190,8 +197,8 @@ int main(int argc, char *argv[]) {
   std::cout << "upload source buffer" << std::endl;
   RT_CHECK(vx_copy_to_dev(src_buffer, h_src.data(), 0, buf_size));
 
-  // upload program
-  std::cout << "upload program" << std::endl;
+  // Upload kernel binary
+  std::cout << "Upload kernel binary" << std::endl;
   RT_CHECK(vx_upload_kernel_file(device, kernel_file, &krnl_buffer));
 
   // upload kernel argument

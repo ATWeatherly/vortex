@@ -50,7 +50,7 @@ public:
   static const char* type_str() {
     return "float";
   }
-  static int generate() {
+  static float generate() {
     return static_cast<float>(rand()) / RAND_MAX;
   }
   static bool compare(float a, float b, int index, int errors) {
@@ -176,8 +176,8 @@ int main(int argc, char *argv[]) {
   std::cout << "upload source buffer1" << std::endl;
   RT_CHECK(vx_copy_to_dev(src1_buffer, h_src1.data(), 0, buf_size));
 
-  // upload program
-  std::cout << "upload program" << std::endl;
+  // Upload kernel binary
+  std::cout << "Upload kernel binary" << std::endl;
   RT_CHECK(vx_upload_kernel_file(device, kernel_file, &krnl_buffer));
 
   // upload kernel argument
