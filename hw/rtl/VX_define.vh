@@ -1,416 +1,470 @@
-`ifndef VX_DEFINE
-`define VX_DEFINE
+// Copyright © 2019-2023
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+`ifndef VX_DEFINE_VH
+`define VX_DEFINE_VH
 
 `include "VX_platform.vh"
 `include "VX_config.vh"
+`include "VX_types.vh"
 
-///////////////////////////////////////////////////////////////////////////////
+`ifdef ICACHE_ENABLE
+    `define L1_ENABLE
+`endif
 
-`define NW_BITS         `LOG2UP(`NUM_WARPS)
+`ifdef DCACHE_ENABLE
+    `define L1_ENABLE
+`endif
 
-`define NT_BITS         `LOG2UP(`NUM_THREADS)
-
-`define NC_BITS         `LOG2UP(`NUM_CORES)
-
-`define NB_BITS         `LOG2UP(`NUM_BARRIERS)
-
-`define NUM_IREGS       32
-
-`define NRI_BITS        `LOG2UP(`NUM_IREGS)
-
-`define NTEX_BITS       `LOG2UP(`NUM_TEX_UNITS)
-
-`ifdef EXT_F_ENABLE
-`define NUM_REGS        (2 * `NUM_IREGS)
+`ifndef NDEBUG
+`define UUID_ENABLE
 `else
-`define NUM_REGS        `NUM_IREGS
+`ifdef SCOPE
+`define UUID_ENABLE
+`endif
 `endif
 
-`define NR_BITS         `LOG2UP(`NUM_REGS)
+///////////////////////////////////////////////////////////////////////////////
 
-`define CSR_ADDR_BITS   12
+`define ITF_TO_AOS(prefix, itf, count, dataw) \
+    wire [(count)-1:0] prefix``_valid; \
+    wire [(count)-1:0][(dataw)-1:0] prefix``_data; \
+    wire [(count)-1:0] prefix``_ready; \
+    /* verilator lint_off GENUNNAMED */ \
+    for (genvar i = 0; i < (count); ++i) begin \
+        assign prefix``_valid[i] = itf[i].valid; \
+        assign prefix``_data[i] = itf[i].data; \
+        assign itf[i].ready = prefix``_ready[i]; \
+    end \
+    /* verilator lint_on GENUNNAMED */
 
-`define CSR_WIDTH       12
+`define AOS_TO_ITF(prefix, itf, count, dataw) \
+    wire [(count)-1:0] prefix``_valid; \
+    wire [(count)-1:0][(dataw)-1:0] prefix``_data; \
+    wire [(count)-1:0] prefix``_ready; \
+    /* verilator lint_off GENUNNAMED */ \
+    for (genvar i = 0; i < (count); ++i) begin \
+        assign itf[i].valid = prefix``_valid[i]; \
+        assign itf[i].data = prefix``_data[i]; \
+        assign prefix``_ready[i] = itf[i].ready; \
+    end \
+    /* verilator lint_on GENUNNAMED */
 
-`define PERF_CTR_BITS   44
+`define ITF_TO_AOS_V(prefix, itf, count, dataw) \
+    wire [(count)-1:0] prefix``_valid; \
+    wire [(count)-1:0][(dataw)-1:0] prefix``_data; \
+    /* verilator lint_off GENUNNAMED */ \
+    for (genvar i = 0; i < (count); ++i) begin \
+        assign prefix``_valid[i] = itf[i].valid; \
+        assign prefix``_data[i] = itf[i].data; \
+    end \
+    /* verilator lint_on GENUNNAMED */
 
-`define UUID_BITS       44
+`define AOS_TO_ITF_V(prefix, itf, count, dataw) \
+    wire [(count)-1:0] prefix``_valid; \
+    wire [(count)-1:0][(dataw)-1:0] prefix``_data; \
+    /* verilator lint_off GENUNNAMED */ \
+    for (genvar i = 0; i < (count); ++i) begin \
+        assign itf[i].valid = prefix``_valid[i]; \
+        assign itf[i].data = prefix``_data[i]; \
+    end \
+    /* verilator lint_on GENUNNAMED */
+
+`define ITF_TO_AOS_REQ(prefix, itf, count, dataw) \
+    wire [(count)-1:0] prefix``_valid; \
+    wire [(count)-1:0][(dataw)-1:0] prefix``_data; \
+    wire [(count)-1:0] prefix``_ready; \
+    /* verilator lint_off GENUNNAMED */ \
+    for (genvar i = 0; i < (count); ++i) begin \
+        assign prefix``_valid[i] = itf[i].req_valid; \
+        assign prefix``_data[i]  = itf[i].req_data; \
+        assign itf[i].req_ready = prefix``_ready[i]; \
+    end \
+    /* verilator lint_on GENUNNAMED */
+
+`define AOS_TO_ITF_REQ(prefix, itf, count, dataw) \
+    wire [(count)-1:0] prefix``_valid; \
+    wire [(count)-1:0][(dataw)-1:0] prefix``_data; \
+    wire [(count)-1:0] prefix``_ready; \
+    /* verilator lint_off GENUNNAMED */ \
+    for (genvar i = 0; i < (count); ++i) begin \
+        assign itf[i].req_valid = prefix``_valid[i]; \
+        assign itf[i].req_data  = prefix``_data[i]; \
+        assign prefix``_ready[i] = itf[i].req_ready; \
+    end \
+    /* verilator lint_on GENUNNAMED */
+
+`define ITF_TO_AOS_REQ_V(prefix, itf, count, dataw) \
+    wire [(count)-1:0] prefix``_valid; \
+    wire [(count)-1:0][(dataw)-1:0] prefix``_data; \
+    /* verilator lint_off GENUNNAMED */ \
+    for (genvar i = 0; i < (count); ++i) begin \
+        assign prefix``_valid[i] = itf[i].req_valid; \
+        assign prefix``_data[i] = itf[i].req_data; \
+    end \
+    /* verilator lint_on GENUNNAMED */
+
+`define AOS_TO_ITF_REQ_V(prefix, itf, count, dataw) \
+    wire [(count)-1:0] prefix``_valid; \
+    wire [(count)-1:0][(dataw)-1:0] prefix``_data; \
+    /* verilator lint_off GENUNNAMED */ \
+    for (genvar i = 0; i < (count); ++i) begin \
+        assign itf[i].req_valid = prefix``_valid[i]; \
+        assign itf[i].req_data = prefix``_data[i]; \
+    end \
+    /* verilator lint_on GENUNNAMED */
+
+`define ITF_TO_AOS_RSP(prefix, itf, count, dataw) \
+    wire [(count)-1:0] prefix``_valid; \
+    wire [(count)-1:0][(dataw)-1:0] prefix``_data; \
+    wire [(count)-1:0] prefix``_ready; \
+    /* verilator lint_off GENUNNAMED */ \
+    for (genvar i = 0; i < (count); ++i) begin \
+        assign prefix``_valid[i] = itf[i].rsp_valid; \
+        assign prefix``_data[i] = itf[i].rsp_data; \
+        assign itf[i].rsp_ready = prefix``_ready[i]; \
+    end \
+    /* verilator lint_on GENUNNAMED */
+
+`define AOS_TO_ITF_RSP(prefix, itf, count, dataw) \
+    wire [(count)-1:0] prefix``_valid; \
+    wire [(count)-1:0][(dataw)-1:0] prefix``_data; \
+    wire [(count)-1:0] prefix``_vready; \
+    /* verilator lint_off GENUNNAMED */ \
+    for (genvar i = 0; i < (count); ++i) begin \
+        assign itf[i].rsp_valid = prefix``_valid[i]; \
+        assign itf[i].rsp_data = prefix``_data[i]; \
+        assign prefix``_ready[i] = itf[i].rsp_ready; \
+    end \
+    /* verilator lint_off GENUNNAMED */
+
+`define ITF_TO_AOS_RSP_V(prefix, itf, count, dataw) \
+    wire [(count)-1:0] prefix``_valid; \
+    wire [(count)-1:0][(dataw)-1:0] prefix``_data; \
+    /* verilator lint_off GENUNNAMED */ \
+    for (genvar i = 0; i < (count); ++i) begin \
+        assign prefix``_valid[i] = itf[i].rsp_valid; \
+        assign prefix``_data[i] = itf[i].rsp_data; \
+    end \
+    /* verilator lint_off GENUNNAMED */
+
+`define AOS_TO_ITF_RSP_V(prefix, itf, count, dataw) \
+    wire [(count)-1:0] prefix``_valid; \
+    wire [(count)-1:0][(dataw)-1:0] prefix``_data; \
+    /* verilator lint_off GENUNNAMED */ \
+    for (genvar i = 0; i < (count); ++i) begin \
+        assign itf[i].rsp_valid = prefix``_valid[i]; \
+        assign itf[i].rsp_data = prefix``_data[i]; \
+    end \
+    /* verilator lint_off GENUNNAMED */
+
+`define REDUCE(__op, __out, __in, __n, __outw) \
+    /* verilator lint_off GENUNNAMED */ \
+    if (__n > 1) begin \
+        reg [(__outw)-1:0] result; \
+        always @(*) begin \
+            result = (__outw)'(__in[0]); \
+            for (integer __i = 1; __i < __n; __i++) begin \
+                result = result __op (__outw)'(__in[__i]); \
+            end \
+        end \
+        assign __out = result; \
+    end else begin \
+        assign __out = (__outw)'(__in[0]); \
+    end \
+    /* verilator lint_off GENUNNAMED */
+
+`define REDUCE_TREE(__op, __out, __in, __n, __outw, __inw) \
+    VX_reduce_tree #( \
+        .IN_W  (__inw), \
+        .OUT_W (__outw), \
+        .N     (__n), \
+        .OP    ("__op") \
+    ) reduce`__LINE__ ( \
+        .data_in(__in), \
+        .data_out(__out) \
+    )
+
+`define POP_COUNT_EX(out, in, model) \
+    VX_popcount #( \
+        .N ($bits(in)), \
+        .MODEL (model) \
+    ) __pop_count_ex`__LINE__ ( \
+        .data_in  (in), \
+        .data_out (out) \
+    )
+
+`define POP_COUNT(out, in) `POP_COUNT_EX(out, in, 1)
+
+`define CONCAT(out, left_in, right_in, L, R) \
+    /* verilator lint_off GENUNNAMED */ \
+    if ((L) != 0 && (R) == 0) begin \
+        assign out = left_in; \
+    end else if ((L) == 0 && (R) != 0) begin \
+        assign out = right_in; \
+    end else if ((L) != 0 && (R) != 0) begin \
+        assign out = {left_in, right_in}; \
+    end \
+    /* verilator lint_off GENUNNAMED */
+
+`define BUFFER_EX(dst, src, ena, resetw, latency) \
+    VX_pipe_register #( \
+        .DATAW  ($bits(dst)), \
+        .RESETW (resetw), \
+        .DEPTH  (latency) \
+    ) __buffer_ex`__LINE__ ( \
+        .clk      (clk), \
+        .reset    (reset), \
+        .enable   (ena), \
+        .data_in  (src), \
+        .data_out (dst) \
+    )
+
+`define BUFFER(dst, src) `BUFFER_EX(dst, src, 1'b1, $bits(dst), 1)
+
+`define NEG_EDGE(dst, src) \
+    VX_edge_trigger #( \
+        .POS  (0), \
+        .INIT (0) \
+    ) __neg_edge`__LINE__ ( \
+        .clk      (clk), \
+        .reset    (1'b0), \
+        .data_in  (src), \
+        .data_out (dst) \
+    )
 
 ///////////////////////////////////////////////////////////////////////////////
 
-`define EX_NOP          3'h0
-`define EX_ALU          3'h1
-`define EX_LSU          3'h2
-`define EX_CSR          3'h3
-`define EX_FPU          3'h4
-`define EX_GPU          3'h5
-`define EX_BITS         3
+`define ARB_SEL_BITS(I, O)  ((I > O) ? `CLOG2(`CDIV(I, O)) : 0)
 
 ///////////////////////////////////////////////////////////////////////////////
 
-`define INST_LUI        7'b0110111
-`define INST_AUIPC      7'b0010111
-`define INST_JAL        7'b1101111
-`define INST_JALR       7'b1100111
-`define INST_B          7'b1100011 // branch instructions
-`define INST_L          7'b0000011 // load instructions
-`define INST_S          7'b0100011 // store instructions
-`define INST_I          7'b0010011 // immediate instructions
-`define INST_R          7'b0110011 // register instructions
-`define INST_FENCE      7'b0001111 // Fence instructions
-`define INST_SYS        7'b1110011 // system instructions
+`define CACHE_MEM_TAG_WIDTH(mshr_size, num_banks, mem_ports, uuid_width) \
+        (uuid_width + `CLOG2(mshr_size) + `CLOG2(`CDIV(num_banks, mem_ports)))
 
-`define INST_FL         7'b0000111 // float load instruction
-`define INST_FS         7'b0100111 // float store  instruction
-`define INST_FMADD      7'b1000011  
-`define INST_FMSUB      7'b1000111
-`define INST_FNMSUB     7'b1001011
-`define INST_FNMADD     7'b1001111 
-`define INST_FCI        7'b1010011 // float common instructions
+`define CACHE_BYPASS_TAG_WIDTH(num_reqs, mem_ports, line_size, word_size, tag_width) \
+        (`CLOG2(`CDIV(num_reqs, mem_ports)) + `CLOG2(line_size / word_size) + tag_width)
 
-`define INST_GPGPU      7'b1101011
-`define INST_GPU        7'b1011011
-
-`define INST_TEX       7'b0101011
+`define CACHE_NC_MEM_TAG_WIDTH(mshr_size, num_banks, num_reqs, mem_ports, line_size, word_size, tag_width, uuid_width) \
+        (`MAX(`CACHE_MEM_TAG_WIDTH(mshr_size, num_banks, mem_ports, uuid_width), `CACHE_BYPASS_TAG_WIDTH(num_reqs, mem_ports, line_size, word_size, tag_width)) + 1)
 
 ///////////////////////////////////////////////////////////////////////////////
 
-`define INST_FRM_RNE    3'b000  // round to nearest even
-`define INST_FRM_RTZ    3'b001  // round to zero
-`define INST_FRM_RDN    3'b010  // round to -inf
-`define INST_FRM_RUP    3'b011  // round to +inf
-`define INST_FRM_RMM    3'b100  // round to nearest max magnitude
-`define INST_FRM_DYN    3'b111  // dynamic mode
-`define INST_FRM_BITS   3
+`define CACHE_CLUSTER_CORE_ARB_TAG(tag_width, num_inputs, num_caches) \
+        (tag_width + `ARB_SEL_BITS(num_inputs, `UP(num_caches)))
+
+`define CACHE_CLUSTER_MEM_ARB_TAG(tag_width, num_caches) \
+        (tag_width + `ARB_SEL_BITS(`UP(num_caches), 1))
+
+`define CACHE_CLUSTER_MEM_TAG_WIDTH(mshr_size, num_banks, mem_ports, num_caches, uuid_width) \
+        `CACHE_CLUSTER_MEM_ARB_TAG(`CACHE_MEM_TAG_WIDTH(mshr_size, num_banks, mem_ports, uuid_width), num_caches)
+
+`define CACHE_CLUSTER_BYPASS_MEM_TAG_WIDTH(num_reqs, mem_ports, line_size, word_size, tag_width, num_inputs, num_caches) \
+        `CACHE_CLUSTER_MEM_ARB_TAG(`CACHE_BYPASS_TAG_WIDTH(num_reqs, mem_ports, line_size, word_size, `CACHE_CLUSTER_CORE_ARB_TAG(tag_width, num_inputs, num_caches)), num_caches)
+
+`define CACHE_CLUSTER_NC_MEM_TAG_WIDTH(mshr_size, num_banks, num_reqs, mem_ports, line_size, word_size, tag_width, num_inputs, num_caches, uuid_width) \
+        `CACHE_CLUSTER_MEM_ARB_TAG(`CACHE_NC_MEM_TAG_WIDTH(mshr_size, num_banks, num_reqs, mem_ports, line_size, word_size, `CACHE_CLUSTER_CORE_ARB_TAG(tag_width, num_inputs, num_caches), uuid_width), num_caches)
+
+`define TO_FULL_ADDR(x) {x, (`MEM_ADDR_WIDTH-$bits(x))'(0)}
 
 ///////////////////////////////////////////////////////////////////////////////
 
-`define INST_OP_BITS    4
-`define INST_MOD_BITS   3
-
-///////////////////////////////////////////////////////////////////////////////
-
-`define INST_ALU_ADD         4'b0000
-`define INST_ALU_LUI         4'b0010
-`define INST_ALU_AUIPC       4'b0011
-`define INST_ALU_SLTU        4'b0100
-`define INST_ALU_SLT         4'b0101
-`define INST_ALU_SRL         4'b1000
-`define INST_ALU_SRA         4'b1001
-`define INST_ALU_SUB         4'b1011
-`define INST_ALU_AND         4'b1100
-`define INST_ALU_OR          4'b1101
-`define INST_ALU_XOR         4'b1110
-`define INST_ALU_SLL         4'b1111
-`define INST_ALU_OTHER       4'b0111
-`define INST_ALU_BITS        4
-`define INST_ALU_OP(x)       x[`INST_ALU_BITS-1:0]
-`define INST_ALU_OP_CLASS(x) x[3:2]
-`define INST_ALU_SIGNED(x)   x[0]
-`define INST_ALU_IS_BR(x)    x[0]
-`define INST_ALU_IS_MUL(x)   x[1]
-
-`define INST_BR_EQ           4'b0000
-`define INST_BR_NE           4'b0010
-`define INST_BR_LTU          4'b0100 
-`define INST_BR_GEU          4'b0110 
-`define INST_BR_LT           4'b0101
-`define INST_BR_GE           4'b0111
-`define INST_BR_JAL          4'b1000
-`define INST_BR_JALR         4'b1001
-`define INST_BR_ECALL        4'b1010
-`define INST_BR_EBREAK       4'b1011
-`define INST_BR_URET         4'b1100
-`define INST_BR_SRET         4'b1101
-`define INST_BR_MRET         4'b1110
-`define INST_BR_OTHER        4'b1111
-`define INST_BR_BITS         4
-`define INST_BR_NEG(x)       x[1]
-`define INST_BR_LESS(x)      x[2]
-`define INST_BR_STATIC(x)    x[3]
-
-`define INST_MUL_MUL         3'h0
-`define INST_MUL_MULH        3'h1
-`define INST_MUL_MULHSU      3'h2
-`define INST_MUL_MULHU       3'h3
-`define INST_MUL_DIV         3'h4
-`define INST_MUL_DIVU        3'h5
-`define INST_MUL_REM         3'h6
-`define INST_MUL_REMU        3'h7
-`define INST_MUL_BITS        3
-`define INST_MUL_IS_DIV(x)   x[2]
-
-`define INST_FMT_B           3'b000
-`define INST_FMT_H           3'b001
-`define INST_FMT_W           3'b010
-`define INST_FMT_BU          3'b100
-`define INST_FMT_HU          3'b101
-
-`define INST_LSU_LB          4'b0000 
-`define INST_LSU_LH          4'b0001
-`define INST_LSU_LW          4'b0010
-`define INST_LSU_LBU         4'b0100
-`define INST_LSU_LHU         4'b0101
-`define INST_LSU_SB          4'b1000 
-`define INST_LSU_SH          4'b1001
-`define INST_LSU_SW          4'b1010
-`define INST_LSU_BITS        4
-`define INST_LSU_FMT(x)      x[2:0]
-`define INST_LSU_WSIZE(x)    x[1:0]
-`define INST_LSU_IS_MEM(x)   (3'h0 == x)
-`define INST_LSU_IS_FENCE(x) (3'h1 == x)
-`define INST_LSU_IS_PREFETCH(x) (3'h2 == x)
-
-`define INST_FENCE_BITS      1
-`define INST_FENCE_D         1'h0
-`define INST_FENCE_I         1'h1
-
-`define INST_CSR_RW          2'h1
-`define INST_CSR_RS          2'h2
-`define INST_CSR_RC          2'h3
-`define INST_CSR_OTHER       2'h0
-`define INST_CSR_BITS        2
-
-`define INST_FPU_ADD         4'h0 
-`define INST_FPU_SUB         4'h4 
-`define INST_FPU_MUL         4'h8 
-`define INST_FPU_DIV         4'hC
-`define INST_FPU_CVTWS       4'h1  // FCVT.W.S
-`define INST_FPU_CVTWUS      4'h5  // FCVT.WU.S
-`define INST_FPU_CVTSW       4'h9  // FCVT.S.W
-`define INST_FPU_CVTSWU      4'hD  // FCVT.S.WU
-`define INST_FPU_SQRT        4'h2
-`define INST_FPU_CLASS       4'h6  
-`define INST_FPU_CMP         4'hA
-`define INST_FPU_MISC        4'hE  // SGNJ, SGNJN, SGNJX, FMIN, FMAX, MVXW, MVWX 
-`define INST_FPU_MADD        4'h3 
-`define INST_FPU_MSUB        4'h7   
-`define INST_FPU_NMSUB       4'hB   
-`define INST_FPU_NMADD       4'hF
-`define INST_FPU_BITS        4
-
-`define INST_GPU_TMC         4'h0
-`define INST_GPU_WSPAWN      4'h1 
-`define INST_GPU_SPLIT       4'h2
-`define INST_GPU_JOIN        4'h3
-`define INST_GPU_BAR         4'h4
-`define INST_GPU_PRED        4'h5
-`define INST_GPU_TEX         4'h6
-`define INST_GPU_BITS        4
-
-///////////////////////////////////////////////////////////////////////////////
-
-`ifdef EXT_M_ENABLE
-    `define ISA_EXT_M   (1 << 12)
-`else
-    `define ISA_EXT_M   0
-`endif
-
-`ifdef EXT_F_ENABLE
-    `define ISA_EXT_F   (1 << 5)
-`else
-    `define ISA_EXT_F   0
-`endif
-
-`define ISA_CODE  (0 <<  0) // A - Atomic Instructions extension \
-                | (0 <<  1) // B - Tentatively reserved for Bit operations extension  \
-                | (0 <<  2) // C - Compressed extension \
-                | (0 <<  3) // D - Double precsision floating-point extension \
-                | (0 <<  4) // E - RV32E base ISA \
-                |`ISA_EXT_F // F - Single precsision floating-point extension \
-                | (0 <<  6) // G - Additional standard extensions present \
-                | (0 <<  7) // H - Hypervisor mode implemented \
-                | (1 <<  8) // I - RV32I/64I/128I base ISA \
-                | (0 <<  9) // J - Reserved \
-                | (0 << 10) // K - Reserved \
-                | (0 << 11) // L - Tentatively reserved for Bit operations extension \
-                |`ISA_EXT_M // M - Integer Multiply/Divide extension \
-                | (0 << 13) // N - User level interrupts supported \
-                | (0 << 14) // O - Reserved \
-                | (0 << 15) // P - Tentatively reserved for Packed-SIMD extension \
-                | (0 << 16) // Q - Quad-precision floating-point extension \
-                | (0 << 17) // R - Reserved \
-                | (0 << 18) // S - Supervisor mode implemented \
-                | (0 << 19) // T - Tentatively reserved for Transactional Memory extension \
-                | (1 << 20) // U - User mode implemented \
-                | (0 << 21) // V - Tentatively reserved for Vector extension \
-                | (0 << 22) // W - Reserved \
-                | (1 << 23) // X - Non-standard extensions present \
-                | (0 << 24) // Y - Reserved \
-                | (0 << 25) // Z - Reserved
-
-///////////////////////////////////////////////////////////////////////////////
-
-// non-cacheable tag bits
-`define NC_TAG_BIT              1
-
-// texture tag bits
-`define TEX_TAG_BIT             1
-
-// cache address type bits
-`define CACHE_ADDR_TYPE_BITS    (`NC_TAG_BIT + `SM_ENABLE)
-
-////////////////////////// Icache Configurable Knobs //////////////////////////
-
-// Cache ID
-`define ICACHE_ID               (32'(`L3_ENABLE) + 32'(`L2_ENABLE) * `NUM_CLUSTERS + CORE_ID * 3 + 0)
-
-// Word size in bytes
-`define ICACHE_WORD_SIZE        4
-
-// Block size in bytes
-`define ICACHE_LINE_SIZE        `L1_BLOCK_SIZE
-
-// TAG sharing enable       
-`define ICACHE_CORE_TAG_ID_BITS `NW_BITS
-
-// Core request tag bits
-`define ICACHE_CORE_TAG_WIDTH   (`UUID_BITS + `ICACHE_CORE_TAG_ID_BITS)
-
-// Memory request data bits
-`define ICACHE_MEM_DATA_WIDTH   (`ICACHE_LINE_SIZE * 8)
-
-// Memory request address bits
-`define ICACHE_MEM_ADDR_WIDTH   (32 - `CLOG2(`ICACHE_LINE_SIZE))
-
-// Memory request tag bits
-`define ICACHE_MEM_TAG_WIDTH    `CLOG2(`ICACHE_MSHR_SIZE)
-
-////////////////////////// Dcache Configurable Knobs //////////////////////////
-
-// Cache ID
-`define DCACHE_ID               (32'(`L3_ENABLE) + 32'(`L2_ENABLE) * `NUM_CLUSTERS + CORE_ID * 3 + 1)
-
-// Word size in bytes
-`define DCACHE_WORD_SIZE        4
-
-// Block size in bytes
-`define DCACHE_LINE_SIZE        `L1_BLOCK_SIZE
-
-// Core request tag bits
-`define LSUQ_ADDR_BITS          `LOG2UP(`LSUQ_SIZE)
-`ifdef EXT_TEX_ENABLE
-`define LSU_TAG_ID_BITS         `MAX(`LSUQ_ADDR_BITS, 2)
-`define LSU_TEX_DCACHE_TAG_BITS (`UUID_BITS + `LSU_TAG_ID_BITS + `CACHE_ADDR_TYPE_BITS)
-`define DCACHE_CORE_TAG_ID_BITS (`LSU_TAG_ID_BITS + `CACHE_ADDR_TYPE_BITS + `TEX_TAG_BIT)
-`else 
-`define LSU_TAG_ID_BITS         `LSUQ_ADDR_BITS
-`define DCACHE_CORE_TAG_ID_BITS (`LSU_TAG_ID_BITS + `CACHE_ADDR_TYPE_BITS)
-`endif
-`define DCACHE_CORE_TAG_WIDTH   (`UUID_BITS + `DCACHE_CORE_TAG_ID_BITS)
- 
-// Memory request data bits
-`define DCACHE_MEM_DATA_WIDTH   (`DCACHE_LINE_SIZE * 8)
-
-// Memory request address bits
-`define DCACHE_MEM_ADDR_WIDTH   (32 - `CLOG2(`DCACHE_LINE_SIZE))
-
-// Memory byte enable bits
-`define DCACHE_MEM_BYTEEN_WIDTH `DCACHE_LINE_SIZE
-
-// Input request size
-`define DCACHE_NUM_REQS         `NUM_THREADS
-
-// Memory request tag bits
-`define _DMEM_ADDR_RATIO_W      $clog2(`DCACHE_LINE_SIZE / `DCACHE_WORD_SIZE)
-`define _DNC_MEM_TAG_WIDTH      ($clog2(`DCACHE_NUM_REQS) + `_DMEM_ADDR_RATIO_W + `DCACHE_CORE_TAG_WIDTH)
-`define DCACHE_MEM_TAG_WIDTH    `MAX((`CLOG2(`DCACHE_NUM_BANKS) + `CLOG2(`DCACHE_MSHR_SIZE) + `NC_TAG_BIT), `_DNC_MEM_TAG_WIDTH)
-
-// Merged D-cache/I-cache memory tag
-`define L1_MEM_TAG_WIDTH        (`MAX(`ICACHE_MEM_TAG_WIDTH, `DCACHE_MEM_TAG_WIDTH) + `CLOG2(2))
-
-////////////////////////// SM Configurable Knobs //////////////////////////////
-
-// Cache ID
-`define SMEM_ID                 (32'(`L3_ENABLE) + 32'(`L2_ENABLE) * `NUM_CLUSTERS + CORE_ID * 3 + 2)
-
-// Word size in bytes
-`define SMEM_WORD_SIZE          4
-
-// bank address offset
-`define SMEM_BANK_ADDR_OFFSET   `CLOG2(`STACK_SIZE / `SMEM_WORD_SIZE)
-
-// Input request size
-`define SMEM_NUM_REQS           `NUM_THREADS
-
-////////////////////////// L2cache Configurable Knobs /////////////////////////
-
-// Cache ID
-`define L2_CACHE_ID              (32'(`L3_ENABLE) + CLUSTER_ID)
-
-// Word size in bytes
-`define L2_WORD_SIZE             `DCACHE_LINE_SIZE
-
-// Block size in bytes
-`define L2_CACHE_LINE_SIZE       ((`L2_ENABLE) ? `MEM_BLOCK_SIZE : `L2_WORD_SIZE)
-
-// Input request tag bits
-`define L2_CORE_TAG_WIDTH        (`DCACHE_CORE_TAG_WIDTH + `CLOG2(`NUM_CORES))
-
-// Memory request data bits
-`define L2_MEM_DATA_WIDTH        (`L2_CACHE_LINE_SIZE * 8)
-
-// Memory request address bits
-`define L2_MEM_ADDR_WIDTH        (32 - `CLOG2(`L2_CACHE_LINE_SIZE))
-
-// Memory byte enable bits
-`define L2_MEM_BYTEEN_WIDTH      `L2_CACHE_LINE_SIZE
-
-// Input request size
-`define L2_NUM_REQS              `NUM_CORES
-
-// Memory request tag bits
-`define _L2_MEM_ADDR_RATIO_W     $clog2(`L2_CACHE_LINE_SIZE / `L2_WORD_SIZE)
-`define _L2_NC_MEM_TAG_WIDTH     ($clog2(`L2_NUM_REQS) + `_L2_MEM_ADDR_RATIO_W + `L1_MEM_TAG_WIDTH)
-`define _L2_MEM_TAG_WIDTH        `MAX((`CLOG2(`L2_NUM_BANKS) + `CLOG2(`L2_MSHR_SIZE) + `NC_TAG_BIT), `_L2_NC_MEM_TAG_WIDTH)
-`define L2_MEM_TAG_WIDTH         ((`L2_ENABLE) ? `_L2_MEM_TAG_WIDTH : (`L1_MEM_TAG_WIDTH + `CLOG2(`L2_NUM_REQS)))
-
-////////////////////////// L3cache Configurable Knobs /////////////////////////
-
-// Cache ID
-`define L3_CACHE_ID              0
-
-// Word size in bytes
-`define L3_WORD_SIZE             `L2_CACHE_LINE_SIZE
-
-// Block size in bytes
-`define L3_CACHE_LINE_SIZE       ((`L3_ENABLE) ? `MEM_BLOCK_SIZE : `L3_WORD_SIZE)
-
-// Input request tag bits
-`define L3_CORE_TAG_WIDTH        (`L2_CORE_TAG_WIDTH + `CLOG2(`NUM_CLUSTERS))
-
-// Memory request data bits
-`define L3_MEM_DATA_WIDTH        (`L3_CACHE_LINE_SIZE * 8)
-
-// Memory request address bits
-`define L3_MEM_ADDR_WIDTH        (32 - `CLOG2(`L3_CACHE_LINE_SIZE))
-
-// Memory byte enable bits
-`define L3_MEM_BYTEEN_WIDTH      `L3_CACHE_LINE_SIZE
-
-// Input request size
-`define L3_NUM_REQS              `NUM_CLUSTERS
-
-// Memory request tag bits
-`define _L3_MEM_ADDR_RATIO_W     $clog2(`L3_CACHE_LINE_SIZE / `L3_WORD_SIZE)
-`define _L3_NC_MEM_TAG_WIDTH     ($clog2(`L3_NUM_REQS) + `_L3_MEM_ADDR_RATIO_W + `L2_MEM_TAG_WIDTH)
-`define _L3_MEM_TAG_WIDTH        `MAX((`CLOG2(`L3_NUM_BANKS) + `CLOG2(`L3_MSHR_SIZE) + `NC_TAG_BIT), `_L3_NC_MEM_TAG_WIDTH)
-`define L3_MEM_TAG_WIDTH         ((`L3_ENABLE) ? `_L3_MEM_TAG_WIDTH : (`L2_MEM_TAG_WIDTH + `CLOG2(`L3_NUM_REQS)))
-
-///////////////////////////////////////////////////////////////////////////////
-
-`define VX_MEM_BYTEEN_WIDTH     `L3_MEM_BYTEEN_WIDTH   
-`define VX_MEM_ADDR_WIDTH       `L3_MEM_ADDR_WIDTH
-`define VX_MEM_DATA_WIDTH       `L3_MEM_DATA_WIDTH
-`define VX_MEM_TAG_WIDTH        `L3_MEM_TAG_WIDTH
-`define VX_CORE_TAG_WIDTH       `L3_CORE_TAG_WIDTH 
-`define VX_CSR_ID_WIDTH         `LOG2UP(`NUM_CLUSTERS * `NUM_CORES)
-
-`define TO_FULL_ADDR(x)         {x, (32-$bits(x))'(0)}
-
-///////////////////////////////////////////////////////////////////////////////
-
-`include "VX_fpu_types.vh"
-`include "VX_gpu_types.vh"
-
-`endif
+`define ASSIGN_VX_IF(dst, src) \
+    assign dst.valid = src.valid; \
+    assign dst.data  = src.data; \
+    assign src.ready = dst.ready
+
+`define ASSIGN_VX_MEM_BUS_IF(dst, src) \
+    assign dst.req_valid  = src.req_valid; \
+    assign dst.req_data   = src.req_data; \
+    assign src.req_ready  = dst.req_ready; \
+    assign src.rsp_valid  = dst.rsp_valid; \
+    assign src.rsp_data   = dst.rsp_data; \
+    assign dst.rsp_ready  = src.rsp_ready
+
+`define ASSIGN_VX_MEM_BUS_RO_IF(dst, src) \
+    assign dst.req_valid = src.req_valid; \
+    assign dst.req_data.rw = 0; \
+    assign dst.req_data.addr = src.req_data.addr; \
+    assign dst.req_data.data = '0; \
+    assign dst.req_data.byteen = '1; \
+    assign dst.req_data.flags = src.req_data.flags; \
+    assign dst.req_data.tag = src.req_data.tag; \
+    assign src.req_ready = dst.req_ready; \
+    assign src.rsp_valid = dst.rsp_valid; \
+    assign src.rsp_data.data = dst.rsp_data.data; \
+    assign src.rsp_data.tag = dst.rsp_data.tag; \
+    assign dst.rsp_ready = src.rsp_ready
+
+`define ASSIGN_VX_MEM_BUS_IF_EX(dst, src, TD, TS, UUID) \
+    /* verilator lint_off GENUNNAMED */ \
+    assign dst.req_valid = src.req_valid; \
+    assign dst.req_data.rw = src.req_data.rw; \
+    assign dst.req_data.addr = src.req_data.addr; \
+    assign dst.req_data.data = src.req_data.data; \
+    assign dst.req_data.byteen = src.req_data.byteen; \
+    assign dst.req_data.flags = src.req_data.flags; \
+    if (TD != TS) begin \
+        if (UUID != 0) begin \
+            if (TD > TS) begin \
+                assign dst.req_data.tag = {src.req_data.tag.uuid, {(TD-TS){1'b0}}, src.req_data.tag.value}; \
+            end else begin \
+                assign dst.req_data.tag = {src.req_data.tag.uuid, src.req_data.tag.value[TD-UUID-1:0]}; \
+            end \
+        end else begin \
+            if (TD > TS) begin \
+                assign dst.req_data.tag = {{(TD-TS){1'b0}}, src.req_data.tag}; \
+            end else begin \
+                assign dst.req_data.tag = src.req_data.tag[TD-1:0]; \
+            end \
+        end \
+    end else begin \
+        assign dst.req_data.tag = src.req_data.tag; \
+    end \
+    assign src.req_ready = dst.req_ready; \
+    assign src.rsp_valid = dst.rsp_valid; \
+    assign src.rsp_data.data = dst.rsp_data.data; \
+    if (TD != TS) begin \
+        if (UUID != 0) begin \
+            if (TD > TS) begin \
+                assign src.rsp_data.tag = {dst.rsp_data.tag.uuid, dst.rsp_data.tag.value[TS-UUID-1:0]}; \
+            end else begin \
+                assign src.rsp_data.tag = {dst.rsp_data.tag.uuid, {(TS-TD){1'b0}}, dst.rsp_data.tag.value}; \
+            end \
+        end else begin \
+            if (TD > TS) begin \
+                assign src.rsp_data.tag = dst.rsp_data.tag[TS-1:0]; \
+            end else begin \
+                assign src.rsp_data.tag = {{(TS-TD){1'b0}}, dst.rsp_data.tag}; \
+            end \
+        end \
+    end else begin \
+        assign src.rsp_data.tag = dst.rsp_data.tag; \
+    end \
+    assign dst.rsp_ready = src.rsp_ready \
+    /* verilator lint_off GENUNNAMED */
+
+`define INIT_VX_MEM_BUS_IF(itf) \
+    assign itf.req_valid = 0; \
+    assign itf.req_data = '0; \
+    `UNUSED_VAR (itf.req_ready) \
+    `UNUSED_VAR (itf.rsp_valid) \
+    `UNUSED_VAR (itf.rsp_data) \
+    assign itf.rsp_ready = 0;
+
+`define UNUSED_VX_MEM_BUS_IF(itf) \
+    `UNUSED_VAR (itf.req_valid) \
+    `UNUSED_VAR (itf.req_data) \
+    assign itf.req_ready = 0; \
+    assign itf.rsp_valid = 0; \
+    assign itf.rsp_data  = '0; \
+    `UNUSED_VAR (itf.rsp_ready)
+
+`define BUFFER_DCR_BUS_IF(dst, src, ena, latency) \
+    /* verilator lint_off GENUNNAMED */ \
+    if (latency != 0) begin \
+        VX_pipe_register #( \
+            .DATAW (1 + VX_DCR_ADDR_WIDTH + VX_DCR_DATA_WIDTH), \
+            .DEPTH (latency) \
+        ) pipe_reg ( \
+            .clk      (clk), \
+            .reset    (1'b0), \
+            .enable   (1'b1), \
+            .data_in  ({src.write_valid && ena, src.write_addr, src.write_data}), \
+            .data_out ({dst.write_valid, dst.write_addr, dst.write_data}) \
+        ); \
+    end else begin \
+        assign {dst.write_valid, dst.write_addr, dst.write_data} = {src.write_valid && ena, src.write_addr, src.write_data}; \
+    end \
+    /* verilator lint_off GENUNNAMED */
+
+`define PERF_COUNTER_ADD(dst, src, field, width, count, reg_enable) \
+    /* verilator lint_off GENUNNAMED */ \
+    if ((count) > 1) begin \
+        wire [(count)-1:0][(width)-1:0] __reduce_add_i_field; \
+        wire [(width)-1:0] __reduce_add_o_field; \
+        for (genvar __i = 0; __i < (count); ++__i) begin \
+            assign __reduce_add_i_field[__i] = src[__i].``field; \
+        end \
+        VX_reduce_tree #( \
+            .IN_W (width), \
+            .N    (count), \
+            .OP   ("+") \
+        ) __reduce_add_field ( \
+            __reduce_add_i_field, \
+            __reduce_add_o_field \
+        ); \
+        if (reg_enable) begin \
+            reg [(width)-1:0] __reduce_add_r_field; \
+            always @(posedge clk) begin \
+                if (reset) begin \
+                    __reduce_add_r_field <= '0; \
+                end else begin \
+                    __reduce_add_r_field <= __reduce_add_o_field; \
+                end \
+            end \
+            assign dst.``field = __reduce_add_r_field; \
+        end else begin \
+            assign dst.``field = __reduce_add_o_field; \
+        end \
+    end else begin \
+        assign dst.``field = src[0].``field; \
+    end \
+    /* verilator lint_off GENUNNAMED */
+
+`define ASSIGN_BLOCKED_WID(dst, src, block_idx, block_size) \
+    /* verilator lint_off GENUNNAMED */ \
+    if (block_size != 1) begin \
+        if (block_size != `NUM_WARPS) begin \
+            assign dst = {src[NW_WIDTH-1:`CLOG2(block_size)], `CLOG2(block_size)'(block_idx)}; \
+        end else begin \
+            assign dst = NW_WIDTH'(block_idx); \
+        end \
+    end else begin \
+        assign dst = src; \
+    end \
+    /* verilator lint_off GENUNNAMED */
+
+`define DECL_EXECUTE_T(__name__, __lanes__) \
+    typedef struct packed { \
+        logic [UUID_WIDTH-1:0]          uuid; \
+        logic [NW_WIDTH-1:0]            wid; \
+        logic [__lanes__-1:0]           tmask; \
+        logic [PC_BITS-1:0]             PC; \
+        logic [INST_ALU_BITS-1:0]       op_type; \
+        op_args_t                       op_args; \
+        logic                           wb; \
+        logic [NUM_REGS_BITS-1:0]       rd; \
+        logic [__lanes__-1:0][`XLEN-1:0] rs1_data; \
+        logic [__lanes__-1:0][`XLEN-1:0] rs2_data; \
+        logic [__lanes__-1:0][`XLEN-1:0] rs3_data; \
+        logic [`LOG2UP(`NUM_THREADS / __lanes__)-1:0] pid; \
+        logic                           sop; \
+        logic                           eop; \
+    } __name__
+
+`define DECL_RESULT_T(__name__, __lanes__) \
+    typedef struct packed { \
+        logic [UUID_WIDTH-1:0]      uuid; \
+        logic [NW_WIDTH-1:0]        wid; \
+        logic [__lanes__-1:0]       tmask; \
+        logic [PC_BITS-1:0]         PC; \
+        logic                       wb; \
+        logic [NUM_REGS_BITS-1:0]   rd; \
+        logic [__lanes__-1:0][`XLEN-1:0] data; \
+        logic [`LOG2UP(`NUM_THREADS / __lanes__)-1:0] pid; \
+        logic                       sop; \
+        logic                       eop; \
+    } __name__
+
+`endif // VX_DEFINE_VH

@@ -3,7 +3,10 @@
 #include <string.h>
 #include <vortex.h>
 #include <chrono>
+#include <vector>
 #include "common.h"
+
+#define NONCE  0xdeadbeef
 
 #define RT_CHECK(_expr)                                         \
    do {                                                         \
@@ -17,13 +20,16 @@
 
 ///////////////////////////////////////////////////////////////////////////////
 
-const char* kernel_file = "kernel.bin";
+const char* kernel_file = "kernel.vxbin";
 int test = -1;
 uint32_t count = 0;
 
 vx_device_h device = nullptr;
-vx_buffer_h staging_buf = nullptr;
-kernel_arg_t kernel_arg;
+vx_buffer_h src_buffer = nullptr;
+vx_buffer_h dst_buffer = nullptr;
+vx_buffer_h krnl_buffer = nullptr;
+vx_buffer_h args_buffer = nullptr;
+kernel_arg_t kernel_arg = {};
 
 static void show_usage() {
    std::cout << "Vortex Test." << std::endl;
@@ -32,7 +38,7 @@ static void show_usage() {
 
 static void parse_args(int argc, char **argv) {
   int c;
-  while ((c = getopt(argc, argv, "n:t:k:h?")) != -1) {
+  while ((c = getopt(argc, argv, "n:t:k:h")) != -1) {
     switch (c) {
     case 'n':
       count = atoi(optarg);
@@ -43,11 +49,10 @@ static void parse_args(int argc, char **argv) {
     case 'k':
       kernel_file = optarg;
       break;
-    case 'h': 
-    case '?': {
+    case 'h':
       show_usage();
       exit(0);
-    } break;
+      break;
     default:
       show_usage();
       exit(-1);
@@ -56,168 +61,138 @@ static void parse_args(int argc, char **argv) {
 }
 
 void cleanup() {
-  if (staging_buf) {
-    vx_buf_free(staging_buf);
-  }
   if (device) {
-    vx_mem_free(device, kernel_arg.src_addr);
-    vx_mem_free(device, kernel_arg.dst_addr);
+    vx_mem_free(src_buffer);
+    vx_mem_free(dst_buffer);
+    vx_mem_free(krnl_buffer);
+    vx_mem_free(args_buffer);
     vx_dev_close(device);
   }
 }
 
-uint64_t shuffle(int i, uint64_t value) {
+inline uint32_t shuffle(int i, uint32_t value) {
   return (value << i) | (value & ((1 << i)-1));;
 }
 
-int run_memcopy_test(uint32_t dev_addr, uint64_t value, int num_blocks) {
-  int errors = 0;
-  
-  auto time_start = std::chrono::high_resolution_clock::now();
+int run_memcopy_test(const kernel_arg_t& kernel_arg) {
+  uint32_t num_points = kernel_arg.count;
+  uint32_t buf_size = num_points * sizeof(int32_t);
 
-  int num_blocks_8 = (64 * num_blocks) / 8;
+  std::vector<uint32_t> h_src(num_points);
+  std::vector<uint32_t> h_dst(num_points);
 
   // update source buffer
-  for (int i = 0; i < num_blocks_8; ++i) {
-    ((uint64_t*)vx_host_ptr(staging_buf))[i] = shuffle(i, value);
+  for (uint32_t i = 0; i < num_points; ++i) {
+    h_src[i] = shuffle(i, NONCE);
   }
 
-  /*for (int i = 0; i < num_blocks; ++i) {
-    std::cout << "data[" << i << "]=0x";
-    for (int j = 7; j >= 0; --j) {
-      std::cout << std::hex << ((uint64_t*)vx_host_ptr(staging_buf))[i * 8 +j];
-    }
-    std::cout << std::endl;
-  }*/
-  
-  // write source buffer to local memory
+  auto time_start = std::chrono::high_resolution_clock::now();
+
+  // upload source buffer
   std::cout << "write source buffer to local memory" << std::endl;
   auto t0 = std::chrono::high_resolution_clock::now();
-  RT_CHECK(vx_copy_to_dev(staging_buf, dev_addr, 64 * num_blocks, 0));
+  RT_CHECK(vx_copy_to_dev(dst_buffer, h_src.data(), 0, buf_size));
   auto t1 = std::chrono::high_resolution_clock::now();
 
-  // clear destination buffer
-  for (int i = 0; i < num_blocks_8; ++i) {
-    ((uint64_t*)vx_host_ptr(staging_buf))[i] = 0;
-  }
-
-  // read destination buffer from local memory
+  // download destination buffer
   std::cout << "read destination buffer from local memory" << std::endl;
   auto t2 = std::chrono::high_resolution_clock::now();
-  RT_CHECK(vx_copy_from_dev(staging_buf, dev_addr, 64 * num_blocks, 0));
+  RT_CHECK(vx_copy_from_dev(h_dst.data(), dst_buffer, 0, buf_size));
   auto t3 = std::chrono::high_resolution_clock::now();
 
   // verify result
+  int errors = 0;
   std::cout << "verify result" << std::endl;
-  for (int i = 0; i < num_blocks_8; ++i) {
-    auto curr = ((uint64_t*)vx_host_ptr(staging_buf))[i];
-    auto ref = shuffle(i, value);
-    if (curr != ref) {
-      std::cout << "error at 0x" << std::hex << (dev_addr + 8 * i)
-                << ": actual 0x" << curr << ", expected 0x" << ref << std::endl;
+  for (uint32_t i = 0; i < num_points; ++i) {
+    auto cur = h_dst[i];
+    auto ref = shuffle(i, NONCE);
+    if (cur != ref) {
+      printf("*** error: [%d] expected=%d, actual=%d\n", i, ref, cur);
       ++errors;
     }
-  } 
-  
-  if (errors != 0) {
-    std::cout << "Found " << std::dec << errors << " errors!" << std::endl;
-    std::cout << "FAILED!" << std::endl;
-    return 1;
   }
 
   auto time_end = std::chrono::high_resolution_clock::now();
 
   double elapsed;
-  elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();  
+  elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
   printf("upload time: %lg ms\n", elapsed);
-  elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(t3 - t2).count();  
+  elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(t3 - t2).count();
   printf("download time: %lg ms\n", elapsed);
-  elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(time_end - time_start).count();  
+  elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(time_end - time_start).count();
   printf("Total elapsed time: %lg ms\n", elapsed);
 
-  return 0;
+  return errors;
 }
 
-int run_kernel_test(const kernel_arg_t& kernel_arg, 
-                    uint32_t buf_size, 
-                    uint32_t num_points) {
-  int errors = 0; 
+int run_kernel_test(const kernel_arg_t& kernel_arg) {
+  uint32_t num_points = kernel_arg.count;
+  uint32_t buf_size = num_points * sizeof(int32_t);
+
+  std::vector<uint32_t> h_src(num_points);
+  std::vector<uint32_t> h_dst(num_points);
+
+  // update source buffer
+  for (uint32_t i = 0; i < num_points; ++i) {
+    h_src[i] = shuffle(i, NONCE);
+  }
+
+  // Upload kernel binary
+  std::cout << "Upload kernel binary" << std::endl;
+  RT_CHECK(vx_upload_kernel_file(device, kernel_file, &krnl_buffer));
+
+  // upload kernel argument
+  std::cout << "upload kernel argument" << std::endl;
+  RT_CHECK(vx_upload_bytes(device, &kernel_arg, sizeof(kernel_arg_t), &args_buffer));
 
   auto time_start = std::chrono::high_resolution_clock::now();
-  
-  // update source buffer
-  {
-    auto buf_ptr = (int32_t*)vx_host_ptr(staging_buf);
-    for (uint32_t i = 0; i < num_points; ++i) {
-      buf_ptr[i] = i;
-    }
-  }
-  std::cout << "upload source buffer" << std::endl;
-  auto t0 = std::chrono::high_resolution_clock::now();
-  RT_CHECK(vx_copy_to_dev(staging_buf, kernel_arg.src_addr, buf_size, 0));
-  auto t1 = std::chrono::high_resolution_clock::now();
 
-  // clear destination buffer
-  {
-    auto buf_ptr = (int32_t*)vx_host_ptr(staging_buf);
-    for (uint32_t i = 0; i < num_points; ++i) {
-      buf_ptr[i] = 0xdeadbeef;
-    }
-  }  
-  std::cout << "clear destination buffer" << std::endl;
-  RT_CHECK(vx_copy_to_dev(staging_buf, kernel_arg.dst_addr, buf_size, 0));
+  // upload source buffer
+  auto t0 = std::chrono::high_resolution_clock::now();
+  RT_CHECK(vx_copy_to_dev(src_buffer, h_src.data(), 0, buf_size));
+  auto t1 = std::chrono::high_resolution_clock::now();
 
   // start device
   std::cout << "start execution" << std::endl;
   auto t2 = std::chrono::high_resolution_clock::now();
-  RT_CHECK(vx_start(device));
-  RT_CHECK(vx_ready_wait(device, MAX_TIMEOUT));
+  RT_CHECK(vx_start(device, krnl_buffer, args_buffer));
+  RT_CHECK(vx_ready_wait(device, VX_MAX_TIMEOUT));
   auto t3 = std::chrono::high_resolution_clock::now();
 
-  // read destination buffer from local memory
+  // download destination buffer
   std::cout << "read destination buffer from local memory" << std::endl;
   auto t4 = std::chrono::high_resolution_clock::now();
-  RT_CHECK(vx_copy_from_dev(staging_buf, kernel_arg.dst_addr, buf_size, 0));
+  RT_CHECK(vx_copy_from_dev(h_dst.data(), dst_buffer, 0, buf_size));
   auto t5 = std::chrono::high_resolution_clock::now();
 
-  
   // verify result
+  int errors = 0;
   std::cout << "verify result" << std::endl;
   for (uint32_t i = 0; i < num_points; ++i) {
-    int32_t curr = ((int32_t*)vx_host_ptr(staging_buf))[i];
-    int32_t ref = i;
-    if (curr != ref) {
-      std::cout << "error at result #" << std::dec << i
-                << std::hex << ": actual 0x" << curr << ", expected 0x" << ref << std::endl;
+    auto cur = h_dst[i];
+    auto ref = shuffle(i, NONCE);
+    if (cur != ref) {
+      printf("*** error: [%d] expected=%d, actual=%d\n", i, ref, cur);
       ++errors;
     }
-  } 
-  
-  if (errors != 0) {
-    std::cout << "Found " << std::dec << errors << " errors!" << std::endl;
-    std::cout << "FAILED!" << std::endl;
-    return 1;
   }
 
   auto time_end = std::chrono::high_resolution_clock::now();
 
   double elapsed;
-  elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();  
+  elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
   printf("upload time: %lg ms\n", elapsed);
-  elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(t3 - t2).count();  
+  elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(t3 - t2).count();
   printf("execute time: %lg ms\n", elapsed);
-  elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(t5 - t4).count();  
+  elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(t5 - t4).count();
   printf("download time: %lg ms\n", elapsed);
-  elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(time_end - time_start).count();  
+  elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(time_end - time_start).count();
   printf("Total elapsed time: %lg ms\n", elapsed);
 
-  return 0;
+  return errors;
 }
 
 int main(int argc, char *argv[]) {
-
-  size_t value; 
-  
   // parse command arguments
   parse_args(argc, argv);
 
@@ -228,60 +203,52 @@ int main(int argc, char *argv[]) {
   // open device connection
   std::cout << "open device connection" << std::endl;
   RT_CHECK(vx_dev_open(&device));
-  
-  uint64_t max_cores;
-  RT_CHECK(vx_dev_caps(device, VX_CAPS_MAX_CORES, &max_cores));
-  uint32_t num_points = count;
-  uint32_t num_blocks = (num_points * sizeof(int32_t) + 63) / 64;
-  uint32_t buf_size   = num_blocks * 64;
+
+  uint64_t num_cores;
+  RT_CHECK(vx_dev_caps(device, VX_CAPS_NUM_CORES, &num_cores));
+
+  uint32_t num_points = count * num_cores;
+  uint32_t buf_size = num_points * sizeof(int32_t);
 
   std::cout << "number of points: " << num_points << std::endl;
   std::cout << "buffer size: " << buf_size << " bytes" << std::endl;
 
   // allocate device memory
-  RT_CHECK(vx_mem_alloc(device, buf_size, &value));
-  kernel_arg.src_addr = value;
-  RT_CHECK(vx_mem_alloc(device, buf_size, &value));
-  kernel_arg.dst_addr = value;
+  std::cout << "allocate device memory" << std::endl;
+  RT_CHECK(vx_mem_alloc(device, buf_size, VX_MEM_READ, &src_buffer));
+  RT_CHECK(vx_mem_address(src_buffer, &kernel_arg.src_addr));
+  RT_CHECK(vx_mem_alloc(device, buf_size, VX_MEM_WRITE, &dst_buffer));
+  RT_CHECK(vx_mem_address(dst_buffer, &kernel_arg.dst_addr));
 
-  kernel_arg.count = num_points;
+  kernel_arg.count = count;
 
-  std::cout << "dev_src=" << std::hex << kernel_arg.src_addr << std::endl;
-  std::cout << "dev_dst=" << std::hex << kernel_arg.dst_addr << std::endl;
+  std::cout << "dev_src=0x" << std::hex << kernel_arg.src_addr << std::endl;
+  std::cout << "dev_dst=0x" << std::hex << kernel_arg.dst_addr << std::endl;
 
-  // allocate shared memory  
-  std::cout << "allocate shared memory" << std::endl;
-  uint32_t alloc_size = std::max<uint32_t>(buf_size, sizeof(kernel_arg_t));
-  RT_CHECK(vx_buf_alloc(device, alloc_size, &staging_buf));
+  int errors = 0;
 
-  // run tests  
+  // run tests
   if (0 == test || -1 == test) {
     std::cout << "run memcopy test" << std::endl;
-    RT_CHECK(run_memcopy_test(kernel_arg.src_addr, 0x0badf00d40ff40ff, num_blocks));
+    errors = run_memcopy_test(kernel_arg);
   }
 
   if (1 == test || -1 == test) {
-    // upload program
-    std::cout << "upload program" << std::endl;  
-    RT_CHECK(vx_upload_kernel_file(device, kernel_file));
-
-    // upload kernel argument
-    std::cout << "upload kernel argument" << std::endl;
-    {
-      auto buf_ptr = (void*)vx_host_ptr(staging_buf);
-      memcpy(buf_ptr, &kernel_arg, sizeof(kernel_arg_t));
-      RT_CHECK(vx_copy_to_dev(staging_buf, KERNEL_ARG_DEV_MEM_ADDR, sizeof(kernel_arg_t), 0));
-    }
-
     std::cout << "run kernel test" << std::endl;
-    RT_CHECK(run_kernel_test(kernel_arg, buf_size, num_points));
+    errors = run_kernel_test(kernel_arg);
   }
 
   // cleanup
-  std::cout << "cleanup" << std::endl;  
+  std::cout << "cleanup" << std::endl;
   cleanup();
 
-  std::cout << "Test PASSED" << std::endl;  
-  
+  if (errors != 0) {
+    std::cout << "Found " << std::dec << errors << " errors!" << std::endl;
+    std::cout << "FAILED!" << std::endl;
+    return errors;
+  }
+
+  std::cout << "Test PASSED" << std::endl;
+
   return 0;
 }

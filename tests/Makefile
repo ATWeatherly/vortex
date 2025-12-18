@@ -1,7 +1,13 @@
-all: runtime regression opencl riscv unittest
+ROOT_DIR := $(realpath ..)
+include $(ROOT_DIR)/config.mk
 
-runtime:
-	$(MAKE) -C runtime
+all: unittest kernel regression opencl riscv
+
+unittest:
+	$(MAKE) -C unittest
+
+kernel:
+	$(MAKE) -C kernel
 
 regression:
 	$(MAKE) -C regression
@@ -12,14 +18,11 @@ opencl:
 riscv:
 	$(MAKE) -C riscv
 
-unittest:
-	$(MAKE) -C unittest
-
 clean:
-	$(MAKE) clean -C runtime
-	$(MAKE) clean -C regression
-	$(MAKE) clean -C opencl
-	$(MAKE) clean -C riscv
-	$(MAKE) clean -C unittest
+	$(MAKE) -C unittest clean
+	$(MAKE) -C kernel clean
+	$(MAKE) -C regression clean
+	$(MAKE) -C opencl clean
+	$(MAKE) -C riscv clean
 
-.PHONY: all runtime regression opencl riscv unittest
+.PHONY: all unittest kernel regression opencl riscv

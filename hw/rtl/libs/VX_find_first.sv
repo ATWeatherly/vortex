@@ -1,44 +1,61 @@
+// Copyright © 2019-2023
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 `include "VX_platform.vh"
 
 `TRACING_OFF
 module VX_find_first #(
     parameter N       = 1,
     parameter DATAW   = 1,
-    parameter REVERSE = 0,
-    parameter LOGN    = $clog2(N)
+    parameter REVERSE = 0 // 0 -> first valid, 1 -> last valid
 ) (
-    input  wire [N-1:0][DATAW-1:0] data_i,
-    input  wire [N-1:0]            valid_i,    
-    output wire [DATAW-1:0]        data_o,
-    output wire                    valid_o
+    input  wire [N-1:0][DATAW-1:0] data_in,
+    input  wire [N-1:0]            valid_in,
+    output wire [DATAW-1:0]        data_out,
+    output wire                    valid_out
 );
-    localparam TL = (1 << LOGN) - 1;
-    localparam TN = (1 << (LOGN+1)) - 1;
+    localparam LOGN = `CLOG2(N);
+    localparam TL   = (1 << LOGN) - 1;
+    localparam TN   = (1 << (LOGN+1)) - 1;
 
-`IGNORE_WARNINGS_BEGIN
-    wire [TN-1:0] s_n;
-    wire [TN-1:0][DATAW-1:0] d_n;
-`IGNORE_WARNINGS_END
+`IGNORE_UNOPTFLAT_BEGIN
+    wire s_n [TN];
+    wire [DATAW-1:0] d_n [TN];
+`IGNORE_UNOPTFLAT_END
 
-    for (genvar i = 0; i < N; ++i) begin
-        assign s_n[TL+i] = REVERSE ? valid_i[N-1-i] : valid_i[i];
-        assign d_n[TL+i] = REVERSE ? data_i[N-1-i] : data_i[i];
-    end
-    
-    for (genvar i = TL+N; i < TN; ++i) begin
-        assign s_n[i] = 0;
-        assign d_n[i] = 'x;
+    for (genvar i = 0; i < N; ++i) begin : g_fill
+        assign s_n[TL+i] = REVERSE ? valid_in[N-1-i] : valid_in[i];
+        assign d_n[TL+i] = REVERSE ? data_in[N-1-i] : data_in[i];
     end
 
-    for (genvar j = 0; j < LOGN; ++j) begin
-        for (genvar i = 0; i < (2**j); ++i) begin
-            assign s_n[2**j-1+i] = s_n[2**(j+1)-1+i*2] | s_n[2**(j+1)-1+i*2+1];
-            assign d_n[2**j-1+i] = s_n[2**(j+1)-1+i*2] ? d_n[2**(j+1)-1+i*2] : d_n[2**(j+1)-1+i*2+1];
+    if (TL < (TN-N)) begin : g_padding
+        for (genvar i = TL+N; i < TN; ++i) begin : g_i
+            assign s_n[i] = 0;
+            assign d_n[i] = '0;
         end
-    end     
-        
-    assign valid_o = s_n[0];
-    assign data_o  = d_n[0];
-  
+    end
+
+    for (genvar j = 0; j < LOGN; ++j) begin : g_scan
+        localparam I = 1 << j;
+        for (genvar i = 0; i < I; ++i) begin : g_i
+            localparam K = I+i-1;
+            assign s_n[K] = s_n[2*K+2] | s_n[2*K+1];
+            assign d_n[K] = s_n[2*K+1] ? d_n[2*K+1] : d_n[2*K+2];
+        end
+    end
+
+    assign valid_out = s_n[0];
+    assign data_out  = d_n[0];
+
 endmodule
 `TRACING_ON

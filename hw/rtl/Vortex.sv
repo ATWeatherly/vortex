@@ -1,222 +1,234 @@
+// Copyright © 2019-2023
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 `include "VX_define.vh"
 
-module Vortex (
-    `SCOPE_IO_Vortex
+module Vortex import VX_gpu_pkg::*; (
+    `SCOPE_IO_DECL
 
     // Clock
     input  wire                             clk,
     input  wire                             reset,
 
     // Memory request
-    output wire                             mem_req_valid,
-    output wire                             mem_req_rw,    
-    output wire [`VX_MEM_BYTEEN_WIDTH-1:0]  mem_req_byteen,    
-    output wire [`VX_MEM_ADDR_WIDTH-1:0]    mem_req_addr,
-    output wire [`VX_MEM_DATA_WIDTH-1:0]    mem_req_data,
-    output wire [`VX_MEM_TAG_WIDTH-1:0]     mem_req_tag,
-    input  wire                             mem_req_ready,
+    output wire                             mem_req_valid [VX_MEM_PORTS],
+    output wire                             mem_req_rw [VX_MEM_PORTS],
+    output wire [VX_MEM_BYTEEN_WIDTH-1:0]   mem_req_byteen [VX_MEM_PORTS],
+    output wire [VX_MEM_ADDR_WIDTH-1:0]     mem_req_addr [VX_MEM_PORTS],
+    output wire [VX_MEM_DATA_WIDTH-1:0]     mem_req_data [VX_MEM_PORTS],
+    output wire [VX_MEM_TAG_WIDTH-1:0]      mem_req_tag [VX_MEM_PORTS],
+    input  wire                             mem_req_ready [VX_MEM_PORTS],
 
-    // Memory response    
-    input wire                              mem_rsp_valid,        
-    input wire [`VX_MEM_DATA_WIDTH-1:0]     mem_rsp_data,
-    input wire [`VX_MEM_TAG_WIDTH-1:0]      mem_rsp_tag,
-    output wire                             mem_rsp_ready,
+    // Memory response
+    input wire                              mem_rsp_valid [VX_MEM_PORTS],
+    input wire [VX_MEM_DATA_WIDTH-1:0]      mem_rsp_data [VX_MEM_PORTS],
+    input wire [VX_MEM_TAG_WIDTH-1:0]       mem_rsp_tag [VX_MEM_PORTS],
+    output wire                             mem_rsp_ready [VX_MEM_PORTS],
+
+    // DCR write request
+    input  wire                             dcr_wr_valid,
+    input  wire [VX_DCR_ADDR_WIDTH-1:0]     dcr_wr_addr,
+    input  wire [VX_DCR_DATA_WIDTH-1:0]     dcr_wr_data,
 
     // Status
     output wire                             busy
 );
-    `STATIC_ASSERT((`L3_ENABLE == 0 || `NUM_CLUSTERS > 1), ("invalid parameter"))
 
-    wire [`NUM_CLUSTERS-1:0]                         per_cluster_mem_req_valid;
-    wire [`NUM_CLUSTERS-1:0]                         per_cluster_mem_req_rw;
-    wire [`NUM_CLUSTERS-1:0][`L2_MEM_BYTEEN_WIDTH-1:0] per_cluster_mem_req_byteen;
-    wire [`NUM_CLUSTERS-1:0][`L2_MEM_ADDR_WIDTH-1:0] per_cluster_mem_req_addr;
-    wire [`NUM_CLUSTERS-1:0][`L2_MEM_DATA_WIDTH-1:0] per_cluster_mem_req_data;
-    wire [`NUM_CLUSTERS-1:0][`L2_MEM_TAG_WIDTH-1:0]  per_cluster_mem_req_tag;
-    wire [`NUM_CLUSTERS-1:0]                         per_cluster_mem_req_ready;
+`ifdef SCOPE
+    localparam scope_cluster = 0;
+    `SCOPE_IO_SWITCH (`NUM_CLUSTERS);
+`endif
 
-    wire [`NUM_CLUSTERS-1:0]                         per_cluster_mem_rsp_valid;
-    wire [`NUM_CLUSTERS-1:0][`L2_MEM_DATA_WIDTH-1:0] per_cluster_mem_rsp_data;
-    wire [`NUM_CLUSTERS-1:0][`L2_MEM_TAG_WIDTH-1:0]  per_cluster_mem_rsp_tag;
-    wire [`NUM_CLUSTERS-1:0]                         per_cluster_mem_rsp_ready;
-
-    wire [`NUM_CLUSTERS-1:0]                         per_cluster_busy;
-
-    for (genvar i = 0; i < `NUM_CLUSTERS; i++) begin
-
-        `RESET_RELAY (cluster_reset);
-
-        VX_cluster #(
-            .CLUSTER_ID(i)
-        ) cluster (
-            `SCOPE_BIND_Vortex_cluster(i)
-
-            .clk            (clk),
-            .reset          (cluster_reset),
-
-            .mem_req_valid  (per_cluster_mem_req_valid [i]),
-            .mem_req_rw     (per_cluster_mem_req_rw    [i]),
-            .mem_req_byteen (per_cluster_mem_req_byteen[i]),
-            .mem_req_addr   (per_cluster_mem_req_addr  [i]),
-            .mem_req_data   (per_cluster_mem_req_data  [i]),
-            .mem_req_tag    (per_cluster_mem_req_tag   [i]),
-            .mem_req_ready  (per_cluster_mem_req_ready [i]),
-
-            .mem_rsp_valid  (per_cluster_mem_rsp_valid [i]),
-            .mem_rsp_data   (per_cluster_mem_rsp_data  [i]),
-            .mem_rsp_tag    (per_cluster_mem_rsp_tag   [i]),
-            .mem_rsp_ready  (per_cluster_mem_rsp_ready [i]),
-
-            .busy           (per_cluster_busy           [i])
-        );
+`ifdef PERF_ENABLE
+    cache_perf_t l3_perf;
+    mem_perf_t mem_perf;
+    sysmem_perf_t sysmem_perf;
+    always @(*) begin
+        sysmem_perf = '0;
+        sysmem_perf.l3cache = l3_perf;
+        sysmem_perf.mem = mem_perf;
     end
+`endif
 
-    assign busy   = (| per_cluster_busy);
+    VX_mem_bus_if #(
+        .DATA_SIZE (`L2_LINE_SIZE),
+        .TAG_WIDTH (L2_MEM_TAG_WIDTH)
+    ) per_cluster_mem_bus_if[`NUM_CLUSTERS * `L2_MEM_PORTS]();
 
-    if (`L3_ENABLE) begin
+    VX_mem_bus_if #(
+        .DATA_SIZE (`L3_LINE_SIZE),
+        .TAG_WIDTH (L3_MEM_TAG_WIDTH)
+    ) mem_bus_if[`L3_MEM_PORTS]();
+
+    `RESET_RELAY (l3_reset, reset);
+
+    VX_cache_wrap #(
+        .INSTANCE_ID    ("l3cache"),
+        .CACHE_SIZE     (`L3_CACHE_SIZE),
+        .LINE_SIZE      (`L3_LINE_SIZE),
+        .NUM_BANKS      (`L3_NUM_BANKS),
+        .NUM_WAYS       (`L3_NUM_WAYS),
+        .WORD_SIZE      (L3_WORD_SIZE),
+        .NUM_REQS       (L3_NUM_REQS),
+        .MEM_PORTS      (`L3_MEM_PORTS),
+        .CRSQ_SIZE      (`L3_CRSQ_SIZE),
+        .MSHR_SIZE      (`L3_MSHR_SIZE),
+        .MRSQ_SIZE      (`L3_MRSQ_SIZE),
+        .MREQ_SIZE      (`L3_WRITEBACK ? `L3_MSHR_SIZE : `L3_MREQ_SIZE),
+        .TAG_WIDTH      (L2_MEM_TAG_WIDTH),
+        .WRITE_ENABLE   (1),
+        .WRITEBACK      (`L3_WRITEBACK),
+        .DIRTY_BYTES    (`L3_DIRTYBYTES),
+        .REPL_POLICY    (`L3_REPL_POLICY),
+        .CORE_OUT_BUF   (3),
+        .MEM_OUT_BUF    (3),
+        .NC_ENABLE      (1),
+        .PASSTHRU       (!`L3_ENABLED)
+    ) l3cache (
+        .clk            (clk),
+        .reset          (l3_reset),
+
     `ifdef PERF_ENABLE
-        VX_perf_cache_if perf_l3cache_if();
+        .cache_perf     (l3_perf),
     `endif
 
-        `RESET_RELAY (l3_reset);
+        .core_bus_if    (per_cluster_mem_bus_if),
+        .mem_bus_if     (mem_bus_if)
+    );
 
-        VX_cache #(
-            .CACHE_ID           (`L3_CACHE_ID),
-            .CACHE_SIZE         (`L3_CACHE_SIZE),
-            .CACHE_LINE_SIZE    (`L3_CACHE_LINE_SIZE),
-            .NUM_BANKS          (`L3_NUM_BANKS),
-            .NUM_PORTS          (`L3_NUM_PORTS),
-            .WORD_SIZE          (`L3_WORD_SIZE),
-            .NUM_REQS           (`L3_NUM_REQS),
-            .CREQ_SIZE          (`L3_CREQ_SIZE),
-            .CRSQ_SIZE          (`L3_CRSQ_SIZE),
-            .MSHR_SIZE          (`L3_MSHR_SIZE),
-            .MRSQ_SIZE          (`L3_MRSQ_SIZE),
-            .MREQ_SIZE          (`L3_MREQ_SIZE),
-            .WRITE_ENABLE       (1),
-            .CORE_TAG_WIDTH     (`L2_MEM_TAG_WIDTH),
-            .CORE_TAG_ID_BITS   (0),
-            .MEM_TAG_WIDTH      (`L3_MEM_TAG_WIDTH),
-            .NC_ENABLE          (1)
-        ) l3cache (
-            `SCOPE_BIND_Vortex_l3cache
- 
-            .clk                (clk),
-            .reset              (l3_reset),
+    for (genvar i = 0; i < `L3_MEM_PORTS; ++i) begin : g_mem_bus_if
+        assign mem_req_valid[i]  = mem_bus_if[i].req_valid;
+        assign mem_req_rw[i]     = mem_bus_if[i].req_data.rw;
+        assign mem_req_byteen[i] = mem_bus_if[i].req_data.byteen;
+        assign mem_req_addr[i]   = mem_bus_if[i].req_data.addr;
+        assign mem_req_data[i]   = mem_bus_if[i].req_data.data;
+        assign mem_req_tag[i]    = mem_bus_if[i].req_data.tag;
+        `UNUSED_VAR (mem_bus_if[i].req_data.flags)
+        assign mem_bus_if[i].req_ready = mem_req_ready[i];
 
-        `ifdef PERF_ENABLE
-            .perf_cache_if      (perf_l3cache_if),
-        `endif
-
-            // Core request    
-            .core_req_valid     (per_cluster_mem_req_valid),
-            .core_req_rw        (per_cluster_mem_req_rw),
-            .core_req_byteen    (per_cluster_mem_req_byteen),
-            .core_req_addr      (per_cluster_mem_req_addr),
-            .core_req_data      (per_cluster_mem_req_data),
-            .core_req_tag       (per_cluster_mem_req_tag),
-            .core_req_ready     (per_cluster_mem_req_ready),
-
-            // Core response
-            .core_rsp_valid     (per_cluster_mem_rsp_valid),
-            .core_rsp_data      (per_cluster_mem_rsp_data),
-            .core_rsp_tag       (per_cluster_mem_rsp_tag),              
-            .core_rsp_ready     (per_cluster_mem_rsp_ready),
-            `UNUSED_PIN (core_rsp_tmask),
-
-            // Memory request
-            .mem_req_valid      (mem_req_valid),
-            .mem_req_rw         (mem_req_rw),
-            .mem_req_byteen     (mem_req_byteen),
-            .mem_req_addr       (mem_req_addr),
-            .mem_req_data       (mem_req_data),
-            .mem_req_tag        (mem_req_tag),
-            .mem_req_ready      (mem_req_ready),
-
-            // Memory response
-            .mem_rsp_valid      (mem_rsp_valid),            
-            .mem_rsp_data       (mem_rsp_data),
-            .mem_rsp_tag        (mem_rsp_tag),
-            .mem_rsp_ready      (mem_rsp_ready)
-        );
-
-    end else begin
-
-        `RESET_RELAY (mem_arb_reset);
-
-        VX_mem_arb #(
-            .NUM_REQS     (`NUM_CLUSTERS),
-            .DATA_WIDTH   (`L3_MEM_DATA_WIDTH),            
-            .ADDR_WIDTH   (`L3_MEM_ADDR_WIDTH),
-            .TAG_IN_WIDTH (`L2_MEM_TAG_WIDTH),
-            .TYPE         ("R"),
-            .BUFFERED_REQ (1),
-            .BUFFERED_RSP (1)
-        ) mem_arb (
-            .clk            (clk),
-            .reset          (mem_arb_reset),
-
-            // Core request
-            .req_valid_in   (per_cluster_mem_req_valid),
-            .req_rw_in      (per_cluster_mem_req_rw),
-            .req_byteen_in  (per_cluster_mem_req_byteen),
-            .req_addr_in    (per_cluster_mem_req_addr),
-            .req_data_in    (per_cluster_mem_req_data),  
-            .req_tag_in     (per_cluster_mem_req_tag),  
-            .req_ready_in   (per_cluster_mem_req_ready),
-
-            // Memory request
-            .req_valid_out  (mem_req_valid),
-            .req_rw_out     (mem_req_rw),        
-            .req_byteen_out (mem_req_byteen),        
-            .req_addr_out   (mem_req_addr),
-            .req_data_out   (mem_req_data),
-            .req_tag_out    (mem_req_tag),
-            .req_ready_out  (mem_req_ready),
-
-            // Core response
-            .rsp_valid_out  (per_cluster_mem_rsp_valid),
-            .rsp_data_out   (per_cluster_mem_rsp_data),
-            .rsp_tag_out    (per_cluster_mem_rsp_tag),
-            .rsp_ready_out  (per_cluster_mem_rsp_ready),
-            
-            // Memory response
-            .rsp_valid_in   (mem_rsp_valid),
-            .rsp_tag_in     (mem_rsp_tag),
-            .rsp_data_in    (mem_rsp_data),
-            .rsp_ready_in   (mem_rsp_ready)
-        );
-
+        assign mem_bus_if[i].rsp_valid     = mem_rsp_valid[i];
+        assign mem_bus_if[i].rsp_data.data = mem_rsp_data[i];
+        assign mem_bus_if[i].rsp_data.tag  = mem_rsp_tag[i];
+        assign mem_rsp_ready[i] = mem_bus_if[i].rsp_ready;
     end
 
-    `SCOPE_ASSIGN (reset, reset);
-    `SCOPE_ASSIGN (mem_req_fire, mem_req_valid && mem_req_ready);
-    `SCOPE_ASSIGN (mem_req_addr, `TO_FULL_ADDR(mem_req_addr));
-    `SCOPE_ASSIGN (mem_req_rw,   mem_req_rw);
-    `SCOPE_ASSIGN (mem_req_byteen, mem_req_byteen);
-    `SCOPE_ASSIGN (mem_req_data, mem_req_data);
-    `SCOPE_ASSIGN (mem_req_tag,  mem_req_tag);
-    `SCOPE_ASSIGN (mem_rsp_fire, mem_rsp_valid && mem_rsp_ready);
-    `SCOPE_ASSIGN (mem_rsp_data, mem_rsp_data);
-    `SCOPE_ASSIGN (mem_rsp_tag,  mem_rsp_tag);
-    `SCOPE_ASSIGN (busy, busy);
+    VX_dcr_bus_if dcr_bus_if();
+    assign dcr_bus_if.write_valid = dcr_wr_valid;
+    assign dcr_bus_if.write_addr  = dcr_wr_addr;
+    assign dcr_bus_if.write_data  = dcr_wr_data;
 
-`ifdef DBG_TRACE_CORE_MEM
+    wire [`NUM_CLUSTERS-1:0] per_cluster_busy;
+
+    // Generate all clusters
+    for (genvar cluster_id = 0; cluster_id < `NUM_CLUSTERS; ++cluster_id) begin : g_clusters
+
+        `RESET_RELAY (cluster_reset, reset);
+
+        VX_dcr_bus_if cluster_dcr_bus_if();
+        `BUFFER_DCR_BUS_IF (cluster_dcr_bus_if, dcr_bus_if, 1'b1, (`NUM_CLUSTERS > 1))
+
+        VX_cluster #(
+            .CLUSTER_ID (cluster_id),
+            .INSTANCE_ID (`SFORMATF(("cluster%0d", cluster_id)))
+        ) cluster (
+            `SCOPE_IO_BIND (scope_cluster + cluster_id)
+
+            .clk                (clk),
+            .reset              (cluster_reset),
+
+        `ifdef PERF_ENABLE
+            .sysmem_perf        (sysmem_perf),
+        `endif
+
+            .dcr_bus_if         (cluster_dcr_bus_if),
+
+            .mem_bus_if         (per_cluster_mem_bus_if[cluster_id * `L2_MEM_PORTS +: `L2_MEM_PORTS]),
+
+            .busy               (per_cluster_busy[cluster_id])
+        );
+    end
+
+    `BUFFER_EX(busy, (| per_cluster_busy), 1'b1, 1, (`NUM_CLUSTERS > 1));
+
+`ifdef PERF_ENABLE
+
+    localparam MEM_PORTS_CTR_W = `CLOG2(VX_MEM_PORTS+1);
+
+    wire [VX_MEM_PORTS-1:0] mem_req_fire, mem_rsp_fire;
+    wire [VX_MEM_PORTS-1:0] mem_rd_req_fire, mem_wr_req_fire;
+
+    for (genvar i = 0; i < VX_MEM_PORTS; ++i) begin : g_perf_ctrs
+        assign mem_req_fire[i] = mem_req_valid[i] & mem_req_ready[i];
+        assign mem_rsp_fire[i] = mem_rsp_valid[i] & mem_rsp_ready[i];
+        assign mem_rd_req_fire[i] = mem_req_fire[i] & ~mem_req_rw[i];
+        assign mem_wr_req_fire[i] = mem_req_fire[i] & mem_req_rw[i];
+    end
+
+    wire [MEM_PORTS_CTR_W-1:0] perf_mem_reads_per_cycle;
+    wire [MEM_PORTS_CTR_W-1:0] perf_mem_writes_per_cycle;
+    wire [MEM_PORTS_CTR_W-1:0] perf_mem_rsps_per_cycle;
+
+    `POP_COUNT(perf_mem_reads_per_cycle, mem_rd_req_fire);
+    `POP_COUNT(perf_mem_writes_per_cycle, mem_wr_req_fire);
+    `POP_COUNT(perf_mem_rsps_per_cycle, mem_rsp_fire);
+
+    reg [PERF_CTR_BITS-1:0] perf_mem_pending_reads;
+
     always @(posedge clk) begin
-        if (mem_req_valid && mem_req_ready) begin
-            if (mem_req_rw)
-                dpi_trace("%d: MEM Wr Req: addr=%0h, tag=%0h, byteen=%0h data=%0h\n", $time, `TO_FULL_ADDR(mem_req_addr), mem_req_tag, mem_req_byteen, mem_req_data);
-            else
-                dpi_trace("%d: MEM Rd Req: addr=%0h, tag=%0h, byteen=%0h\n", $time, `TO_FULL_ADDR(mem_req_addr), mem_req_tag, mem_req_byteen);
+        if (reset) begin
+            perf_mem_pending_reads <= '0;
+        end else begin
+            perf_mem_pending_reads <= $signed(perf_mem_pending_reads) +
+                PERF_CTR_BITS'($signed((MEM_PORTS_CTR_W+1)'(perf_mem_reads_per_cycle) - (MEM_PORTS_CTR_W+1)'(perf_mem_rsps_per_cycle)));
         end
-        if (mem_rsp_valid && mem_rsp_ready) begin
-            dpi_trace("%d: MEM Rsp: tag=%0h, data=%0h\n", $time, mem_rsp_tag, mem_rsp_data);
+    end
+
+    always @(posedge clk) begin
+        if (reset) begin
+            mem_perf <= '0;
+        end else begin
+            mem_perf.reads <= mem_perf.reads + PERF_CTR_BITS'(perf_mem_reads_per_cycle);
+            mem_perf.writes <= mem_perf.writes + PERF_CTR_BITS'(perf_mem_writes_per_cycle);
+            mem_perf.latency <= mem_perf.latency + perf_mem_pending_reads;
+        end
+    end
+
+`endif
+
+    // dump device configuration
+    initial begin
+        `TRACE(0, ("CONFIGS: num_threads=%0d, num_warps=%0d, num_cores=%0d, num_clusters=%0d, socket_size=%0d, local_mem_base=0x%0h, num_barriers=%0d\n",
+                    `NUM_THREADS, `NUM_WARPS, `NUM_CORES, `NUM_CLUSTERS, `SOCKET_SIZE, `LMEM_BASE_ADDR, `NUM_BARRIERS))
+    end
+
+`ifdef DBG_TRACE_MEM
+    for (genvar i = 0; i < VX_MEM_PORTS; ++i) begin : g_trace
+        always @(posedge clk) begin
+            if (mem_bus_if[i].req_valid && mem_bus_if[i].req_ready) begin
+                if (mem_bus_if[i].req_data.rw) begin
+                    `TRACE(2, ("%t: MEM Wr Req[%0d]: addr=0x%0h, byteen=0x%h data=0x%h, tag=0x%0h (#%0d)\n", $time, i, `TO_FULL_ADDR(mem_bus_if[i].req_data.addr), mem_bus_if[i].req_data.byteen, mem_bus_if[i].req_data.data, mem_bus_if[i].req_data.tag.value, mem_bus_if[i].req_data.tag.uuid))
+                end else begin
+                    `TRACE(2, ("%t: MEM Rd Req[%0d]: addr=0x%0h, byteen=0x%h, tag=0x%0h (#%0d)\n", $time, i, `TO_FULL_ADDR(mem_bus_if[i].req_data.addr), mem_bus_if[i].req_data.byteen, mem_bus_if[i].req_data.tag.value, mem_bus_if[i].req_data.tag.uuid))
+                end
+            end
+            if (mem_bus_if[i].rsp_valid && mem_bus_if[i].rsp_ready) begin
+                `TRACE(2, ("%t: MEM Rd Rsp[%0d]: data=0x%h, tag=0x%0h (#%0d)\n", $time, i, mem_bus_if[i].rsp_data.data, mem_bus_if[i].rsp_data.tag.value, mem_bus_if[i].rsp_data.tag.uuid))
+            end
         end
     end
 `endif
 
-
-`ifndef NDEBUG
+`ifdef SIMULATION
     always @(posedge clk) begin
         $fflush(); // flush stdout buffer
     end

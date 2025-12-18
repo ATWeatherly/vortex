@@ -1,3 +1,16 @@
+// Copyright © 2019-2023
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 #include <iostream>
 #include <stdlib.h>
 #include <unistd.h>
@@ -9,435 +22,525 @@
 #include <assert.h>
 #include <util.h>
 #include <rvfloats.h>
-#include "warp.h"
+#include "emulator.h"
 #include "instr.h"
 #include "core.h"
+#include "types.h"
+#ifdef EXT_V_ENABLE
+#include "processor_impl.h"
+#endif
+#include "VX_types.h"
 
 using namespace vortex;
 
-union reg_data_t {
-  Word     i;  
-  FWord    f;
-  uint64_t _;
-};
-
-static bool HasDivergentThreads(const ThreadMask &thread_mask,                                
-                                const std::vector<std::vector<Word>> &reg_file,
-                                unsigned reg) {
-  bool cond;
-  size_t thread_idx = 0;
-  size_t num_threads = reg_file.size();
-  for (; thread_idx < num_threads; ++thread_idx) {
-    if (thread_mask[thread_idx]) {
-      cond = bool(reg_file[thread_idx][reg]);
-      break;
-    }
-  }  
-  assert(thread_idx != num_threads);  
-  for (; thread_idx < num_threads; ++thread_idx) {
-    if (thread_mask[thread_idx]) {
-      if (cond != (bool(reg_file[thread_idx][reg]))) {
-        return true;
-      }
-    }
-  }
-  return false;
-}
-
-inline uint32_t get_fpu_rm(uint32_t func3, Core* core, uint32_t tid, uint32_t wid) {
-  return (func3 == 0x7) ? core->get_csr(CSR_FRM, tid, wid) : func3;
-}
-
-static void update_fcrs(uint32_t fflags, Core* core, uint32_t tid, uint32_t wid) {
-  if (fflags) {
-    core->set_csr(CSR_FCSR, core->get_csr(CSR_FCSR, tid, wid) | fflags, tid, wid);
-    core->set_csr(CSR_FFLAGS, core->get_csr(CSR_FFLAGS, tid, wid) | fflags, tid, wid);
-  }
-}
-
 inline uint64_t nan_box(uint32_t value) {
-  uint64_t mask = 0xffffffff00000000;
-  return value | mask;
+  return value | 0xffffffff00000000;
 }
 
 inline bool is_nan_boxed(uint64_t value) {
   return (uint32_t(value >> 32) == 0xffffffff);
 }
 
-static bool checkBoxedArgs(FWord* out, FWord a, FWord b, uint32_t* fflags) {  
-  bool xa = is_nan_boxed(a);
-  bool xb = is_nan_boxed(b);  
-  if (xa && xb)
-    return true;
-  if (xa) {
-    // a is NaN boxed but b isn't
-    *out = nan_box((uint32_t)a);
-  } else if (xb) {
-    // b is NaN boxed but a isn't
-    *out = nan_box(0xffc00000);
-  } else {
-    // Both a and b aren't NaN boxed
-    *out = nan_box(0x7fc00000);
-  }
-  *fflags = 0;
-  return false;
+inline int64_t check_boxing(int64_t a) {
+  if (is_nan_boxed(a))
+    return a;
+  return nan_box(0x7fc00000); // NaN
 }
 
-static bool checkBoxedArgs(FWord* out, FWord a, uint32_t* fflags) {  
-  bool xa = is_nan_boxed(a);
-  if (xa)
-    return true;
-  *out = nan_box(0x7fc00000);
-  *fflags = 0;
-  return false;
-}
-
-static bool checkBoxedCmpArgs(Word* out, FWord a, FWord b, uint32_t* fflags) {  
-  bool xa = is_nan_boxed(a);
-  bool xb = is_nan_boxed(b);  
-  if (xa && xb)
-    return true;
-  *out = 0;
-  *fflags = 0;
-  return false;
-}
-
-void Warp::execute(const Instr &instr, pipeline_trace_t *trace) {
-  assert(tmask_.any());
-
-  auto nextPC = PC_ + core_->arch().wsize();
-
-  auto func2  = instr.getFunc2();
-  auto func3  = instr.getFunc3();
-  auto func6  = instr.getFunc6();
-  auto func7  = instr.getFunc7();
-
-  auto opcode = instr.getOpcode();
-  auto rdest  = instr.getRDest();
-  auto rsrc0  = instr.getRSrc(0);
-  auto rsrc1  = instr.getRSrc(1);
-  auto rsrc2  = instr.getRSrc(2);
-  auto immsrc = sext((Word)instr.getImm(), 32);
-  auto vmask  = instr.getVmask();
-
-  auto num_threads = core_->arch().num_threads();
-
-  std::vector<reg_data_t[3]> rsdata(num_threads);
-  std::vector<reg_data_t> rddata(num_threads);
-
-  auto num_rsrcs = instr.getNRSrc();
-  if (num_rsrcs) {              
-    for (uint32_t i = 0; i < num_rsrcs; ++i) {    
-      DPH(2, "Src Reg [" << std::dec << i << "]: ");
-      auto type = instr.getRSType(i);
-      auto reg = instr.getRSrc(i);        
-      switch (type) {
-      case RegType::Integer: 
-        DPN(2, type << std::dec << reg << "={");
-        for (uint32_t t = 0; t < num_threads; ++t) {
-          if (t) DPN(2, ", ");
-          if (!tmask_.test(t)) {
-            DPN(2, "-");
-            continue;            
-          }
-          rsdata[t][i].i = ireg_file_.at(t)[reg];          
-          DPN(2, std::hex << rsdata[t][i].i); 
-        }
-        DPN(2, "}" << std::endl);
-        break;
-      case RegType::Float: 
-        DPN(2, type << std::dec << reg << "={");
-        for (uint32_t t = 0; t < num_threads; ++t) {
-          if (t) DPN(2, ", ");
-          if (!tmask_.test(t)) {
-            DPN(2, "-");
-            continue;            
-          }
-          rsdata[t][i].f = freg_file_.at(t)[reg];
-          DPN(2, std::hex << rsdata[t][i].f); 
-        }
-        DPN(2, "}" << std::endl);
-        break;
-      default: 
-        std::abort();
-        break;
-      }      
+void Emulator::fetch_registers(std::vector<reg_data_t>& out, uint32_t wid, uint32_t src_index, const RegOpd& reg) {
+  __unused(src_index);
+  auto& warp = warps_.at(wid);
+  uint32_t num_threads = warp.tmask.size();
+  out.resize(num_threads);
+  switch (reg.type) {
+  case RegType::None:
+#ifdef EXT_V_ENABLE
+  case RegType::Vector:
+    DPH(2, "Src" << src_index << " Reg: " << reg << "={");
+    for (uint32_t t = 0; t < num_threads; ++t) {
+      if (t) DPN(2, ", ");
+      if (!warp.tmask.test(t)) {
+        DPN(2, "-");
+        continue;
+      }
+      DPN(2, vec_unit_->dumpRegister(wid, t, reg.idx));
     }
+    DPN(2, "}" << std::endl);
+#endif
+    break;
+  case RegType::Integer: {
+    DPH(2, "Src" << src_index << " Reg: " << reg << "={");
+    auto& reg_data = warp.ireg_file.at(reg.idx);
+    for (uint32_t t = 0; t < num_threads; ++t) {
+      if (t) DPN(2, ", ");
+      if (!warp.tmask.test(t)) {
+        DPN(2, "-");
+        continue;
+      }
+      auto& value = out[t];
+      value.u = reg_data.at(t);
+      DPN(2, "0x" << std::hex << value.u << std::dec);
+    }
+    DPN(2, "}" << std::endl);
+  } break;
+  case RegType::Float: {
+    DPH(2, "Src" << src_index << " Reg: " << reg << "={");
+    auto& reg_data = warp.freg_file.at(reg.idx);
+    for (uint32_t t = 0; t < num_threads; ++t) {
+      if (t) DPN(2, ", ");
+      if (!warp.tmask.test(t)) {
+        DPN(2, "-");
+        continue;
+      }
+      auto& value = out[t];
+      value.u64 = reg_data.at(t);
+      if ((value.u64 >> 32) == 0xffffffff) {
+        DPN(2, "0x" << std::hex << value.u32 << std::dec);
+      } else {
+        DPN(2, "0x" << std::hex << value.u64 << std::dec);
+      }
+    }
+    DPN(2, "}" << std::endl);
+  } break;
+  default:
+    std::abort();
+    break;
   }
+}
+
+instr_trace_t* Emulator::execute(const Instr &instr, uint32_t wid) {
+  auto& warp = warps_.at(wid);
+  assert(warp.tmask.any());
+
+  auto next_pc = warp.PC + 4;
+  auto next_tmask = warp.tmask;
+
+  auto fu_type = instr.getFUType();
+  auto op_type = instr.getOpType();
+  auto instrArgs = instr.getArgs();
+  auto rdest  = instr.getDestReg();
+  auto rsrc0  = instr.getSrcReg(0);
+  auto rsrc1  = instr.getSrcReg(1);
+  auto rsrc2  = instr.getSrcReg(2);
+
+  auto num_threads = arch_.num_threads();
+
+  // create instruction trace
+  auto trace_alloc = core_->trace_pool().allocate(1);
+  auto trace = new (trace_alloc) instr_trace_t(instr.getUUID(), arch_);
+  trace->fu_type  = fu_type;
+  trace->op_type  = op_type;
+  trace->cid      = core_->id();
+  trace->wid      = wid;
+  trace->PC       = warp.PC;
+  trace->tmask    = warp.tmask;
+  trace->dst_reg  = rdest;
+  trace->src_regs = {rsrc0, rsrc1, rsrc2};
+
+  std::vector<reg_data_t> rd_data(num_threads);
+  std::vector<reg_data_t> rs1_data;
+  std::vector<reg_data_t> rs2_data;
+  std::vector<reg_data_t> rs3_data;
+
+  DP(1, "Instr: " << instr << ", cid=" << core_->id() << ", wid=" << wid << ", tmask=" << warp.tmask
+         << ", PC=0x" << std::hex << warp.PC << std::dec << " (#" << instr.getUUID() << ")");
+
+  // fetch register values
+  if (rsrc0.type != RegType::None) fetch_registers(rs1_data, wid, 0, rsrc0);
+  if (rsrc1.type != RegType::None) fetch_registers(rs2_data, wid, 1, rsrc1);
+  if (rsrc2.type != RegType::None) fetch_registers(rs3_data, wid, 2, rsrc2);
+
+  uint32_t thread_start = 0;
+  for (; thread_start < num_threads; ++thread_start) {
+    if (warp.tmask.test(thread_start))
+      break;
+  }
+
+  int32_t thread_last = num_threads - 1;
+  for (; thread_last >= 0; --thread_last) {
+    if (warp.tmask.test(thread_last))
+      break;
+  }
+
+  bool is_w_enabled = false;
+#ifdef XLEN_64
+  is_w_enabled = true;
+#endif // XLEN_64
 
   bool rd_write = false;
-  
-  switch (opcode) {
-  case NOP:
-    break;
-  // RV32I: LUI
-  case LUI_INST: {
-    trace->exe_type = ExeType::ALU;
-    trace->alu.type = AluType::ARITH;
-    for (uint32_t t = 0; t < num_threads; ++t) {
-      if (!tmask_.test(t))
-        continue;
-      rddata[t].i = immsrc << 12;
-    }    
-    rd_write = true;
-    break;
-  }
-  // RV32I: AUIPC
-  case AUIPC_INST: {
-    trace->exe_type = ExeType::ALU;
-    trace->alu.type = AluType::ARITH;
-    for (uint32_t t = 0; t < num_threads; ++t) {
-      if (!tmask_.test(t))
-        continue;
-      rddata[t].i = (immsrc << 12) + PC_;
-    }    
-    rd_write = true;
-    break;
-  }
-  case R_INST: {
-    trace->exe_type = ExeType::ALU;    
-    trace->alu.type = AluType::ARITH;
-    trace->used_iregs.set(rsrc0);
-    trace->used_iregs.set(rsrc1);
-    for (uint32_t t = 0; t < num_threads; ++t) {
-      if (!tmask_.test(t))
-        continue;
-      if (func7 & 0x1) {
-        switch (func3) {
-        case 0: {
-          // RV32M: MUL
-          rddata[t].i = (WordI)rsdata[t][0].i * (WordI)rsdata[t][1].i;
-          trace->alu.type = AluType::IMUL;
-          break;
+
+  visit_var(op_type,
+    [&](AluType alu_type) {
+      auto aluArgs = std::get<IntrAluArgs>(instrArgs);
+      Word imm = sext<Word>(aluArgs.imm, 32);
+      switch (alu_type) {
+      case AluType::LUI: {
+        for (uint32_t t = thread_start; t < num_threads; ++t) {
+          if (!warp.tmask.test(t))
+            continue;
+          rd_data[t].i = imm;
         }
-        case 1: {
-          // RV32M: MULH
-          DWordI first = sext((DWord)rsdata[t][0].i, XLEN);
-          DWordI second = sext((DWord)rsdata[t][1].i, XLEN);
-          rddata[t].i = (first * second) >> XLEN;
-          trace->alu.type = AluType::IMUL;
-          break;
+      } break;
+      case AluType::AUIPC: {
+        for (uint32_t t = thread_start; t < num_threads; ++t) {
+          if (!warp.tmask.test(t))
+            continue;
+          rd_data[t].i = imm + warp.PC;
         }
-        case 2: {
-          // RV32M: MULHSU       
-          DWordI first = sext((DWord)rsdata[t][0].i, XLEN);
-          DWord second = rsdata[t][1].i;
-          rddata[t].i = (first * second) >> XLEN;
-          trace->alu.type = AluType::IMUL;
-          break;
-        } 
-        case 3: {
-          // RV32M: MULHU
-          DWord first = rsdata[t][0].i;
-          DWord second = rsdata[t][1].i;
-          rddata[t].i = (first * second) >> XLEN;
-          trace->alu.type = AluType::IMUL;
-          break;
-        } 
-        case 4: {
-          // RV32M: DIV
-          WordI dividen = rsdata[t][0].i;
-          WordI divisor = rsdata[t][1].i; 
-          WordI largest_negative = WordI(1) << (XLEN-1);  
-          if (divisor == 0) {
-            rddata[t].i = -1;
-          } else if (dividen == largest_negative && divisor == -1) {
-            rddata[t].i = dividen;
+      } break;
+      case AluType::ADD: {
+        for (uint32_t t = thread_start; t < num_threads; ++t) {
+          if (!warp.tmask.test(t))
+            continue;
+          if (is_w_enabled && aluArgs.is_w) {
+            auto result = rs1_data[t].i32 + (int32_t)(aluArgs.is_imm ? aluArgs.imm : rs2_data[t].i32);
+            rd_data[t].i = sext((uint64_t)result, 32);
           } else {
-            rddata[t].i = dividen / divisor;
+            rd_data[t].i = rs1_data[t].i + (aluArgs.is_imm ? imm : rs2_data[t].i);
           }
-          trace->alu.type = AluType::IDIV;
-          break;
-        } 
-        case 5: {
-          // RV32M: DIVU
-          Word dividen = rsdata[t][0].i;
-          Word divisor = rsdata[t][1].i;
-          if (divisor == 0) {
-            rddata[t].i = -1;
+        }
+      } break;
+      case AluType::SUB: {
+        for (uint32_t t = thread_start; t < num_threads; ++t) {
+          if (!warp.tmask.test(t))
+            continue;
+          if (is_w_enabled && aluArgs.is_w) {
+            auto result = rs1_data[t].i32 - (int32_t)(aluArgs.is_imm ? aluArgs.imm : rs2_data[t].i32);
+            rd_data[t].i = sext((uint64_t)result, 32);
           } else {
-            rddata[t].i = dividen / divisor;
+            rd_data[t].i = rs1_data[t].i - (aluArgs.is_imm ? imm : rs2_data[t].i);
           }
-          trace->alu.type = AluType::IDIV;
-          break;
-        } 
-        case 6: {
-          // RV32M: REM
-          WordI dividen = rsdata[t][0].i;
-          WordI divisor = rsdata[t][1].i;
-          WordI largest_negative = WordI(1) << (XLEN-1);
-          if (rsdata[t][1].i == 0) {
-            rddata[t].i = dividen;
-          } else if (dividen == largest_negative && divisor == -1) {
-            rddata[t].i = 0;
+        }
+      } break;
+      case AluType::SLT: {
+        for (uint32_t t = thread_start; t < num_threads; ++t) {
+          if (!warp.tmask.test(t))
+            continue;
+          rd_data[t].i = rs1_data[t].i < (aluArgs.is_imm ? WordI(imm) : rs2_data[t].i);
+        }
+      } break;
+      case AluType::SLTU: {
+        for (uint32_t t = thread_start; t < num_threads; ++t) {
+          if (!warp.tmask.test(t))
+            continue;
+          rd_data[t].i = rs1_data[t].u < (aluArgs.is_imm ? imm : rs2_data[t].u);
+        }
+      } break;
+      case AluType::SLL: {
+        Word shamt_mask = (Word(1) << log2up(XLEN)) - 1;
+        for (uint32_t t = thread_start; t < num_threads; ++t) {
+          if (!warp.tmask.test(t))
+            continue;
+          if (is_w_enabled && aluArgs.is_w) {
+            uint32_t shamt = (aluArgs.is_imm ? aluArgs.imm : rs2_data[t].i32) & shamt_mask;
+            uint32_t result = (uint32_t)rs1_data[t].i << shamt;
+            rd_data[t].i = sext((uint64_t)result, 32);
           } else {
-            rddata[t].i = dividen % divisor;
+            Word shamt = (aluArgs.is_imm ? imm : rs2_data[t].i) & shamt_mask;
+            rd_data[t].i = rs1_data[t].i << shamt;
           }
-          trace->alu.type = AluType::IDIV;
-          break;
-        } 
-        case 7: {
-          // RV32M: REMU
-          Word dividen = rsdata[t][0].i;
-          Word divisor = rsdata[t][1].i;
-          if (rsdata[t][1].i == 0) {
-            rddata[t].i = dividen;
+        }
+      } break;
+      case AluType::SRA: {
+        Word shamt_mask = (Word(1) << log2up(XLEN)) - 1;
+        for (uint32_t t = thread_start; t < num_threads; ++t) {
+          if (!warp.tmask.test(t))
+            continue;
+          if (is_w_enabled && aluArgs.is_w) {
+            uint32_t shamt = (aluArgs.is_imm ? aluArgs.imm : rs2_data[t].i32) & shamt_mask;
+            uint32_t result = (int32_t)rs1_data[t].i >> shamt;
+            rd_data[t].i = sext((uint64_t)result, 32);
           } else {
-            rddata[t].i = dividen % divisor;
+            Word shamt = (aluArgs.is_imm ? imm : rs2_data[t].i) & shamt_mask;
+            rd_data[t].i = rs1_data[t].i >> shamt;
           }
-          trace->alu.type = AluType::IDIV;
-          break;
-        } 
-        default:
-          std::abort();
         }
-      } else {
-        switch (func3) {
-        case 0: {
-          if (func7) {
-            // RV32I: SUB
-            rddata[t].i = rsdata[t][0].i - rsdata[t][1].i;
+      } break;
+      case AluType::SRL: {
+        Word shamt_mask = (Word(1) << log2up(XLEN)) - 1;
+        for (uint32_t t = thread_start; t < num_threads; ++t) {
+          if (!warp.tmask.test(t))
+            continue;
+          if (is_w_enabled && aluArgs.is_w) {
+            uint32_t shamt = (aluArgs.is_imm ? aluArgs.imm : rs2_data[t].i32) & shamt_mask;
+            uint32_t result = (uint32_t)rs1_data[t].i >> shamt;
+            rd_data[t].i = sext((uint64_t)result, 32);
           } else {
-            // RV32I: ADD
-            rddata[t].i = rsdata[t][0].i + rsdata[t][1].i;
+            Word shamt = (aluArgs.is_imm ? imm : rs2_data[t].i) & shamt_mask;
+            rd_data[t].i = rs1_data[t].u >> shamt;
           }
-          break;
         }
-        case 1: {
-          // RV32I: SLL
-          Word shamt_mask = (Word(1) << log2up(XLEN)) - 1;
-          Word shamt = rsdata[t][1].i & shamt_mask;
-          rddata[t].i = rsdata[t][0].i << shamt;
-          break;
+      } break;
+      case AluType::AND: {
+        for (uint32_t t = thread_start; t < num_threads; ++t) {
+          if (!warp.tmask.test(t))
+            continue;
+          rd_data[t].i = rs1_data[t].i & (aluArgs.is_imm ? imm : rs2_data[t].i);
         }
-        case 2: {
-          // RV32I: SLT
-          rddata[t].i = WordI(rsdata[t][0].i) < WordI(rsdata[t][1].i);
-          break;
+      } break;
+      case AluType::OR: {
+        for (uint32_t t = thread_start; t < num_threads; ++t) {
+          if (!warp.tmask.test(t))
+            continue;
+          rd_data[t].i = rs1_data[t].i | (aluArgs.is_imm ? imm : rs2_data[t].i);
         }
-        case 3: {
-          // RV32I: SLTU
-          rddata[t].i = Word(rsdata[t][0].i) < Word(rsdata[t][1].i);
-          break;
+      } break;
+      case AluType::XOR: {
+        for (uint32_t t = thread_start; t < num_threads; ++t) {
+          if (!warp.tmask.test(t))
+            continue;
+          rd_data[t].i = rs1_data[t].i ^ (aluArgs.is_imm ? imm : rs2_data[t].i);
         }
-        case 4: {
-          // RV32I: XOR
-          rddata[t].i = rsdata[t][0].i ^ rsdata[t][1].i;
-          break;
+      } break;
+      case AluType::CZERO: {
+        for (uint32_t t = thread_start; t < num_threads; ++t) {
+          if (!warp.tmask.test(t))
+            continue;
+          bool cond = (rs2_data[t].i == 0) ^ aluArgs.imm;
+          rd_data[t].i = cond ? 0 : rs1_data[t].i;
         }
-        case 5: {
-          Word shamt_mask = ((Word)1 << log2up(XLEN)) - 1;
-          Word shamt = rsdata[t][1].i & shamt_mask;
-          if (func7) {
-            // RV32I: SRA
-            rddata[t].i = WordI(rsdata[t][0].i) >> shamt;
-          } else {
-            // RV32I: SRL
-            rddata[t].i = Word(rsdata[t][0].i) >> shamt;
-          }
-          break;
-        }
-        case 6: {
-          // RV32I: OR
-          rddata[t].i = rsdata[t][0].i | rsdata[t][1].i;
-          break;
-        }
-        case 7: {
-          // RV32I: AND
-          rddata[t].i = rsdata[t][0].i & rsdata[t][1].i;
-          break;
-        }
-        default:
-          std::abort();
-        }
+      } break;
+      default:
+        std::abort();
       }
-    }    
-    rd_write = true;
-    break;
-  }
-  case I_INST: {
-    trace->exe_type = ExeType::ALU;    
-    trace->alu.type = AluType::ARITH;    
-    trace->used_iregs.set(rsrc0);
-    for (uint32_t t = 0; t < num_threads; ++t) {
-      if (!tmask_.test(t))
-        continue;
-      switch (func3) {
-      case 0: {
-        // RV32I: ADDI
-        rddata[t].i = rsdata[t][0].i + immsrc;
-        break;
-      }
-      case 1: {
-        // RV64I: SLLI
-        rddata[t].i = rsdata[t][0].i << immsrc;
-        break;
-      }
-      case 2: {
-        // RV32I: SLTI
-        rddata[t].i = WordI(rsdata[t][0].i) < WordI(immsrc);
-        break;
-      }
-      case 3: {
-        // RV32I: SLTIU
-        rddata[t].i = rsdata[t][0].i < immsrc;
-        break;
-      } 
-      case 4: {
-        // RV32I: XORI
-        rddata[t].i = rsdata[t][0].i ^ immsrc;
-        break;
-      }
-      case 5: {
-        if (func7) {
-          // RV64I: SRAI
-          Word result = WordI(rsdata[t][0].i) >> immsrc;
-          rddata[t].i = result;
+      rd_write = true;
+    },
+    [&](VoteType vote_type) {
+      bool has_vote_true = false;
+      bool has_vote_false = false;
+      Word ballot = 0;
+      // compute votes
+      for (uint32_t t = thread_start; t < num_threads; ++t) {
+        if (!warp.tmask.test(t))
+          continue;
+        auto is_pred = rs1_data[t].i & 0x1;
+        if (is_pred) {
+          has_vote_true = true;
+          ballot |= (Word(1) << t);
         } else {
-          // RV64I: SRLI
-          Word result = Word(rsdata[t][0].i) >> immsrc;
-          rddata[t].i = result;
+          has_vote_false = true;
         }
-        break;
       }
-      case 6: {
-        // RV32I: ORI
-        rddata[t].i = rsdata[t][0].i | immsrc;
-        break;
+      for (uint32_t t = thread_start; t < num_threads; ++t) {
+        switch (vote_type) {
+        case VoteType::ALL:
+          rd_data[t].i = !has_vote_false;
+          break;
+        case VoteType::ANY:
+          rd_data[t].i = has_vote_true;
+          break;
+        case VoteType::UNI:
+          rd_data[t].i = !has_vote_true || !has_vote_false;
+          break;
+        case VoteType::BAL:
+          rd_data[t].i = ballot;
+          break;
+        default:
+          std::abort();
+        }
       }
-      case 7: {
-        // RV32I: ANDI
-        rddata[t].i = rsdata[t][0].i & immsrc;
-        break;
+      rd_write = true;
+    },
+    [&](ShflType shfl_type) {
+      for (uint32_t t = thread_start; t < num_threads; ++t) {
+        if (!warp.tmask.test(t))
+          continue;
+        auto bc  = rs2_data[t].i;
+        int bval = (bc >>  0) & 0x3f;
+        int cval = (bc >>  6) & 0x3f;
+        int mask = (bc >> 12) & 0x3f;
+        int maxLane = (t & mask) | (cval & ~mask);
+        int minLane = (t & mask);
+        int lane = 0;
+        int pval = 0;
+        switch (shfl_type) {
+        case ShflType::UP: {
+          lane = t - bval;
+          pval = (lane >= minLane);
+        } break;
+        case ShflType::DOWN: {
+          lane = t + bval;
+          pval = (lane <= maxLane);
+        } break;
+        case ShflType::BFLY: {
+          lane = t ^ bval;
+          pval = (lane <= maxLane);
+        } break;
+        case ShflType::IDX: {
+          lane = minLane | (bval & ~mask);
+          pval = (lane <= maxLane);
+        } break;
+        default:
+          std::abort();
+        }
+        if (!pval)
+          lane = t;
+        if (lane < num_threads) {
+          rd_data[t].i = rs1_data[lane].i;
+        } else {
+          rd_data[t].i = rs1_data[t].i;
+        }
       }
-      }
-    }
-    rd_write = true;
-    break;
-  }
-  case R_INST_W: {
-    trace->exe_type = ExeType::ALU;    
-    trace->alu.type = AluType::ARITH;
-    trace->used_iregs.set(rsrc0);
-    trace->used_iregs.set(rsrc1);
-    for (uint32_t t = 0; t < num_threads; ++t) {
-      if (!tmask_.test(t))
-        continue;
-      if (func7 & 0x1){
-        switch (func3) {
-          case 0: {
-            // RV64M: MULW
-            int32_t product = (int32_t)rsdata[t][0].i * (int32_t)rsdata[t][1].i;
-            rddata[t].i = sext((uint64_t)product, 32);
-            trace->alu.type = AluType::IMUL;
+      rd_write = true;
+    },
+    [&](BrType br_type) {
+      auto brArgs = std::get<IntrBrArgs>(instrArgs);
+      Word offset = sext<Word>(brArgs.offset, 32);
+      switch (br_type) {
+      case BrType::BR: {
+        bool all_taken = false;
+        for (uint32_t t = thread_start; t < num_threads; ++t) {
+          if (!warp.tmask.test(t))
+            continue;
+          bool curr_taken = false;
+          switch (brArgs.cmp) {
+          case 0: { // RV32I: BEQ
+            if (rs1_data[t].i == rs2_data[t].i) {
+              next_pc = warp.PC + offset;
+              curr_taken = true;
+            }
             break;
           }
-          case 4: {
-            // RV64M: DIVW
-            int32_t dividen = (int32_t)rsdata[t][0].i;
-            int32_t divisor = (int32_t)rsdata[t][1].i;
-            int32_t quotient;
+          case 1: { // RV32I: BNE
+            if (rs1_data[t].i != rs2_data[t].i) {
+              next_pc = warp.PC + offset;
+              curr_taken = true;
+            }
+            break;
+          }
+          case 4: { // RV32I: BLT
+            if (rs1_data[t].i < rs2_data[t].i) {
+              next_pc = warp.PC + offset;
+              curr_taken = true;
+            }
+            break;
+          }
+          case 5: { // RV32I: BGE
+            if (rs1_data[t].i >= rs2_data[t].i) {
+              next_pc = warp.PC + offset;
+              curr_taken = true;
+            }
+            break;
+          }
+          case 6: { // RV32I: BLTU
+            if (rs1_data[t].u < rs2_data[t].u) {
+              next_pc = warp.PC + offset;
+              curr_taken = true;
+            }
+            break;
+          }
+          case 7: { // RV32I: BGEU
+            if (rs1_data[t].u >= rs2_data[t].u) {
+              next_pc = warp.PC + offset;
+              curr_taken = true;
+            }
+            break;
+          }
+          default:
+            std::abort();
+          }
+          if (t == thread_start) {
+            all_taken = curr_taken;
+          } else {
+            if (all_taken != curr_taken) {
+              std::cout << "divergent branch! PC=0x" << std::hex << warp.PC << std::dec << " (#" << trace->uuid << ")\n" << std::flush;
+              std::abort();
+            }
+          }
+        }
+        trace->fetch_stall = true;
+      } break;
+      case BrType::JAL: { // RV32I: JAL
+        for (uint32_t t = thread_start; t < num_threads; ++t) {
+          if (!warp.tmask.test(t))
+            continue;
+          rd_data[t].i = next_pc;
+        }
+        next_pc = warp.PC + offset;
+        trace->fetch_stall = true;
+        rd_write = true;
+      } break;
+      case BrType::JALR: { // RV32I: JALR
+        for (uint32_t t = thread_start; t < num_threads; ++t) {
+          if (!warp.tmask.test(t))
+            continue;
+          rd_data[t].i = next_pc;
+        }
+        next_pc = rs1_data[thread_last].i + offset;
+        trace->fetch_stall = true;
+        rd_write = true;
+      } break;
+      case BrType::SYS:
+        switch (brArgs.offset) {
+        case 0x000: // RV32I: ECALL
+          this->trigger_ecall();
+          break;
+        case 0x001: // RV32I: EBREAK
+          this->trigger_ebreak();
+          break;
+        case 0x002: // RV32I: URET
+        case 0x102: // RV32I: SRET
+        case 0x302: // RV32I: MRET
+          break;
+        default:
+          std::abort();
+        }
+        break;
+      default:
+        std::abort();
+      }
+    },
+    [&](MdvType mdv_type) {
+      auto mdvArgs = std::get<IntrMdvArgs>(instrArgs);
+      switch (mdv_type) {
+      case MdvType::MUL: {
+        for (uint32_t t = thread_start; t < num_threads; ++t) {
+          if (!warp.tmask.test(t))
+            continue;
+          if (is_w_enabled && mdvArgs.is_w) {
+            auto product = rs1_data[t].i32 * rs2_data[t].i32;
+            rd_data[t].i = sext((uint64_t)product, 32);
+          } else {
+            rd_data[t].i = rs1_data[t].i * rs2_data[t].i;
+          }
+        }
+      } break;
+      case MdvType::MULH: {
+        for (uint32_t t = thread_start; t < num_threads; ++t) {
+          if (!warp.tmask.test(t))
+            continue;
+          auto first = static_cast<DWordI>(rs1_data[t].i);
+          auto second = static_cast<DWordI>(rs2_data[t].i);
+          rd_data[t].i = (first * second) >> XLEN;
+        }
+      } break;
+      case MdvType::MULHSU: {
+        for (uint32_t t = thread_start; t < num_threads; ++t) {
+          if (!warp.tmask.test(t))
+            continue;
+          auto first = static_cast<DWordI>(rs1_data[t].i);
+          auto second = static_cast<DWord>(rs2_data[t].u);
+          rd_data[t].i = (first * second) >> XLEN;
+        }
+      } break;
+      case MdvType::MULHU: {
+        for (uint32_t t = thread_start; t < num_threads; ++t) {
+          if (!warp.tmask.test(t))
+            continue;
+          auto first = static_cast<DWord>(rs1_data[t].u);
+          auto second = static_cast<DWord>(rs2_data[t].u);
+          rd_data[t].i = (first * second) >> XLEN;
+        }
+      } break;
+      case MdvType::DIV: {
+        for (uint32_t t = thread_start; t < num_threads; ++t) {
+          if (!warp.tmask.test(t))
+            continue;
+          if (is_w_enabled && mdvArgs.is_w) {
+            auto dividen = rs1_data[t].i32;
+            auto divisor = rs2_data[t].i32;
             int32_t largest_negative = 0x80000000;
+            int32_t quotient;
             if (divisor == 0){
               quotient = -1;
             } else if (dividen == largest_negative && divisor == -1) {
@@ -445,30 +548,59 @@ void Warp::execute(const Instr &instr, pipeline_trace_t *trace) {
             } else {
               quotient = dividen / divisor;
             }
-            rddata[t].i = sext((uint64_t)quotient, 32);
-            trace->alu.type = AluType::IDIV;
-            break;
-          }      
-          case 5: {
-            // RV64M: DIVUW
-            uint32_t dividen = (uint32_t)rsdata[t][0].i;
-            uint32_t divisor = (uint32_t)rsdata[t][1].i;
-            uint32_t quotient;
-            if (divisor == 0){
+            rd_data[t].i = sext((uint64_t)quotient, 32);
+          } else {
+            auto dividen = rs1_data[t].i;
+            auto divisor = rs2_data[t].i;
+            auto largest_negative = WordI(1) << (XLEN-1);
+            WordI quotient;
+            if (divisor == 0) {
               quotient = -1;
+            } else if (dividen == largest_negative && divisor == -1) {
+              quotient = dividen;
             } else {
               quotient = dividen / divisor;
             }
-            rddata[t].i = sext((uint64_t)quotient, 32);
-            trace->alu.type = AluType::IDIV;
-            break;
-          } 
-          case 6: {
-            // RV64M: REMW
-            int32_t dividen = (uint32_t)rsdata[t][0].i;
-            int32_t divisor = (uint32_t)rsdata[t][1].i;
-            int32_t remainder;
+            rd_data[t].i = quotient;
+          }
+        }
+      } break;
+      case MdvType::DIVU: {
+        for (uint32_t t = thread_start; t < num_threads; ++t) {
+          if (!warp.tmask.test(t))
+            continue;
+          if (is_w_enabled && mdvArgs.is_w) {
+            auto dividen = rs1_data[t].u32;
+            auto divisor = rs2_data[t].u32;
+            uint32_t quotient;
+            if (divisor != 0){
+              quotient = dividen / divisor;
+            } else {
+              quotient = -1;
+            }
+            rd_data[t].i = sext((uint64_t)quotient, 32);
+          } else {
+            auto dividen = rs1_data[t].u;
+            auto divisor = rs2_data[t].u;
+            Word quotient;
+            if (divisor != 0) {
+              quotient = dividen / divisor;
+            } else {
+              quotient = -1;
+            }
+            rd_data[t].i = quotient;
+          }
+        }
+      } break;
+      case MdvType::REM: {
+        for (uint32_t t = thread_start; t < num_threads; ++t) {
+          if (!warp.tmask.test(t))
+            continue;
+          if (is_w_enabled && mdvArgs.is_w) {
+            auto dividen = rs1_data[t].i32;
+            auto divisor = rs2_data[t].i32;
             int32_t largest_negative = 0x80000000;
+            int32_t remainder;
             if (divisor == 0){
               remainder = dividen;
             } else if (dividen == largest_negative && divisor == -1) {
@@ -476,1877 +608,956 @@ void Warp::execute(const Instr &instr, pipeline_trace_t *trace) {
             } else {
               remainder = dividen % divisor;
             }
-            rddata[t].i = sext((uint64_t)remainder, 32);
-            trace->alu.type = AluType::IDIV;
-            break;
-          }  
-          case 7: {
-            // RV64M: REMUW
-            uint32_t dividen = (uint32_t)rsdata[t][0].i;
-            uint32_t divisor = (uint32_t)rsdata[t][1].i;
-            uint32_t remainder;
-            if (divisor == 0){
+            rd_data[t].i = sext((uint64_t)remainder, 32);
+          } else {
+            auto dividen = rs1_data[t].i;
+            auto divisor = rs2_data[t].i;
+            auto largest_negative = WordI(1) << (XLEN-1);
+            WordI remainder;
+            if (rs2_data[t].i == 0) {
               remainder = dividen;
+            } else if (dividen == largest_negative && divisor == -1) {
+              remainder = 0;
             } else {
               remainder = dividen % divisor;
             }
-            rddata[t].i = sext((uint64_t)remainder, 32);
-            trace->alu.type = AluType::IDIV;
-            break;
-          }  
-          default:
-            std::abort();
-        }
-      } else {
-        switch (func3) {
-        case 0: {
-          if (func7){
-            // RV64I: SUBW
-            uint32_t result = (uint32_t)rsdata[t][0].i - (uint32_t)rsdata[t][1].i;
-            rddata[t].i = sext((uint64_t)result, 32);
+            rd_data[t].i = remainder;
           }
-          else{
-            // RV64I: ADDW
-            uint32_t result = (uint32_t)rsdata[t][0].i + (uint32_t)rsdata[t][1].i;
-            rddata[t].i = sext((uint64_t)result, 32);
-          }    
-          break;
         }
-        case 1: {
-          // RV64I: SLLW
-          uint32_t shamt_mask = 0x1F;
-          uint32_t shamt = rsdata[t][1].i & shamt_mask;
-          uint32_t result = (uint32_t)rsdata[t][0].i << shamt;
-          rddata[t].i = sext((uint64_t)result, 32);
-          break;
-        }
-        case 5: {
-          uint32_t shamt_mask = 0x1F;
-          uint32_t shamt = rsdata[t][1].i & shamt_mask;
-          uint32_t result;
-          if (func7) {
-            // RV64I: SRAW
-            result = (int32_t)rsdata[t][0].i >> shamt;
+      } break;
+      case MdvType::REMU: {
+        for (uint32_t t = thread_start; t < num_threads; ++t) {
+          if (!warp.tmask.test(t))
+            continue;
+          if (is_w_enabled && mdvArgs.is_w) {
+            auto dividen = (uint32_t)rs1_data[t].u32;
+            auto divisor = (uint32_t)rs2_data[t].u32;
+            uint32_t remainder;
+            if (divisor != 0){
+              remainder = dividen % divisor;
+            } else {
+              remainder = dividen;
+            }
+            rd_data[t].i = sext((uint64_t)remainder, 32);
           } else {
-            // RV64I: SRLW
-            result = (uint32_t)rsdata[t][0].i >> shamt;
+            auto dividen = rs1_data[t].u;
+            auto divisor = rs2_data[t].u;
+            Word remainder;
+            if (rs2_data[t].i != 0) {
+              remainder = dividen % divisor;
+            } else {
+              remainder = dividen;
+            }
+            rd_data[t].i = remainder;
           }
-          rddata[t].i = sext((uint64_t)result, 32);
-          break;
         }
-        default:
-          std::abort();
-        }
-      }
-    }
-    rd_write = true;
-    break; 
-  }
-  case I_INST_W: {
-    trace->exe_type = ExeType::ALU;    
-    trace->alu.type = AluType::ARITH;    
-    trace->used_iregs.set(rsrc0);
-    for (uint32_t t = 0; t < num_threads; ++t) {
-      if (!tmask_.test(t))
-        continue;
-      switch (func3) {
-        case 0: {
-          // RV64I: ADDIW
-          uint32_t result = (uint32_t)rsdata[t][0].i + (uint32_t)immsrc;
-          rddata[t].i = sext((uint64_t)result, 32);
-          break;
-        }
-        case 1: {
-          // RV64I: SLLIW
-          uint32_t shamt_mask = 0x1F;
-          uint32_t shamt = immsrc & shamt_mask;
-          uint32_t result = rsdata[t][0].i << shamt;
-          rddata[t].i = sext((uint64_t)result, 32);
-          break;
-        }  
-        case 5: {
-          uint32_t shamt_mask = 0x1F;
-          uint32_t shamt = immsrc & shamt_mask;
-          uint32_t result;
-          if (func7) {
-            // RV64I: SRAIW
-            result = (int32_t)rsdata[t][0].i >> shamt;
-          } else {
-            // RV64I: SRLIW
-            result = (uint32_t)rsdata[t][0].i >> shamt;
-          }
-          rddata[t].i = sext((uint64_t)result, 32);
-          break;
-        }
-        default:
-          std::abort();
-      }
-    }
-    rd_write = true;
-    break;
-  }
-  case B_INST: {   
-    trace->exe_type = ExeType::ALU;    
-    trace->alu.type = AluType::BRANCH;    
-    trace->used_iregs.set(rsrc0);
-    trace->used_iregs.set(rsrc1);
-    for (uint32_t t = 0; t < num_threads; ++t) {
-      if (!tmask_.test(t))
-        continue;
-      switch (func3) {
-      case 0: {
-        // RV32I: BEQ
-        if (rsdata[t][0].i == rsdata[t][1].i) {
-          nextPC = uint32_t(PC_ + immsrc);
-        }
-        break;
-      }
-      case 1: {
-        // RV32I: BNE
-        if (rsdata[t][0].i != rsdata[t][1].i) {
-          nextPC = uint32_t(PC_ + immsrc);
-        }
-        break;
-      }
-      case 4: {
-        // RV32I: BLT
-        if (WordI(rsdata[t][0].i) < WordI(rsdata[t][1].i)) {
-          nextPC = uint32_t(PC_ + immsrc);
-        }
-        break;
-      }
-      case 5: {
-        // RV32I: BGE
-        if (WordI(rsdata[t][0].i) >= WordI(rsdata[t][1].i)) {
-          nextPC = uint32_t(PC_ + immsrc);
-        }
-        break;
-      }
-      case 6: {
-        // RV32I: BLTU
-        if (Word(rsdata[t][0].i) < Word(rsdata[t][1].i)) {
-          nextPC = uint32_t(PC_ + immsrc);
-        }
-        break;
-      }
-      case 7: {
-        // RV32I: BGEU
-        if (Word(rsdata[t][0].i) >= Word(rsdata[t][1].i)) {
-          nextPC = uint32_t(PC_ + immsrc);
-        }
-        break;
-      }
+      } break;
       default:
         std::abort();
-      }
-      break; // runonce
-    }
-    trace->fetch_stall = true;
-    break;
-  }
-  // RV32I: JAL
-  case JAL_INST: {
-    trace->exe_type = ExeType::ALU;    
-    trace->alu.type = AluType::BRANCH;
-    for (uint32_t t = 0; t < num_threads; ++t) {
-      if (!tmask_.test(t))
-        continue;
-      rddata[t].i = nextPC;
-      nextPC = uint32_t(PC_ + immsrc);  
-      trace->fetch_stall = true;
-      break; // runonce
-    }
-    rd_write = true;
-    break;
-  }
-  // RV32I: JALR
-  case JALR_INST: {
-    trace->exe_type = ExeType::ALU;    
-    trace->alu.type = AluType::BRANCH;
-    trace->used_iregs.set(rsrc0);
-    for (uint32_t t = 0; t < num_threads; ++t) {
-      if (!tmask_.test(t))
-        continue;
-      rddata[t].i = nextPC;
-      nextPC = uint32_t(rsdata[t][0].i + immsrc);
-      trace->fetch_stall = true;
-      break; // runOnce
-    }
-    rd_write = true;
-    break;
-  }
-  case L_INST:
-  case FL: {
-    trace->exe_type = ExeType::LSU;    
-    trace->lsu.type = LsuType::LOAD;
-    trace->used_iregs.set(rsrc0);
-    if ((opcode == L_INST )
-     || (opcode == FL && func3 == 2)
-     || (opcode == FL && func3 == 3)) {
-      uint32_t mem_bytes = 1 << (func3 & 0x3);
-      for (uint32_t t = 0; t < num_threads; ++t) {
-        if (!tmask_.test(t))
-          continue;
-        uint64_t mem_addr = rsdata[t][0].i + immsrc;         
-        uint64_t mem_data = 0;
-        core_->dcache_read(&mem_data, mem_addr, mem_bytes);
-        trace->mem_addrs.at(t).push_back({mem_addr, mem_bytes});        
-        DP(4, "LOAD MEM: ADDRESS=0x" << std::hex << mem_addr << ", DATA=0x" << mem_data);
-        switch (func3) {
-        case 0:
-          // RV32I: LB
-          rddata[t].i = sext((Word)mem_data, 8);
-          break;
-        case 1:
-          // RV32I: LH
-          rddata[t].i = sext((Word)mem_data, 16);
-          break;
-        case 2:
-          if (opcode == L_INST) {
-            // RV32I: LW
-            rddata[t].i = sext((Word)mem_data, 32);
-          } else {
-            // RV32F: FLW
-            rddata[t].f = nan_box((uint32_t)mem_data);
-          }
-          break;
-        case 3: // RV64I: LD
-                // RV32D: FLD
-        case 4: // RV32I: LBU
-        case 5: // RV32I: LHU
-        case 6: // RV64I: LWU
-          rddata[t]._ = mem_data;
-          break;
-        default:
-          std::abort();      
-        }
-      }
-    } else {
-      auto &vd = vreg_file_.at(rdest);
-      switch (instr.getVlsWidth()) {
-      case 6: {
-        for (uint32_t i = 0; i < vl_; i++) {
-          Word mem_addr = ((rsdata[i][0].i) & 0xFFFFFFFC) + (i * vtype_.vsew / 8);
-          Word mem_data = 0;
-          core_->dcache_read(&mem_data, mem_addr, 4);
-          Word *result_ptr = (Word *)(vd.data() + i);
-          *result_ptr = mem_data;
-          DP(4, "LOAD MEM: ADDRESS=0x" << std::hex << mem_addr << ", DATA=0x" << mem_data);        
-        }
-        break;
-      } 
-      default:
-        std::abort();
-      }
-    }
-    rd_write = true;
-    break;
-  }
-  case S_INST:   
-  case FS: {
-    trace->exe_type = ExeType::LSU;    
-    trace->lsu.type = LsuType::STORE;
-    trace->used_iregs.set(rsrc0);
-    trace->used_iregs.set(rsrc1);
-    if ((opcode == S_INST)
-     || (opcode == FS && func3 == 2)
-     || (opcode == FS && func3 == 3)) {
-      uint32_t mem_bytes = 1 << (func3 & 0x3);
-      uint64_t mask = ((uint64_t(1) << (8 * mem_bytes))-1);
-      for (uint32_t t = 0; t < num_threads; ++t) {
-        if (!tmask_.test(t))
-          continue;
-        uint64_t mem_addr = rsdata[t][0].i + immsrc;
-        uint64_t mem_data = rsdata[t][1]._;
-        if (mem_bytes < 8) {
-          mem_data &= mask;
-        }
-        trace->mem_addrs.at(t).push_back({mem_addr, mem_bytes});        
-        DP(4, "STORE MEM: ADDRESS=0x" << std::hex << mem_addr << ", DATA=0x" << mem_data);
-        switch (func3) {
-        case 0:
-        case 1:
-        case 2:
-        case 3:
-          core_->dcache_write(&mem_data, mem_addr, mem_bytes);  
-          break;
-        default:
-          std::abort();
-        }
-      }
-    } else {
-      for (uint32_t i = 0; i < vl_; i++) {
-        uint64_t mem_addr = rsdata[i][0].i + (i * vtype_.vsew / 8);        
-        switch (instr.getVlsWidth()) {
-        case 6: {
-          // store word and unit strided (not checking for unit stride)          
-          uint32_t mem_data = *(uint32_t *)(vreg_file_.at(instr.getVs3()).data() + i);
-          core_->dcache_write(&mem_data, mem_addr, 4);
-          DP(4, "STORE MEM: ADDRESS=0x" << std::hex << mem_addr << ", DATA=0x" << mem_data);
-          break;
-        } 
-        default:
-          std::abort();
-        }          
-      }
-    }
-    break;
-  }
-  case SYS_INST: {
-    for (uint32_t t = 0; t < num_threads; ++t) {
-      if (!tmask_.test(t))
-        continue;
-      uint32_t csr_addr = immsrc;
-      uint32_t csr_value;
-      if (func3 == 0) {
-        trace->exe_type = ExeType::ALU;
-        trace->alu.type = AluType::SYSCALL;
-        trace->fetch_stall = true;
-        switch (csr_addr) {
-        case 0: { // RV32I: ECALL
-          core_->trigger_ecall();
-          break;
-        }
-        case 1: { // RV32I: EBREAK
-          core_->trigger_ebreak();
-          break;
-        }
-        case 0x002: // URET
-        case 0x102: // SRET
-        case 0x302: // MRET
-          break;
-        default:
-          std::abort();
-        }                
-      } else {
-        trace->exe_type = ExeType::CSR;
-        csr_value = core_->get_csr(csr_addr, t, id_);
-        switch (func3) {
-        case 1: {
-          // RV32I: CSRRW
-          rddata[t].i = csr_value;
-          core_->set_csr(csr_addr, rsdata[t][0].i, t, id_);      
-          trace->used_iregs.set(rsrc0);
-          rd_write = true;
-          break;
-        }
-        case 2: {
-          // RV32I: CSRRS
-          rddata[t].i = csr_value;
-          core_->set_csr(csr_addr, csr_value | rsdata[t][0].i, t, id_);
-          trace->used_iregs.set(rsrc0);
-          rd_write = true;
-          break;
-        }
-        case 3: {
-          // RV32I: CSRRC
-          rddata[t].i = csr_value;
-          core_->set_csr(csr_addr, csr_value & ~rsdata[t][0].i, t, id_);
-          trace->used_iregs.set(rsrc0);
-          rd_write = true;
-          break;
-        }
-        case 5: {
-          // RV32I: CSRRWI
-          rddata[t].i = csr_value;
-          core_->set_csr(csr_addr, rsrc0, t, id_);      
-          rd_write = true;
-          break;
-        }
-        case 6: {
-          // RV32I: CSRRSI;
-          rddata[t].i = csr_value;
-          core_->set_csr(csr_addr, csr_value | rsrc0, t, id_);
-          rd_write = true;
-          break;
-        }
-        case 7: {
-          // RV32I: CSRRCI
-          rddata[t].i = csr_value;
-          core_->set_csr(csr_addr, csr_value & ~rsrc0, t, id_);
-          rd_write = true;
-          break;
-        }
-        default:
-          break;
-        }
-      }
-    } 
-    break;
-  }
-  // RV32I: FENCE
-  case FENCE: {
-    trace->exe_type = ExeType::LSU;    
-    trace->lsu.type = LsuType::FENCE;
-    break;
-  }   
-  case FCI: {       
-    trace->exe_type = ExeType::FPU;     
-    for (uint32_t t = 0; t < num_threads; ++t) {
-      if (!tmask_.test(t))
-        continue; 
-      uint32_t frm = get_fpu_rm(func3, core_, t, id_);
-      uint32_t fflags = 0;
-      switch (func7) {
-      case 0x00: { // RV32F: FADD.S
-        if (checkBoxedArgs(&rddata[t].f, rsdata[t][0].f, rsdata[t][1].f, &fflags)) {
-          rddata[t].f = nan_box(rv_fadd_s(rsdata[t][0].f, rsdata[t][1].f, frm, &fflags));
-        }
-        trace->fpu.type = FpuType::FMA;
-        trace->used_fregs.set(rsrc0);
-        trace->used_fregs.set(rsrc1);
-        break;
-      }
-      case 0x01: { // RV32D: FADD.D
-        rddata[t].f = rv_fadd_d(rsdata[t][0].f, rsdata[t][1].f, frm, &fflags);
-        trace->fpu.type = FpuType::FMA;
-        trace->used_fregs.set(rsrc0);
-        trace->used_fregs.set(rsrc1);
-        break;
-      }
-      case 0x04: { // RV32F: FSUB.S
-        if (checkBoxedArgs(&rddata[t].f, rsdata[t][0].f, rsdata[t][1].f, &fflags)) {
-          rddata[t].f = nan_box(rv_fsub_s(rsdata[t][0].f, rsdata[t][1].f, frm, &fflags));
-        }
-        trace->fpu.type = FpuType::FMA;
-        trace->used_fregs.set(rsrc0);
-        trace->used_fregs.set(rsrc1);
-        break;
-      }
-      case 0x05: { // RV32D: FSUB.D
-        rddata[t].f = rv_fsub_d(rsdata[t][0].f, rsdata[t][1].f, frm, &fflags);
-        trace->fpu.type = FpuType::FMA;
-        trace->used_fregs.set(rsrc0);
-        trace->used_fregs.set(rsrc1);
-        break;
-      }
-      case 0x08: { // RV32F: FMUL.S
-        if (checkBoxedArgs(&rddata[t].f, rsdata[t][0].f, rsdata[t][1].f, &fflags)) {
-          rddata[t].f = nan_box(rv_fmul_s(rsdata[t][0].f, rsdata[t][1].f, frm, &fflags));
-        }
-        trace->fpu.type = FpuType::FMA;
-        trace->used_fregs.set(rsrc0);
-        trace->used_fregs.set(rsrc1);
-        break;
-      }
-      case 0x09: { // RV32D: FMUL.D
-        rddata[t].f = rv_fmul_d(rsdata[t][0].f, rsdata[t][1].f, frm, &fflags);
-        trace->fpu.type = FpuType::FMA;
-        trace->used_fregs.set(rsrc0);
-        trace->used_fregs.set(rsrc1);
-        break;
-      }
-      case 0x0c: { // RV32F: FDIV.S
-        if (checkBoxedArgs(&rddata[t].f, rsdata[t][0].f, rsdata[t][1].f, &fflags)) {
-          rddata[t].f = nan_box(rv_fdiv_s(rsdata[t][0].f, rsdata[t][1].f, frm, &fflags));
-        }
-        trace->fpu.type = FpuType::FDIV;
-        trace->used_fregs.set(rsrc0);
-        trace->used_fregs.set(rsrc1);
-        break;
-      }
-      case 0x0d: { // RV32D: FDIV.D
-        rddata[t].f = rv_fdiv_d(rsdata[t][0].f, rsdata[t][1].f, frm, &fflags);
-        trace->fpu.type = FpuType::FDIV;
-        trace->used_fregs.set(rsrc0);
-        trace->used_fregs.set(rsrc1);
-        break;
-      }
-      case 0x2c: { // RV32F: FSQRT.S
-        if (checkBoxedArgs(&rddata[t].f, rsdata[t][0].f, &fflags)) {
-          rddata[t].f = nan_box(rv_fsqrt_s(rsdata[t][0].f, frm, &fflags));
-        }
-        trace->fpu.type = FpuType::FSQRT;
-        trace->used_fregs.set(rsrc0);
-        break;
-      }
-      case 0x2d: { // RV32D: FSQRT.D
-        rddata[t].f = rv_fsqrt_d(rsdata[t][0].f, frm, &fflags);
-        trace->fpu.type = FpuType::FSQRT;
-        trace->used_fregs.set(rsrc0);
-        break;  
-      }       
-      case 0x10: {
-        if (checkBoxedArgs(&rddata[t].f, rsdata[t][0].f, rsdata[t][1].f, &fflags)) {
-          switch (func3) {            
-          case 0: // RV32F: FSGNJ.S
-            rddata[t].f = nan_box(rv_fsgnj_s(rsdata[t][0].f, rsdata[t][1].f));
-            break;          
-          case 1: // RV32F: FSGNJN.S
-            rddata[t].f = nan_box(rv_fsgnjn_s(rsdata[t][0].f, rsdata[t][1].f));
-            break;          
-          case 2: // RV32F: FSGNJX.S
-            rddata[t].f = nan_box(rv_fsgnjx_s(rsdata[t][0].f, rsdata[t][1].f));
-            break;
-          }
-        }
-        trace->fpu.type = FpuType::FNCP;
-        trace->used_fregs.set(rsrc0);
-        trace->used_fregs.set(rsrc1);
-        break;
-      }
-      case 0x11: {
-        switch (func3) {            
-        case 0: // RV32D: FSGNJ.D
-          rddata[t].f = rv_fsgnj_d(rsdata[t][0].f, rsdata[t][1].f);
-          break;          
-        case 1: // RV32D: FSGNJN.D
-          rddata[t].f = rv_fsgnjn_d(rsdata[t][0].f, rsdata[t][1].f);
-          break;          
-        case 2: // RV32D: FSGNJX.D
-          rddata[t].f = rv_fsgnjx_d(rsdata[t][0].f, rsdata[t][1].f);
-          break;
-        }
-        trace->fpu.type = FpuType::FNCP;
-        trace->used_fregs.set(rsrc0);
-        trace->used_fregs.set(rsrc1);
-        break;
-      }
-      case 0x14: {   
-        if (checkBoxedArgs(&rddata[t].f, rsdata[t][0].f, rsdata[t][1].f, &fflags)) {         
-          if (func3) {
-            // RV32F: FMAX.S
-            rddata[t].f = nan_box(rv_fmax_s(rsdata[t][0].f, rsdata[t][1].f, &fflags));
-          } else {
-            // RV32F: FMIN.S
-            rddata[t].f = nan_box(rv_fmin_s(rsdata[t][0].f, rsdata[t][1].f, &fflags));
-          }
-        }
-        trace->fpu.type = FpuType::FNCP;
-        trace->used_fregs.set(rsrc0);
-        trace->used_fregs.set(rsrc1);        
-        break;
-      }
-      case 0x15: {            
-        if (func3) {
-          // RV32D: FMAX.D
-          rddata[t].f = rv_fmax_d(rsdata[t][0].f, rsdata[t][1].f, &fflags);
-        } else {
-          // RV32D: FMIN.D
-          rddata[t].f = rv_fmin_d(rsdata[t][0].f, rsdata[t][1].f, &fflags);
-        }
-        trace->fpu.type = FpuType::FNCP;
-        trace->used_fregs.set(rsrc0);
-        trace->used_fregs.set(rsrc1);        
-        break;
-      }
-      case 0x20: {
-        // RV32D: FCVT.S.D
-        rddata[t].f = nan_box(rv_dtof(rsdata[t][0].f));
-        trace->fpu.type = FpuType::FNCP;
-        trace->used_fregs.set(rsrc0);
-        trace->used_fregs.set(rsrc1);        
-        break;
-      }
-      case 0x21: {
-        // RV32D: FCVT.D.S
-        rddata[t].f = rv_ftod(rsdata[t][0].f);
-        trace->fpu.type = FpuType::FNCP;
-        trace->used_fregs.set(rsrc0);
-        trace->used_fregs.set(rsrc1);        
-        break;
-      }
-      case 0x60: {
-        switch (rsrc1) {
-          case 0: 
-            // RV32F: FCVT.W.S
-            rddata[t].i = sext((uint64_t)rv_ftoi_s(rsdata[t][0].f, frm, &fflags), 32);
-            break;
-          case 1:
-            // RV32F: FCVT.WU.S
-            rddata[t].i = sext((uint64_t)rv_ftou_s(rsdata[t][0].f, frm, &fflags), 32);
-            break;
-          case 2:
-            // RV64F: FCVT.L.S
-            rddata[t].i = rv_ftol_s(rsdata[t][0].f, frm, &fflags);
-            break;
-          case 3:
-            // RV64F: FCVT.LU.S
-            rddata[t].i = rv_ftolu_s(rsdata[t][0].f, frm, &fflags);
-            break;
-        }
-      trace->fpu.type = FpuType::FCVT;
-      trace->used_fregs.set(rsrc0);
-      break;
-    }
-      case 0x61: {
-        switch (rsrc1) {
-          case 0: 
-            // RV32D: FCVT.W.D
-            rddata[t].i = sext((uint64_t)rv_ftoi_d(rsdata[t][0].f, frm, &fflags), 32);
-            break;
-          case 1:
-            // RV32D: FCVT.WU.D
-            rddata[t].i = sext((uint64_t)rv_ftou_d(rsdata[t][0].f, frm, &fflags), 32);
-            break;
-          case 2:
-            // RV64D: FCVT.L.D
-            rddata[t].i = rv_ftol_d(rsdata[t][0].f, frm, &fflags);
-            break;
-          case 3:
-            // RV64D: FCVT.LU.D
-            rddata[t].i = rv_ftolu_d(rsdata[t][0].f, frm, &fflags);
-            break;
-        }
-        trace->fpu.type = FpuType::FCVT;
-        trace->used_fregs.set(rsrc0);
-        break;
-      }
-      case 0x70: {     
-        if (func3) {
-          // RV32F: FCLASS.S
-          rddata[t].i = rv_fclss_s(rsdata[t][0].f);
-        } else {          
-          // RV32F: FMV.X.W
-          uint32_t result = (uint32_t)rsdata[t][0].f;
-          rddata[t].i = sext((uint64_t)result, 32);
-        }        
-        trace->fpu.type = FpuType::FNCP;
-        trace->used_fregs.set(rsrc0);
-        break;
-      }
-      case 0x71: {    
-        if (func3) {
-          // RV32D: FCLASS.D
-          rddata[t].i = rv_fclss_d(rsdata[t][0].f);
-        } else {          
-          // RV64D: FMV.X.D
-          rddata[t].i = rsdata[t][0].f;
-        }        
-        trace->fpu.type = FpuType::FNCP;
-        trace->used_fregs.set(rsrc0);
-        break;
-      }
-      case 0x50: {      
-        if (checkBoxedCmpArgs(&rddata[t].i, rsdata[t][0].f, rsdata[t][1].f, &fflags)) {     
-          switch (func3) {              
-          case 0:
-            // RV32F: FLE.S
-            rddata[t].i = rv_fle_s(rsdata[t][0].f, rsdata[t][1].f, &fflags);    
-            break;              
-          case 1:
-            // RV32F: FLT.S
-            rddata[t].i = rv_flt_s(rsdata[t][0].f, rsdata[t][1].f, &fflags);
-            break;              
-          case 2:
-            // RV32F: FEQ.S
-            rddata[t].i = rv_feq_s(rsdata[t][0].f, rsdata[t][1].f, &fflags);
-            break;
-          }
-        } 
-        trace->fpu.type = FpuType::FNCP;
-        trace->used_fregs.set(rsrc0);
-        trace->used_fregs.set(rsrc1);
-        break; 
-      }
-      case 0x51: {           
-        switch (func3) {              
-        case 0:
-          // RV32D: FLE.D
-          rddata[t].i = rv_fle_d(rsdata[t][0].f, rsdata[t][1].f, &fflags);    
-          break;              
-        case 1:
-          // RV32D: FLT.D
-          rddata[t].i = rv_flt_d(rsdata[t][0].f, rsdata[t][1].f, &fflags);
-          break;              
-        case 2:
-          // RV32D: FEQ.D
-          rddata[t].i = rv_feq_d(rsdata[t][0].f, rsdata[t][1].f, &fflags);
-          break;
-        } 
-        trace->fpu.type = FpuType::FNCP;
-        trace->used_fregs.set(rsrc0);
-        trace->used_fregs.set(rsrc1);
-        break;  
-      }      
-      case 0x68: {
-        switch (rsrc1) {
-          case 0: 
-            // RV32F: FCVT.S.W
-            rddata[t].f = nan_box(rv_itof_s(rsdata[t][0].i, frm, &fflags));
-            break;
-          case 1:
-            // RV32F: FCVT.S.WU
-            rddata[t].f = nan_box(rv_utof_s(rsdata[t][0].i, frm, &fflags));
-            break;
-          case 2:
-            // RV64F: FCVT.S.L
-            rddata[t].f = nan_box(rv_ltof_s(rsdata[t][0].i, frm, &fflags));
-            break;
-          case 3:
-            // RV64F: FCVT.S.LU
-            rddata[t].f = nan_box(rv_lutof_s(rsdata[t][0].i, frm, &fflags));
-            break;
-        }
-        trace->fpu.type = FpuType::FCVT;
-        trace->used_iregs.set(rsrc0);
-        break;
-      }
-      case 0x69: {
-        switch (rsrc1) {
-          case 0: 
-            // RV32D: FCVT.D.W
-            rddata[t].f = rv_itof_d(rsdata[t][0].i, frm, &fflags);
-            break;
-          case 1:
-            // RV32D: FCVT.D.WU
-            rddata[t].f = rv_utof_d(rsdata[t][0].i, frm, &fflags);
-            break;
-          case 2:
-            // RV64D: FCVT.D.L
-            rddata[t].f = rv_ltof_d(rsdata[t][0].i, frm, &fflags);
-            break;
-          case 3:
-            // RV64D: FCVT.D.LU
-            rddata[t].f = rv_lutof_d(rsdata[t][0].i, frm, &fflags);
-            break;
-        }
-        trace->fpu.type = FpuType::FCVT;
-        trace->used_iregs.set(rsrc0);
-        break;
-      }
-      case 0x78: { // RV32F: FMV.W.X
-        rddata[t].f = nan_box((uint32_t)rsdata[t][0].i);
-        trace->fpu.type = FpuType::FNCP;
-        trace->used_iregs.set(rsrc0);
-        break;
-      }
-      case 0x79: { // RV64D: FMV.D.X
-        rddata[t].f = rsdata[t][0].i;
-        trace->fpu.type = FpuType::FNCP;
-        trace->used_iregs.set(rsrc0);
-        break;
-      }
-      }
-      update_fcrs(fflags, core_, t, id_);
-    }
-    rd_write = true;
-    break;
-  }
-  case FMADD:      
-  case FMSUB:      
-  case FMNMADD:
-  case FMNMSUB: {
-    trace->fpu.type = FpuType::FMA;
-    trace->used_fregs.set(rsrc0);
-    trace->used_fregs.set(rsrc1);
-    trace->used_fregs.set(rsrc2);
-    for (uint32_t t = 0; t < num_threads; ++t) {
-      if (!tmask_.test(t))
-        continue;
-      uint32_t frm = get_fpu_rm(func3, core_, t, id_);
-      uint32_t fflags = 0;
-      switch (opcode) {
-      case FMADD:
-        if (func2)
-          // RV32D: FMADD.D
-          rddata[t].f = rv_fmadd_d(rsdata[t][0].f, rsdata[t][1].f, rsdata[t][2].f, frm, &fflags);
-        else
-          // RV32F: FMADD.S
-          rddata[t].f = nan_box(rv_fmadd_s(rsdata[t][0].f, rsdata[t][1].f, rsdata[t][2].f, frm, &fflags));
-        break;
-      case FMSUB:
-        if (func2)
-          // RV32D: FMSUB.D
-          rddata[t].f = rv_fmsub_d(rsdata[t][0].f, rsdata[t][1].f, rsdata[t][2].f, frm, &fflags);
-        else 
-          // RV32F: FMSUB.S
-          rddata[t].f = nan_box(rv_fmsub_s(rsdata[t][0].f, rsdata[t][1].f, rsdata[t][2].f, frm, &fflags));
-        break;
-      case FMNMADD:
-        if (func2)
-          // RV32D: FNMADD.D
-          rddata[t].f = rv_fnmadd_d(rsdata[t][0].f, rsdata[t][1].f, rsdata[t][2].f, frm, &fflags);
-        else
-          // RV32F: FNMADD.S
-          rddata[t].f = nan_box(rv_fnmadd_s(rsdata[t][0].f, rsdata[t][1].f, rsdata[t][2].f, frm, &fflags));
-        break; 
-      case FMNMSUB:
-        if (func2)
-          // RV32D: FNMSUB.D
-          rddata[t].f = rv_fnmsub_d(rsdata[t][0].f, rsdata[t][1].f, rsdata[t][2].f, frm, &fflags);
-        else
-          // RV32F: FNMSUB.S
-          rddata[t].f = nan_box(rv_fnmsub_s(rsdata[t][0].f, rsdata[t][1].f, rsdata[t][2].f, frm, &fflags));
-        break;
-      default:
-        break;
-      }              
-      update_fcrs(fflags, core_, t, id_);
-    }
-    rd_write = true;
-    break;
-  }
-  case GPGPU: {    
-    uint32_t ts = 0;
-    for (uint32_t t = 0; t < num_threads; ++t) {
-      if (tmask_.test(t)) {
-        ts = t;
-        break;
-      }
-    }
-    switch (func3) {
-    case 0: {
-      // TMC   
-      trace->exe_type = ExeType::GPU;     
-      trace->gpu.type = GpuType::TMC;
-      trace->used_iregs.set(rsrc0);
-      trace->fetch_stall = true;
-      if (rsrc1) {
-        // predicate mode
-        ThreadMask pred;
-        for (uint32_t t = 0; t < num_threads; ++t) {
-          pred[t] = tmask_.test(t) ? (ireg_file_.at(t).at(rsrc0) != 0) : 0;
-        }
-        if (pred.any()) {
-          tmask_ &= pred;
-        }
-      } else {
-        tmask_.reset();
-        for (uint32_t t = 0; t < num_threads; ++t) {
-          tmask_.set(t, rsdata.at(ts)[0].i & (1 << t));
-        }
-      }
-      DPH(3, "*** New TMC: ");
-      for (uint32_t i = 0; i < num_threads; ++i)
-        DPN(3, tmask_.test(num_threads-i-1));
-      DPN(3, std::endl);
-
-      active_ = tmask_.any();
-      trace->gpu.active_warps.reset();
-      trace->gpu.active_warps.set(id_, active_);
-    } break;
-    case 1: {
-      // WSPAWN
-      trace->exe_type = ExeType::GPU;
-      trace->gpu.type = GpuType::WSPAWN;
-      trace->used_iregs.set(rsrc0);
-      trace->used_iregs.set(rsrc1);
-      trace->fetch_stall = true;
-      trace->gpu.active_warps = core_->wspawn(rsdata.at(ts)[0].i, rsdata.at(ts)[1].i);
-    } break;
-    case 2: {
-      // SPLIT    
-      trace->exe_type = ExeType::GPU;
-      trace->gpu.type = GpuType::SPLIT;
-      trace->used_iregs.set(rsrc0);
-      trace->fetch_stall = true;
-      if (HasDivergentThreads(tmask_, ireg_file_, rsrc0)) {          
-        ThreadMask tmask;
-        for (uint32_t t = 0; t < num_threads; ++t) {
-          tmask[t] = tmask_.test(t) && !ireg_file_.at(t).at(rsrc0);
-        }
-
-        DomStackEntry e(tmask, nextPC);
-        dom_stack_.push(tmask_);
-        dom_stack_.push(e);
-        for (uint32_t t = 0, n = e.tmask.size(); t < n; ++t) {
-          tmask_.set(t, !e.tmask.test(t) && tmask_.test(t));
-        }
-        active_ = tmask_.any();
-
-        DPH(3, "*** Split: New TM=");
-        for (uint32_t t = 0; t < num_threads; ++t) DPN(3, tmask_.test(num_threads-t-1));
-        DPN(3, ", Pushed TM=");
-        for (uint32_t t = 0; t < num_threads; ++t) DPN(3, e.tmask.test(num_threads-t-1));
-        DPN(3, ", PC=0x" << std::hex << e.PC << "\n");
-      } else {
-        DP(3, "*** Unanimous pred");
-        DomStackEntry e(tmask_);
-        e.unanimous = true;
-        dom_stack_.push(e);
-      }        
-    } break;
-    case 3: {
-      // JOIN
-      trace->exe_type = ExeType::GPU;
-      trace->gpu.type = GpuType::JOIN;        
-      trace->fetch_stall = true;        
-      if (!dom_stack_.empty() && dom_stack_.top().unanimous) {
-        DP(3, "*** Uninimous branch at join");
-        tmask_ = dom_stack_.top().tmask;
-        active_ = tmask_.any();
-        dom_stack_.pop();
-      } else {
-        if (!dom_stack_.top().fallThrough) {
-          nextPC = dom_stack_.top().PC;
-          DP(3, "*** Join: next PC: " << std::hex << nextPC << std::dec);
-        }
-
-        tmask_ = dom_stack_.top().tmask;
-        active_ = tmask_.any();
-
-        DPH(3, "*** Join: New TM=");
-        for (uint32_t t = 0; t < num_threads; ++t) DPN(3, tmask_.test(num_threads-t-1));
-        DPN(3, "\n");
-
-        dom_stack_.pop();
-      }        
-    } break;
-    case 4: {
-      // BAR
-      trace->exe_type = ExeType::GPU; 
-      trace->gpu.type = GpuType::BAR;
-      trace->used_iregs.set(rsrc0);
-      trace->used_iregs.set(rsrc1);
-      trace->fetch_stall = true;
-      trace->gpu.active_warps = core_->barrier(rsdata[ts][0].i, rsdata[ts][1].i, id_);
-    } break;
-    case 5: {
-      // PREFETCH
-      trace->exe_type = ExeType::LSU; 
-      trace->lsu.type = LsuType::PREFETCH; 
-      trace->used_iregs.set(rsrc0);
-      for (uint32_t t = 0; t < num_threads; ++t) {
-        if (!tmask_.test(t))
-          continue;
-        auto mem_addr = rsdata[t][0].i;
-        trace->mem_addrs.at(t).push_back({mem_addr, 4});
-      }
-    } break;
-    default:
-      std::abort();
-    }
-  }  break;
-  case GPU: {    
-    switch (func3) {
-    case 0: { // TEX
-      trace->exe_type = ExeType::GPU; 
-      trace->gpu.type = GpuType::TEX;
-      trace->used_iregs.set(rsrc0);
-      trace->used_iregs.set(rsrc1);
-      trace->used_iregs.set(rsrc2);
-      for (uint32_t t = 0; t < num_threads; ++t) {
-        if (!tmask_.test(t))
-          continue;        
-        auto unit  = func2;
-        auto u     = rsdata[t][0].i;
-        auto v     = rsdata[t][1].i;
-        auto lod   = rsdata[t][2].i;
-        auto color = core_->tex_read(unit, u, v, lod, &trace->mem_addrs.at(t));
-        rddata[t].i = color;
       }
       rd_write = true;
-    } break;
-    case 1: 
-      switch (func2) {
-      case 0: { // CMOV
-        trace->exe_type = ExeType::ALU;
-        trace->alu.type = AluType::CMOV;
-        trace->used_iregs.set(rsrc0);
-        trace->used_iregs.set(rsrc1);
-        trace->used_iregs.set(rsrc2);
-        for (uint32_t t = 0; t < num_threads; ++t) {
-          if (!tmask_.test(t))
-            continue;     
-          rddata[t].i = rsdata[t][0].i ? rsdata[t][1].i : rsdata[t][2].i;
+    },
+    [&](LsuType lsu_type) {
+      auto lsuArgs = std::get<IntrLsuArgs>(instrArgs);
+      switch (lsu_type) {
+      case LsuType::LOAD: {
+        auto trace_data = std::make_shared<LsuTraceData>(num_threads);
+        trace->data = trace_data;
+        uint32_t data_bytes = 1 << (lsuArgs.width & 0x3);
+        uint32_t data_width = 8 * data_bytes;
+        Word offset = sext<Word>(lsuArgs.offset, 32);
+        for (uint32_t t = thread_start; t < num_threads; ++t) {
+          if (!warp.tmask.test(t))
+            continue;
+          uint64_t mem_addr = rs1_data[t].i + offset;
+          uint64_t read_data = 0;
+          this->dcache_read(&read_data, mem_addr, data_bytes);
+          trace_data->mem_addrs.at(t) = {mem_addr, data_bytes};
+          switch (lsuArgs.width) {
+          case 0: // RV32I: LB
+          case 1: // RV32I: LH
+            rd_data[t].i = sext((Word)read_data, data_width);
+            break;
+          case 2:
+            if (lsuArgs.is_float) {
+              // RV32F: FLW
+              rd_data[t].u64 = nan_box((uint32_t)read_data);
+            } else {
+              // RV32I: LW
+              rd_data[t].i = sext((Word)read_data, data_width);
+            }
+            break;
+          case 3: // RV64I: LD
+                  // RV32D: FLD
+          case 4: // RV32I: LBU
+          case 5: // RV32I: LHU
+          case 6: // RV64I: LWU
+            rd_data[t].u64 = read_data;
+            break;
+          default:
+            std::abort();
+          }
         }
+        rd_write = true;
+      } break;
+      case LsuType::STORE: {
+        auto trace_data = std::make_shared<LsuTraceData>(num_threads);
+        trace->data = trace_data;
+        uint32_t data_bytes = 1 << (lsuArgs.width & 0x3);
+        Word offset = sext<Word>(lsuArgs.offset, 32);
+        for (uint32_t t = thread_start; t < num_threads; ++t) {
+          if (!warp.tmask.test(t))
+            continue;
+          uint64_t mem_addr = rs1_data[t].i + offset;
+          uint64_t write_data = rs2_data[t].u64;
+          trace_data->mem_addrs.at(t) = {mem_addr, data_bytes};
+          switch (lsuArgs.width) {
+          case 0:
+          case 1:
+          case 2:
+          case 3:
+            this->dcache_write(&write_data, mem_addr, data_bytes);
+            break;
+          default:
+            std::abort();
+          }
+        }
+      } break;
+      case LsuType::FENCE: {
+        // no compute
+      } break;
+      default:
+        std::abort();
+      }
+    },
+    [&](AmoType amo_type) {
+      auto amoArgs = std::get<IntrAmoArgs>(instrArgs);
+      auto trace_data = std::make_shared<LsuTraceData>(num_threads);
+      trace->data = trace_data;
+      uint32_t data_bytes = 1 << (amoArgs.width & 0x3);
+      uint32_t data_width = 8 * data_bytes;
+      switch (amo_type) {
+      case AmoType::LR: {
+        for (uint32_t t = thread_start; t < num_threads; ++t) {
+          if (!warp.tmask.test(t))
+            continue;
+          uint64_t mem_addr = rs1_data[t].u;
+          trace_data->mem_addrs.at(t) = {mem_addr, data_bytes};
+          uint64_t read_data = 0;
+          this->dcache_read(&read_data, mem_addr, data_bytes);
+          this->dcache_amo_reserve(mem_addr);
+          rd_data[t].i = sext((Word)read_data, data_width);
+        }
+      } break;
+      case AmoType::SC: {
+        for (uint32_t t = thread_start; t < num_threads; ++t) {
+          if (!warp.tmask.test(t))
+            continue;
+          uint64_t mem_addr = rs1_data[t].u;
+          trace_data->mem_addrs.at(t) = {mem_addr, data_bytes};
+          if (this->dcache_amo_check(mem_addr)) {
+            this->dcache_write(&rs2_data[t].u64, mem_addr, data_bytes);
+            rd_data[t].i = 0;
+          } else {
+            rd_data[t].i = 1;
+          }
+        }
+      } break;
+      case AmoType::AMOADD: {
+        for (uint32_t t = thread_start; t < num_threads; ++t) {
+          if (!warp.tmask.test(t))
+            continue;
+          uint64_t mem_addr = rs1_data[t].u;
+          trace_data->mem_addrs.at(t) = {mem_addr, data_bytes};
+          uint64_t read_data = 0;
+          this->dcache_read(&read_data, mem_addr, data_bytes);
+          auto read_data_i = sext((WordI)read_data, data_width);
+          auto rs1_data_i  = sext((WordI)rs2_data[t].u64, data_width);
+          uint64_t result = read_data_i + rs1_data_i;
+          this->dcache_write(&result, mem_addr, data_bytes);
+          rd_data[t].i = read_data_i;
+        }
+      } break;
+      case AmoType::AMOSWAP: {
+        for (uint32_t t = thread_start; t < num_threads; ++t) {
+          if (!warp.tmask.test(t))
+            continue;
+          uint64_t mem_addr = rs1_data[t].u;
+          trace_data->mem_addrs.at(t) = {mem_addr, data_bytes};
+          uint64_t read_data = 0;
+          this->dcache_read(&read_data, mem_addr, data_bytes);
+          auto read_data_i = sext((WordI)read_data, data_width);
+          auto rs1_data_u  = zext((Word)rs2_data[t].u64, data_width);
+          uint64_t result = rs1_data_u;
+          this->dcache_write(&result, mem_addr, data_bytes);
+          rd_data[t].i = read_data_i;
+        }
+      } break;
+      case AmoType::AMOXOR: {
+        for (uint32_t t = thread_start; t < num_threads; ++t) {
+          if (!warp.tmask.test(t))
+            continue;
+          uint64_t mem_addr = rs1_data[t].u;
+          trace_data->mem_addrs.at(t) = {mem_addr, data_bytes};
+          uint64_t read_data = 0;
+          this->dcache_read(&read_data, mem_addr, data_bytes);
+          auto read_data_i = sext((WordI)read_data, data_width);
+          auto read_data_u = zext((Word)read_data, data_width);
+          auto rs1_data_u  = zext((Word)rs2_data[t].u64, data_width);
+          uint64_t result = read_data_u ^ rs1_data_u;
+          this->dcache_write(&result, mem_addr, data_bytes);
+          rd_data[t].i = read_data_i;
+        }
+      } break;
+      case AmoType::AMOOR: {
+        for (uint32_t t = thread_start; t < num_threads; ++t) {
+          if (!warp.tmask.test(t))
+            continue;
+          uint64_t mem_addr = rs1_data[t].u;
+          trace_data->mem_addrs.at(t) = {mem_addr, data_bytes};
+          uint64_t read_data = 0;
+          this->dcache_read(&read_data, mem_addr, data_bytes);
+          auto read_data_i = sext((WordI)read_data, data_width);
+          auto read_data_u = zext((Word)read_data, data_width);
+          auto rs1_data_u  = zext((Word)rs2_data[t].u64, data_width);
+          uint64_t result = read_data_u | rs1_data_u;
+          this->dcache_write(&result, mem_addr, data_bytes);
+          rd_data[t].i = read_data_i;
+        }
+      } break;
+      case AmoType::AMOAND: {
+        for (uint32_t t = thread_start; t < num_threads; ++t) {
+          if (!warp.tmask.test(t))
+            continue;
+          uint64_t mem_addr = rs1_data[t].u;
+          trace_data->mem_addrs.at(t) = {mem_addr, data_bytes};
+          uint64_t read_data = 0;
+          this->dcache_read(&read_data, mem_addr, data_bytes);
+          auto read_data_i = sext((WordI)read_data, data_width);
+          auto read_data_u = zext((Word)read_data, data_width);
+          auto rs1_data_u  = zext((Word)rs2_data[t].u64, data_width);
+          uint64_t result = read_data_u & rs1_data_u;
+          this->dcache_write(&result, mem_addr, data_bytes);
+          rd_data[t].i = read_data_i;
+        }
+      } break;
+      case AmoType::AMOMIN: {
+        for (uint32_t t = thread_start; t < num_threads; ++t) {
+          if (!warp.tmask.test(t))
+            continue;
+          uint64_t mem_addr = rs1_data[t].u;
+          trace_data->mem_addrs.at(t) = {mem_addr, data_bytes};
+          uint64_t read_data = 0;
+          this->dcache_read(&read_data, mem_addr, data_bytes);
+          auto read_data_i = sext((WordI)read_data, data_width);
+          auto rs1_data_i  = sext((WordI)rs2_data[t].u64, data_width);
+          uint64_t result = std::min(read_data_i, rs1_data_i);
+          this->dcache_write(&result, mem_addr, data_bytes);
+          rd_data[t].i = read_data_i;
+        }
+      } break;
+      case AmoType::AMOMAX: {
+        for (uint32_t t = thread_start; t < num_threads; ++t) {
+          if (!warp.tmask.test(t))
+            continue;
+          uint64_t mem_addr = rs1_data[t].u;
+          trace_data->mem_addrs.at(t) = {mem_addr, data_bytes};
+          uint64_t read_data = 0;
+          this->dcache_read(&read_data, mem_addr, data_bytes);
+          auto read_data_i = sext((WordI)read_data, data_width);
+          auto rs1_data_i  = sext((WordI)rs2_data[t].u64, data_width);
+          uint64_t result = std::max(read_data_i, rs1_data_i);
+          this->dcache_write(&result, mem_addr, data_bytes);
+          rd_data[t].i = read_data_i;
+        }
+      } break;
+      case AmoType::AMOMINU: {
+        for (uint32_t t = thread_start; t < num_threads; ++t) {
+          if (!warp.tmask.test(t))
+            continue;
+          uint64_t mem_addr = rs1_data[t].u;
+          trace_data->mem_addrs.at(t) = {mem_addr, data_bytes};
+          uint64_t read_data = 0;
+          this->dcache_read(&read_data, mem_addr, data_bytes);
+          auto read_data_i = sext((WordI)read_data, data_width);
+          auto read_data_u = zext((Word)read_data, data_width);
+          auto rs1_data_u  = zext((Word)rs2_data[t].u64, data_width);
+          uint64_t result = std::min(read_data_u, rs1_data_u);
+          this->dcache_write(&result, mem_addr, data_bytes);
+          rd_data[t].i = read_data_i;
+        }
+      } break;
+      case AmoType::AMOMAXU: {
+        for (uint32_t t = thread_start; t < num_threads; ++t) {
+          if (!warp.tmask.test(t))
+            continue;
+          uint64_t mem_addr = rs1_data[t].u;
+          trace_data->mem_addrs.at(t) = {mem_addr, data_bytes};
+          uint64_t read_data = 0;
+          this->dcache_read(&read_data, mem_addr, data_bytes);
+          auto read_data_i = sext((WordI)read_data, data_width);
+          auto read_data_u = zext((Word)read_data, data_width);
+          auto rs1_data_u  = zext((Word)rs2_data[t].u64, data_width);
+          uint64_t result = std::max(read_data_u, rs1_data_u);
+          this->dcache_write(&result, mem_addr, data_bytes);
+          rd_data[t].i = read_data_i;
+        }
+      } break;
+      default:
+        std::abort();
+      }
+      rd_write = true;
+    },
+    [&](FpuType fpu_type) {
+      auto fpuArgs = std::get<IntrFpuArgs>(instrArgs);
+      switch (fpu_type) {
+      case FpuType::FADD: {
+        for (uint32_t t = thread_start; t < num_threads; ++t) {
+          if (!warp.tmask.test(t))
+            continue;
+          uint32_t frm = this->get_fpu_rm(fpuArgs.frm, wid, t);
+          uint32_t fflags = 0;
+          if (fpuArgs.is_f64) {
+            rd_data[t].u64 = rv_fadd_d(rs1_data[t].u64, rs2_data[t].u64, frm, &fflags);
+          } else {
+            rd_data[t].u64 = nan_box(rv_fadd_s(check_boxing(rs1_data[t].u64), check_boxing(rs2_data[t].u64), frm, &fflags));
+          }
+          this->update_fcrs(fflags, wid, t);
+        }
+      } break;
+      case FpuType::FSUB: {
+        for (uint32_t t = thread_start; t < num_threads; ++t) {
+          if (!warp.tmask.test(t))
+            continue;
+          uint32_t frm = this->get_fpu_rm(fpuArgs.frm, wid, t);
+          uint32_t fflags = 0;
+          if (fpuArgs.is_f64) {
+            rd_data[t].u64 = rv_fsub_d(rs1_data[t].u64, rs2_data[t].u64, frm, &fflags);
+          } else {
+            rd_data[t].u64 = nan_box(rv_fsub_s(check_boxing(rs1_data[t].u64), check_boxing(rs2_data[t].u64), frm, &fflags));
+          }
+          this->update_fcrs(fflags, wid, t);
+        }
+      } break;
+      case FpuType::FMUL: {
+        for (uint32_t t = thread_start; t < num_threads; ++t) {
+          if (!warp.tmask.test(t))
+            continue;
+          uint32_t frm = this->get_fpu_rm(fpuArgs.frm, wid, t);
+          uint32_t fflags = 0;
+          if (fpuArgs.is_f64) {
+            rd_data[t].u64 = rv_fmul_d(rs1_data[t].u64, rs2_data[t].u64, frm, &fflags);
+          } else {
+            rd_data[t].u64 = nan_box(rv_fmul_s(check_boxing(rs1_data[t].u64), check_boxing(rs2_data[t].u64), frm, &fflags));
+          }
+          this->update_fcrs(fflags, wid, t);
+        }
+      } break;
+      case FpuType::FDIV: {
+        for (uint32_t t = thread_start; t < num_threads; ++t) {
+          if (!warp.tmask.test(t))
+            continue;
+          uint32_t frm = this->get_fpu_rm(fpuArgs.frm, wid, t);
+          uint32_t fflags = 0;
+          if (fpuArgs.is_f64) {
+            rd_data[t].u64 = rv_fdiv_d(rs1_data[t].u64, rs2_data[t].u64, frm, &fflags);
+          } else {
+            rd_data[t].u64 = nan_box(rv_fdiv_s(check_boxing(rs1_data[t].u64), check_boxing(rs2_data[t].u64), frm, &fflags));
+          }
+          this->update_fcrs(fflags, wid, t);
+        }
+      } break;
+      case FpuType::FSQRT: {
+        for (uint32_t t = thread_start; t < num_threads; ++t) {
+          if (!warp.tmask.test(t))
+            continue;
+          uint32_t frm = this->get_fpu_rm(fpuArgs.frm, wid, t);
+          uint32_t fflags = 0;
+          if (fpuArgs.is_f64) {
+            rd_data[t].u64 = rv_fsqrt_d(rs1_data[t].u64, frm, &fflags);
+          } else {
+            rd_data[t].u64 = nan_box(rv_fsqrt_s(check_boxing(rs1_data[t].u64), frm, &fflags));
+          }
+          this->update_fcrs(fflags, wid, t);
+        }
+      } break;
+      case FpuType::FSGNJ: {
+        for (uint32_t t = thread_start; t < num_threads; ++t) {
+          if (!warp.tmask.test(t))
+            continue;
+          uint32_t fflags = 0;
+          if (fpuArgs.is_f64) {
+            switch (fpuArgs.frm) {
+            case 0: // RV32D: FSGNJ.D
+              rd_data[t].u64 = rv_fsgnj_d(rs1_data[t].u64, rs2_data[t].u64);
+              break;
+            case 1: // RV32D: FSGNJN.D
+              rd_data[t].u64 = rv_fsgnjn_d(rs1_data[t].u64, rs2_data[t].u64);
+              break;
+            case 2: // RV32D: FSGNJX.D
+              rd_data[t].u64 = rv_fsgnjx_d(rs1_data[t].u64, rs2_data[t].u64);
+              break;
+            }
+          } else {
+            switch (fpuArgs.frm) {
+            case 0: // RV32F: FSGNJ.S
+              rd_data[t].u64 = nan_box(rv_fsgnj_s(check_boxing(rs1_data[t].u64), check_boxing(rs2_data[t].u64)));
+              break;
+            case 1: // RV32F: FSGNJN.S
+              rd_data[t].u64 = nan_box(rv_fsgnjn_s(check_boxing(rs1_data[t].u64), check_boxing(rs2_data[t].u64)));
+              break;
+            case 2: // RV32F: FSGNJX.S
+              rd_data[t].u64 = nan_box(rv_fsgnjx_s(check_boxing(rs1_data[t].u64), check_boxing(rs2_data[t].u64)));
+              break;
+            }
+          }
+          this->update_fcrs(fflags, wid, t);
+        }
+      } break;
+      case FpuType::FMINMAX: {
+        for (uint32_t t = thread_start; t < num_threads; ++t) {
+          if (!warp.tmask.test(t))
+            continue;
+          uint32_t fflags = 0;
+          if (fpuArgs.is_f64) {
+            if (fpuArgs.frm) {
+              rd_data[t].u64 = rv_fmax_d(rs1_data[t].u64, rs2_data[t].u64, &fflags);
+            } else {
+              rd_data[t].u64 = rv_fmin_d(rs1_data[t].u64, rs2_data[t].u64, &fflags);
+            }
+          } else {
+            if (fpuArgs.frm) {
+              rd_data[t].u64 = nan_box(rv_fmax_s(check_boxing(rs1_data[t].u64), check_boxing(rs2_data[t].u64), &fflags));
+            } else {
+              rd_data[t].u64 = nan_box(rv_fmin_s(check_boxing(rs1_data[t].u64), check_boxing(rs2_data[t].u64), &fflags));
+            }
+          }
+          this->update_fcrs(fflags, wid, t);
+        }
+      } break;
+      case FpuType::FCMP: {
+        for (uint32_t t = thread_start; t < num_threads; ++t) {
+          if (!warp.tmask.test(t))
+            continue;
+          uint32_t fflags = 0;
+          if (fpuArgs.is_f64) {
+            switch (fpuArgs.frm) {
+            case 0: // RV32D: FLE.D
+              rd_data[t].i = rv_fle_d(rs1_data[t].u64, rs2_data[t].u64, &fflags);
+              break;
+            case 1: // RV32D: FLT.D
+              rd_data[t].i = rv_flt_d(rs1_data[t].u64, rs2_data[t].u64, &fflags);
+              break;
+            case 2: // RV32D: FEQ.D
+              rd_data[t].i = rv_feq_d(rs1_data[t].u64, rs2_data[t].u64, &fflags);
+              break;
+            }
+          } else {
+            switch (fpuArgs.frm) {
+            case 0: // RV32F: FLE.S
+              rd_data[t].i = rv_fle_s(check_boxing(rs1_data[t].u64), check_boxing(rs2_data[t].u64), &fflags);
+              break;
+            case 1: // RV32F: FLT.S
+              rd_data[t].i = rv_flt_s(check_boxing(rs1_data[t].u64), check_boxing(rs2_data[t].u64), &fflags);
+              break;
+            case 2: // RV32F: FEQ.S
+              rd_data[t].i = rv_feq_s(check_boxing(rs1_data[t].u64), check_boxing(rs2_data[t].u64), &fflags);
+              break;
+            }
+          }
+          this->update_fcrs(fflags, wid, t);
+        }
+      } break;
+      case FpuType::F2I: {
+        for (uint32_t t = thread_start; t < num_threads; ++t) {
+          if (!warp.tmask.test(t))
+            continue;
+          uint32_t frm = this->get_fpu_rm(fpuArgs.frm, wid, t);
+          uint32_t fflags = 0;
+          if (fpuArgs.is_f64) {
+            switch (fpuArgs.cvt) {
+            case 0: // RV32D: FCVT.W.D
+              rd_data[t].i = sext((uint64_t)rv_ftoi_d(rs1_data[t].u64, frm, &fflags), 32);
+              break;
+            case 1: // RV32D: FCVT.WU.D
+              rd_data[t].i = sext((uint64_t)rv_ftou_d(rs1_data[t].u64, frm, &fflags), 32);
+              break;
+            case 2: // RV64D: FCVT.L.D
+              rd_data[t].i = rv_ftol_d(rs1_data[t].u64, frm, &fflags);
+              break;
+            case 3: // RV64D: FCVT.LU.D
+              rd_data[t].i = rv_ftolu_d(rs1_data[t].u64, frm, &fflags);
+              break;
+            }
+          } else {
+            switch (fpuArgs.cvt) {
+            case 0:
+              // RV32F: FCVT.W.S
+              rd_data[t].i = sext((uint64_t)rv_ftoi_s(check_boxing(rs1_data[t].u64), frm, &fflags), 32);
+              break;
+            case 1:
+              // RV32F: FCVT.WU.S
+              rd_data[t].i = sext((uint64_t)rv_ftou_s(check_boxing(rs1_data[t].u64), frm, &fflags), 32);
+              break;
+            case 2:
+              // RV64F: FCVT.L.S
+              rd_data[t].i = rv_ftol_s(check_boxing(rs1_data[t].u64), frm, &fflags);
+              break;
+            case 3:
+              // RV64F: FCVT.LU.S
+              rd_data[t].i = rv_ftolu_s(check_boxing(rs1_data[t].u64), frm, &fflags);
+              break;
+            }
+          }
+          this->update_fcrs(fflags, wid, t);
+        }
+      } break;
+      case FpuType::I2F: {
+        for (uint32_t t = thread_start; t < num_threads; ++t) {
+          if (!warp.tmask.test(t))
+            continue;
+          uint32_t frm = this->get_fpu_rm(fpuArgs.frm, wid, t);
+          uint32_t fflags = 0;
+          if (fpuArgs.is_f64) {
+            switch (fpuArgs.cvt) {
+            case 0: // RV32D: FCVT.D.W
+              rd_data[t].u64 = rv_itof_d(rs1_data[t].i, frm, &fflags);
+              break;
+            case 1: // RV32D: FCVT.D.WU
+              rd_data[t].u64 = rv_utof_d(rs1_data[t].i, frm, &fflags);
+              break;
+            case 2: // RV64D: FCVT.D.L
+              rd_data[t].u64 = rv_ltof_d(rs1_data[t].i, frm, &fflags);
+              break;
+            case 3: // RV64D: FCVT.D.LU
+              rd_data[t].u64 = rv_lutof_d(rs1_data[t].i, frm, &fflags);
+              break;
+            }
+          } else {
+            switch (fpuArgs.cvt) {
+            case 0: // RV32F: FCVT.S.W
+              rd_data[t].u64 = nan_box(rv_itof_s(rs1_data[t].i, frm, &fflags));
+              break;
+            case 1: // RV32F: FCVT.S.WU
+              rd_data[t].u64 = nan_box(rv_utof_s(rs1_data[t].i, frm, &fflags));
+              break;
+            case 2: // RV64F: FCVT.S.L
+              rd_data[t].u64 = nan_box(rv_ltof_s(rs1_data[t].i, frm, &fflags));
+              break;
+            case 3: // RV64F: FCVT.S.LU
+              rd_data[t].u64 = nan_box(rv_lutof_s(rs1_data[t].i, frm, &fflags));
+              break;
+            }
+          }
+          this->update_fcrs(fflags, wid, t);
+        }
+      } break;
+      case FpuType::F2F: {
+        for (uint32_t t = thread_start; t < num_threads; ++t) {
+          if (!warp.tmask.test(t))
+            continue;
+          uint32_t fflags = 0;
+          if (fpuArgs.is_f64) {
+            rd_data[t].u64 = rv_ftod(check_boxing(rs1_data[t].u64));
+          } else {
+            rd_data[t].u64 = nan_box(rv_dtof(rs1_data[t].u64));
+          }
+          this->update_fcrs(fflags, wid, t);
+        }
+      } break;
+      case FpuType::FCLASS: {
+        for (uint32_t t = thread_start; t < num_threads; ++t) {
+          if (!warp.tmask.test(t))
+            continue;
+          uint32_t fflags = 0;
+          if (fpuArgs.is_f64) {
+            rd_data[t].i = rv_fclss_d(rs1_data[t].u64);
+          } else {
+            rd_data[t].i = rv_fclss_s(check_boxing(rs1_data[t].u64));
+          }
+          this->update_fcrs(fflags, wid, t);
+        }
+      } break;
+      case FpuType::FMVXW: {
+        for (uint32_t t = thread_start; t < num_threads; ++t) {
+          if (!warp.tmask.test(t))
+            continue;
+          uint32_t fflags = 0;
+          if (fpuArgs.is_f64) { // RV64D: FMV.X.D
+            rd_data[t].u64 = rs1_data[t].u64;
+          } else { // RV32F: FMV.X.S
+            uint32_t result = (uint32_t)rs1_data[t].u64;
+            rd_data[t].i = sext((uint64_t)result, 32);
+          }
+          this->update_fcrs(fflags, wid, t);
+        }
+      } break;
+      case FpuType::FMVWX: {
+        for (uint32_t t = thread_start; t < num_threads; ++t) {
+          if (!warp.tmask.test(t))
+            continue;
+          uint32_t fflags = 0;
+          if (fpuArgs.is_f64) { // RV64D: FMV.D.X
+            rd_data[t].u64 = rs1_data[t].i;
+          } else { // RV32F: FMV.S.X
+            rd_data[t].u64 = nan_box((uint32_t)rs1_data[t].i);
+          }
+          this->update_fcrs(fflags, wid, t);
+        }
+      } break;
+      case FpuType::FMADD:
+        for (uint32_t t = thread_start; t < num_threads; ++t) {
+          if (!warp.tmask.test(t))
+            continue;
+          uint32_t frm = this->get_fpu_rm(fpuArgs.frm, wid, t);
+          uint32_t fflags = 0;
+            if (fpuArgs.is_f64) {
+            rd_data[t].u64 = rv_fmadd_d(rs1_data[t].u64, rs2_data[t].u64, rs3_data[t].u64, frm, &fflags);
+          } else {
+            rd_data[t].u64 = nan_box(rv_fmadd_s(check_boxing(rs1_data[t].u64), check_boxing(rs2_data[t].u64), check_boxing(rs3_data[t].u64), frm, &fflags));
+          }
+          this->update_fcrs(fflags, wid, t);
+        }
+        break;
+      case FpuType::FMSUB: {
+        for (uint32_t t = thread_start; t < num_threads; ++t) {
+          if (!warp.tmask.test(t))
+            continue;
+          uint32_t frm = this->get_fpu_rm(fpuArgs.frm, wid, t);
+          uint32_t fflags = 0;
+          if (fpuArgs.is_f64) {
+            rd_data[t].u64 = rv_fmsub_d(rs1_data[t].u64, rs2_data[t].u64, rs3_data[t].u64, frm, &fflags);
+          } else {
+            rd_data[t].u64 = nan_box(rv_fmsub_s(check_boxing(rs1_data[t].u64), check_boxing(rs2_data[t].u64), check_boxing(rs3_data[t].u64), frm, &fflags));
+          }
+          this->update_fcrs(fflags, wid, t);
+        }
+      } break;
+      case FpuType::FNMADD: {
+        for (uint32_t t = thread_start; t < num_threads; ++t) {
+          if (!warp.tmask.test(t))
+            continue;
+          uint32_t frm = this->get_fpu_rm(fpuArgs.frm, wid, t);
+          uint32_t fflags = 0;
+          if (fpuArgs.is_f64) {
+            rd_data[t].u64 = rv_fnmadd_d(rs1_data[t].u64, rs2_data[t].u64, rs3_data[t].u64, frm, &fflags);
+          } else {
+            rd_data[t].u64 = nan_box(rv_fnmadd_s(check_boxing(rs1_data[t].u64), check_boxing(rs2_data[t].u64), check_boxing(rs3_data[t].u64), frm, &fflags));
+          }
+          this->update_fcrs(fflags, wid, t);
+        }
+      } break;
+      case FpuType::FNMSUB: {
+        for (uint32_t t = thread_start; t < num_threads; ++t) {
+          if (!warp.tmask.test(t))
+            continue;
+          uint32_t frm = this->get_fpu_rm(fpuArgs.frm, wid, t);
+          uint32_t fflags = 0;
+          if (fpuArgs.is_f64) {
+            rd_data[t].u64 = rv_fnmsub_d(rs1_data[t].u64, rs2_data[t].u64, rs3_data[t].u64, frm, &fflags);
+          } else {
+            rd_data[t].u64 = nan_box(rv_fnmsub_s(check_boxing(rs1_data[t].u64), check_boxing(rs2_data[t].u64), check_boxing(rs3_data[t].u64), frm, &fflags));
+          }
+          this->update_fcrs(fflags, wid, t);
+        }
+      } break;
+      default:
+        std::abort();
+      }
+      rd_write = true;
+    },
+    [&](CsrType csr_type) {
+      auto csrArgs = std::get<IntrCsrArgs>(instrArgs);
+      uint32_t csr_addr = csrArgs.csr;
+      switch (csr_type) {
+      case CsrType::CSRRW: {
+        for (uint32_t t = thread_start; t < num_threads; ++t) {
+          if (!warp.tmask.test(t))
+            continue;
+          Word csr_value = this->get_csr(csr_addr, wid, t);
+          auto src_data = csrArgs.is_imm ? csrArgs.imm : rs1_data[t].i;
+          this->set_csr(csr_addr, src_data, wid, t);
+          rd_data[t].i = csr_value;
+        }
+      } break;
+      case CsrType::CSRRS: {
+        for (uint32_t t = thread_start; t < num_threads; ++t) {
+          if (!warp.tmask.test(t))
+            continue;
+          Word csr_value = this->get_csr(csr_addr, wid, t);
+          auto src_data = csrArgs.is_imm ? csrArgs.imm : rs1_data[t].i;
+          if (src_data != 0) {
+            this->set_csr(csr_addr, csr_value | src_data, wid, t);
+          }
+          rd_data[t].i = csr_value;
+        }
+      } break;
+      case CsrType::CSRRC: {
+        for (uint32_t t = thread_start; t < num_threads; ++t) {
+          if (!warp.tmask.test(t))
+            continue;
+          Word csr_value = this->get_csr(csr_addr, wid, t);
+          auto src_data = csrArgs.is_imm ? csrArgs.imm : rs1_data[t].i;
+          if (src_data != 0) {
+            this->set_csr(csr_addr, csr_value & ~src_data, wid, t);
+          }
+          rd_data[t].i = csr_value;
+        }
+      } break;
+      default:
+        std::abort();
+      }
+      trace->fetch_stall = (csr_addr <= VX_CSR_FCSR);
+      rd_write = true;
+    },
+    [&](WctlType wctl_type) {
+      auto wctlArgs = std::get<IntrWctlArgs>(instrArgs);
+      switch (wctl_type) {
+      case WctlType::TMC: {
+        trace->fetch_stall = true;
+        next_tmask.reset();
+        for (uint32_t t = 0; t < num_threads; ++t) {
+          next_tmask.set(t, rs1_data.at(thread_last).u & (1 << t));
+        }
+      } break;
+      case WctlType::WSPAWN: {
+        trace->fetch_stall = true;
+        trace->data = std::make_shared<SfuTraceData>(rs1_data.at(thread_last).u, rs2_data.at(thread_last).u);
+      } break;
+      case WctlType::SPLIT: {
+        trace->fetch_stall = true;
+        auto stack_size = warp.ipdom_stack.size();
+
+        ThreadMask then_tmask(num_threads);
+        ThreadMask else_tmask(num_threads);
+        auto not_pred = wctlArgs.is_neg;
+        for (uint32_t t = 0; t < num_threads; ++t) {
+          auto cond = (rs1_data.at(t).i & 0x1) ^ not_pred;
+          then_tmask[t] = warp.tmask.test(t) && cond;
+          else_tmask[t] = warp.tmask.test(t) && !cond;
+        }
+
+        bool is_divergent = then_tmask.any() && else_tmask.any();
+        if (is_divergent) {
+          if (stack_size == ipdom_size_) {
+            std::cout << "IPDOM stack is full! size=" << stack_size << ", PC=0x" << std::hex << warp.PC << std::dec << " (#" << trace->uuid << ")\n" << std::flush;
+            std::abort();
+          }
+          // set new thread mask to the larger set
+          if (then_tmask.count() >= else_tmask.count()) {
+            next_tmask = then_tmask;
+          } else {
+            next_tmask = else_tmask;
+          }
+          // push reconvergence and not-taken thread mask onto the stack
+          auto ntaken_tmask = ~next_tmask & warp.tmask;
+          warp.ipdom_stack.emplace(warp.tmask, ntaken_tmask, next_pc);
+        }
+        // return divergent state
+        for (uint32_t t = thread_start; t < num_threads; ++t) {
+          rd_data[t].i = stack_size;
+        }
+        rd_write = true;
+      } break;
+      case WctlType::JOIN: {
+        trace->fetch_stall = true;
+        auto stack_ptr = rs1_data.at(thread_last).u;
+        if (stack_ptr != warp.ipdom_stack.size()) {
+          if (warp.ipdom_stack.empty()) {
+            std::cout << "IPDOM stack is empty!\n" << std::flush;
+            std::abort();
+          }
+          if (warp.ipdom_stack.top().fallthrough) {
+            next_tmask = warp.ipdom_stack.top().orig_tmask;
+            warp.ipdom_stack.pop();
+          } else {
+            next_tmask = warp.ipdom_stack.top().else_tmask;
+            next_pc = warp.ipdom_stack.top().PC;
+            warp.ipdom_stack.top().fallthrough = true;
+          }
+        }
+      } break;
+      case WctlType::BAR: {
+        trace->fetch_stall = true;
+        trace->data = std::make_shared<SfuTraceData>(rs1_data[thread_last].i, rs2_data[thread_last].i);
+      } break;
+      case WctlType::PRED: {
+        trace->fetch_stall = true;
+        ThreadMask pred(num_threads);
+        auto not_pred = wctlArgs.is_neg;
+        for (uint32_t t = 0; t < num_threads; ++t) {
+          auto cond = (rs1_data.at(t).i & 0x1) ^ not_pred;
+          pred[t] = warp.tmask.test(t) && cond;
+        }
+        if (pred.any()) {
+          next_tmask &= pred;
+        } else {
+          next_tmask = ThreadMask(num_threads, rs2_data.at(thread_last).u);
+        }
+      } break;
+      default:
+        std::abort();
+      }
+    }
+  #ifdef EXT_V_ENABLE
+    ,[&](VsetType /*vset_type*/) {
+      auto trace_data = std::make_shared<VecUnit::ExeTraceData>();
+      trace->data = trace_data;
+      for (uint32_t t = thread_start; t < num_threads; ++t) {
+        if (!warp.tmask.test(t))
+          continue;
+        vec_unit_->configure(instr, wid, t, rs1_data, rs2_data, rd_data, trace_data.get());
+      }
+      rd_write = true;
+    },
+    [&](VlsType vls_type) {
+      switch (vls_type) {
+      case VlsType::VL:
+      case VlsType::VLS:
+      case VlsType::VLX: {
+        auto trace_data = std::make_shared<VecUnit::MemTraceData>(num_threads);
+        trace->data = trace_data;
+        for (uint32_t t = thread_start; t < num_threads; ++t) {
+          if (!warp.tmask.test(t))
+            continue;
+          vec_unit_->load(instr, wid, t, rs1_data, rs2_data, trace_data.get());
+        }
+        rd_write = true;
+      } break;
+      case VlsType::VS:
+      case VlsType::VSS:
+      case VlsType::VSX: {
+        auto trace_data = std::make_shared<VecUnit::MemTraceData>(num_threads);
+        trace->data = trace_data;
+        for (uint32_t t = thread_start; t < num_threads; ++t) {
+          if (!warp.tmask.test(t))
+            continue;
+          vec_unit_->store(instr, wid, t, rs1_data, rs2_data, trace_data.get());
+        }
+      } break;
+      default:
+        std::abort();
+      }
+    },
+    [&](VopType /*vop_type*/) {
+      auto trace_data = std::make_shared<VecUnit::ExeTraceData>();
+      trace->data = trace_data;
+      for (uint32_t t = thread_start; t < num_threads; ++t) {
+        if (!warp.tmask.test(t))
+          continue;
+        vec_unit_->execute(instr, wid, t, rs1_data, rd_data, trace_data.get());
+      }
+      rd_write = true;
+    }
+  #endif // EXT_V_ENABLE
+  #ifdef EXT_TCU_ENABLE
+    ,[&](TcuType tcu_type) {
+      auto tpuArgs = std::get<IntrTcuArgs>(instrArgs);
+      switch (tcu_type) {
+      case TcuType::WMMA: {
+        auto trace_data = std::make_shared<TensorUnit::ExeTraceData>();
+        trace->data = trace_data;
+        assert(warp.tmask.count() == num_threads);
+        tensor_unit_->wmma(wid, tpuArgs.fmt_s, tpuArgs.fmt_d, tpuArgs.step_m, tpuArgs.step_n, rs1_data, rs2_data, rs3_data, rd_data, trace_data.get());
         rd_write = true;
       } break;
       default:
         std::abort();
       }
-      break;
-    default:
-      std::abort();
     }
-  } break;
-  case VSET: {
-    uint32_t VLEN = core_->arch().vsize() * 8;
-    uint32_t VLMAX = (instr.getVlmul() * VLEN) / instr.getVsew();
-    switch (func3) {
-    case 0: // vector-vector
-      switch (func6) {
-      case 0: {
-        auto& vr1 = vreg_file_.at(rsrc0);
-        auto& vr2 = vreg_file_.at(rsrc1);
-        auto& vd = vreg_file_.at(rdest);
-        auto& mask = vreg_file_.at(0);
-        if (vtype_.vsew == 8) {
-          for (uint32_t i = 0; i < vl_; i++) {
-            uint8_t emask = *(uint8_t *)(mask.data() + i);
-            uint8_t value = emask & 0x1;
-            if (vmask || (!vmask && value)) {
-              uint8_t first  = *(uint8_t *)(vr1.data() + i);
-              uint8_t second = *(uint8_t *)(vr2.data() + i);
-              uint8_t result = first + second;
-              DP(3, "Adding " << first << " + " << second << " = " << result);
-              *(uint8_t *)(vd.data() + i) = result;
-            }
-          }
-        } else if (vtype_.vsew == 16) {
-          for (uint32_t i = 0; i < vl_; i++) {
-            uint16_t emask = *(uint16_t *)(mask.data() + i);
-            uint16_t value = emask & 0x1;
-            if (vmask || (!vmask && value)) {
-              uint16_t first  = *(uint16_t *)(vr1.data() + i);
-              uint16_t second = *(uint16_t *)(vr2.data() + i);
-              uint16_t result = first + second;
-              DP(3, "Adding " << first << " + " << second << " = " << result);
-              *(uint16_t *)(vd.data() + i) = result;
-            }
-          }
-        } else if (vtype_.vsew == 32) {
-          for (uint32_t i = 0; i < vl_; i++) {
-            uint32_t emask = *(uint32_t *)(mask.data() + i);
-            uint32_t value = emask & 0x1;
-            if (vmask || (!vmask && value)) {
-              uint32_t first  = *(uint32_t *)(vr1.data() + i);
-              uint32_t second = *(uint32_t *)(vr2.data() + i);
-              uint32_t result = first + second;
-              DP(3, "Adding " << first << " + " << second << " = " << result);
-              *(uint32_t *)(vd.data() + i) = result;
-            }
-          }
-        }                
-      } break;
-      case 24: {
-        // vmseq
-        auto &vr1 = vreg_file_.at(rsrc0);
-        auto &vr2 = vreg_file_.at(rsrc1);
-        auto &vd = vreg_file_.at(rdest);
-        if (vtype_.vsew == 8) {
-          for (uint32_t i = 0; i < vl_; i++) {
-            uint8_t first  = *(uint8_t *)(vr1.data() + i);
-            uint8_t second = *(uint8_t *)(vr2.data() + i);
-            uint8_t result = (first == second) ? 1 : 0;
-            DP(3, "Comparing " << first << " + " << second << " = " << result);
-            *(uint8_t *)(vd.data() + i) = result;
-          }
-        } else if (vtype_.vsew == 16) {
-          for (uint32_t i = 0; i < vl_; i++) {
-            uint16_t first  = *(uint16_t *)(vr1.data() + i);
-            uint16_t second = *(uint16_t *)(vr2.data() + i);
-            uint16_t result = (first == second) ? 1 : 0;
-            DP(3, "Comparing " << first << " + " << second << " = " << result);
-            *(uint16_t *)(vd.data() + i) = result;
-          }
-        } else if (vtype_.vsew == 32) {
-          for (uint32_t i = 0; i < vl_; i++) {
-            uint32_t first  = *(uint32_t *)(vr1.data() + i);
-            uint32_t second = *(uint32_t *)(vr2.data() + i);
-            uint32_t result = (first == second) ? 1 : 0;
-            DP(3, "Comparing " << first << " + " << second << " = " << result);
-            *(uint32_t *)(vd.data() + i) = result;
-          }
-        }
-      } break;
-      case 25: { 
-        // vmsne
-        auto &vr1 = vreg_file_.at(rsrc0);
-        auto &vr2 = vreg_file_.at(rsrc1);
-        auto &vd = vreg_file_.at(rdest);
-        if (vtype_.vsew == 8) {
-          for (uint32_t i = 0; i < vl_; i++) {
-            uint8_t first  = *(uint8_t *)(vr1.data() + i);
-            uint8_t second = *(uint8_t *)(vr2.data() + i);
-            uint8_t result = (first != second) ? 1 : 0;
-            DP(3, "Comparing " << first << " + " << second << " = " << result);
-            *(uint8_t *)(vd.data() + i) = result;
-          }
-        } else if (vtype_.vsew == 16) {
-          for (uint32_t i = 0; i < vl_; i++) {
-            uint16_t first  = *(uint16_t *)(vr1.data() + i);
-            uint16_t second = *(uint16_t *)(vr2.data() + i);
-            uint16_t result = (first != second) ? 1 : 0;
-            DP(3, "Comparing " << first << " + " << second << " = " << result);
-            *(uint16_t *)(vd.data() + i) = result;
-          }
-        } else if (vtype_.vsew == 32) {
-          for (uint32_t i = 0; i < vl_; i++) {
-            uint32_t first  = *(uint32_t *)(vr1.data() + i);
-            uint32_t second = *(uint32_t *)(vr2.data() + i);
-            uint32_t result = (first != second) ? 1 : 0;
-            DP(3, "Comparing " << first << " + " << second << " = " << result);
-            *(uint32_t *)(vd.data() + i) = result;
-          }
-        }
-      } break;
-      case 26: {
-        // vmsltu
-        auto &vr1 = vreg_file_.at(rsrc0);
-        auto &vr2 = vreg_file_.at(rsrc1);
-        auto &vd = vreg_file_.at(rdest);
-        if (vtype_.vsew == 8) {
-          for (uint32_t i = 0; i < vl_; i++) {
-            uint8_t first  = *(uint8_t *)(vr1.data() + i);
-            uint8_t second = *(uint8_t *)(vr2.data() + i);
-            uint8_t result = (first < second) ? 1 : 0;
-            DP(3, "Comparing " << first << " + " << second << " = " << result);
-            *(uint8_t *)(vd.data() + i) = result;
-          }
-        } else if (vtype_.vsew == 16) {
-          for (uint32_t i = 0; i < vl_; i++) {
-            uint16_t first  = *(uint16_t *)(vr1.data() + i);
-            uint16_t second = *(uint16_t *)(vr2.data() + i);
-            uint16_t result = (first < second) ? 1 : 0;
-            DP(3, "Comparing " << first << " + " << second << " = " << result);
-            *(uint16_t *)(vd.data() + i) = result;
-          }
-        } else if (vtype_.vsew == 32) {
-          for (uint32_t i = 0; i < vl_; i++) {
-            uint32_t first  = *(uint32_t *)(vr1.data() + i);
-            uint32_t second = *(uint32_t *)(vr2.data() + i);
-            uint32_t result = (first < second) ? 1 : 0;
-            DP(3, "Comparing " << first << " + " << second << " = " << result);
-            *(uint32_t *)(vd.data() + i) = result;
-          }
-        }
-      } break;
-      case 27: {
-        // vmslt
-        auto &vr1 = vreg_file_.at(rsrc0);
-        auto &vr2 = vreg_file_.at(rsrc1);
-        auto &vd = vreg_file_.at(rdest);
-        if (vtype_.vsew == 8) {
-          for (uint32_t i = 0; i < vl_; i++) {
-            int8_t first  = *(int8_t *)(vr1.data() + i);
-            int8_t second = *(int8_t *)(vr2.data() + i);
-            int8_t result = (first < second) ? 1 : 0;
-            DP(3, "Comparing " << first << " + " << second << " = " << result);
-            *(uint8_t *)(vd.data() + i) = result;
-          }
-        } else if (vtype_.vsew == 16) {
-          for (uint32_t i = 0; i < vl_; i++) {
-            int16_t first  = *(int16_t *)(vr1.data() + i);
-            int16_t second = *(int16_t *)(vr2.data() + i);
-            int16_t result = (first < second) ? 1 : 0;
-            DP(3, "Comparing " << first << " + " << second << " = " << result);
-            *(int16_t *)(vd.data() + i) = result;
-          }
-        } else if (vtype_.vsew == 32) {
-          for (uint32_t i = 0; i < vl_; i++) {
-            int32_t first  = *(int32_t *)(vr1.data() + i);
-            int32_t second = *(int32_t *)(vr2.data() + i);
-            int32_t result = (first < second) ? 1 : 0;
-            DP(3, "Comparing " << first << " + " << second << " = " << result);
-            *(int32_t *)(vd.data() + i) = result;
-          }
-        }
-      } break;
-      case 28: {
-        // vmsleu
-        auto &vr1 = vreg_file_.at(rsrc0);
-        auto &vr2 = vreg_file_.at(rsrc1);
-        auto &vd = vreg_file_.at(rdest);
-        if (vtype_.vsew == 8) {
-          for (uint32_t i = 0; i < vl_; i++) {
-            uint8_t first  = *(uint8_t *)(vr1.data() + i);
-            uint8_t second = *(uint8_t *)(vr2.data() + i);
-            uint8_t result = (first <= second) ? 1 : 0;
-            DP(3, "Comparing " << first << " + " << second << " = " << result);
-            *(uint8_t *)(vd.data() + i) = result;
-          }
-        } else if (vtype_.vsew == 16) {
-          for (uint32_t i = 0; i < vl_; i++) {
-            uint16_t first  = *(uint16_t *)(vr1.data() + i);
-            uint16_t second = *(uint16_t *)(vr2.data() + i);
-            uint16_t result = (first <= second) ? 1 : 0;
-            DP(3, "Comparing " << first << " + " << second << " = " << result);
-            *(uint16_t *)(vd.data() + i) = result;
-          }
-        } else if (vtype_.vsew == 32) {
-          for (uint32_t i = 0; i < vl_; i++) {
-            uint32_t first  = *(uint32_t *)(vr1.data() + i);
-            uint32_t second = *(uint32_t *)(vr2.data() + i);
-            uint32_t result = (first <= second) ? 1 : 0;
-            DP(3, "Comparing " << first << " + " << second << " = " << result);
-            *(uint32_t *)(vd.data() + i) = result;
-          }
-        }
-      } break;
-      case 29: {
-        // vmsle
-        auto &vr1 = vreg_file_.at(rsrc0);
-        auto &vr2 = vreg_file_.at(rsrc1);
-        auto &vd = vreg_file_.at(rdest);
-        if (vtype_.vsew == 8) {
-          for (uint32_t i = 0; i < vl_; i++) {
-            int8_t first  = *(int8_t *)(vr1.data() + i);
-            int8_t second = *(int8_t *)(vr2.data() + i);
-            int8_t result = (first <= second) ? 1 : 0;
-            DP(3, "Comparing " << first << " + " << second << " = " << result);
-            *(uint8_t *)(vd.data() + i) = result;
-          }
-        } else if (vtype_.vsew == 16) {
-          for (uint32_t i = 0; i < vl_; i++) {
-            int16_t first  = *(int16_t *)(vr1.data() + i);
-            int16_t second = *(int16_t *)(vr2.data() + i);
-            int16_t result = (first <= second) ? 1 : 0;
-            DP(3, "Comparing " << first << " + " << second << " = " << result);
-            *(int16_t *)(vd.data() + i) = result;
-          }
-        } else if (vtype_.vsew == 32) {
-          for (uint32_t i = 0; i < vl_; i++) {
-            int32_t first  = *(int32_t *)(vr1.data() + i);
-            int32_t second = *(int32_t *)(vr2.data() + i);
-            int32_t result = (first <= second) ? 1 : 0;
-            DP(3, "Comparing " << first << " + " << second << " = " << result);
-            *(int32_t *)(vd.data() + i) = result;
-          }
-        }
-      } break;
-      case 30: {
-        // vmsgtu
-        auto &vr1 = vreg_file_.at(rsrc0);
-        auto &vr2 = vreg_file_.at(rsrc1);
-        auto &vd = vreg_file_.at(rdest);
-        if (vtype_.vsew == 8) {
-          for (uint32_t i = 0; i < vl_; i++) {
-            uint8_t first  = *(uint8_t *)(vr1.data() + i);
-            uint8_t second = *(uint8_t *)(vr2.data() + i);
-            uint8_t result = (first > second) ? 1 : 0;
-            DP(3, "Comparing " << first << " + " << second << " = " << result);
-            *(uint8_t *)(vd.data() + i) = result;
-          }
-        } else if (vtype_.vsew == 16) {
-          for (uint32_t i = 0; i < vl_; i++) {
-            uint16_t first  = *(uint16_t *)(vr1.data() + i);
-            uint16_t second = *(uint16_t *)(vr2.data() + i);
-            uint16_t result = (first > second) ? 1 : 0;
-            DP(3, "Comparing " << first << " + " << second << " = " << result);
-            *(uint16_t *)(vd.data() + i) = result;
-          }
-        } else if (vtype_.vsew == 32) {
-          for (uint32_t i = 0; i < vl_; i++) {
-            uint32_t first  = *(uint32_t *)(vr1.data() + i);
-            uint32_t second = *(uint32_t *)(vr2.data() + i);
-            uint32_t result = (first > second) ? 1 : 0;
-            DP(3, "Comparing " << first << " + " << second << " = " << result);
-            *(uint32_t *)(vd.data() + i) = result;
-          }
-        }
-      } break;
-      case 31: {
-        // vmsgt
-        auto &vr1 = vreg_file_.at(rsrc0);
-        auto &vr2 = vreg_file_.at(rsrc1);
-        auto &vd = vreg_file_.at(rdest);
-        if (vtype_.vsew == 8) {
-          for (uint32_t i = 0; i < vl_; i++) {
-            int8_t first  = *(int8_t *)(vr1.data() + i);
-            int8_t second = *(int8_t *)(vr2.data() + i);
-            int8_t result = (first > second) ? 1 : 0;
-            DP(3, "Comparing " << first << " + " << second << " = " << result);
-            *(uint8_t *)(vd.data() + i) = result;
-          }
-        } else if (vtype_.vsew == 16) {
-          for (uint32_t i = 0; i < vl_; i++) {
-            int16_t first  = *(int16_t *)(vr1.data() + i);
-            int16_t second = *(int16_t *)(vr2.data() + i);
-            int16_t result = (first > second) ? 1 : 0;
-            DP(3, "Comparing " << first << " + " << second << " = " << result);
-            *(int16_t *)(vd.data() + i) = result;
-          }
-        } else if (vtype_.vsew == 32) {
-          for (uint32_t i = 0; i < vl_; i++) {
-            int32_t first  = *(int32_t *)(vr1.data() + i);
-            int32_t second = *(int32_t *)(vr2.data() + i);
-            int32_t result = (first > second) ? 1 : 0;
-            DP(3, "Comparing " << first << " + " << second << " = " << result);
-            *(int32_t *)(vd.data() + i) = result;
-          }
-        }
-      } break;
-      }
-      break;
-    case 2: {
-      switch (func6) {
-      case 24: { 
-        // vmandnot
-        auto &vr1 = vreg_file_.at(rsrc0);
-        auto &vr2 = vreg_file_.at(rsrc1);
-        auto &vd = vreg_file_.at(rdest);
-        if (vtype_.vsew == 8) {
-          for (uint32_t i = 0; i < vl_; i++) {
-            uint8_t first  = *(uint8_t *)(vr1.data() + i);
-            uint8_t second = *(uint8_t *)(vr2.data() + i);
-            uint8_t first_value  = (first & 0x1);
-            uint8_t second_value = (second & 0x1);
-            uint8_t result = (first_value & !second_value);
-            DP(3, "Comparing " << first << " + " << second << " = " << result);
-            *(uint8_t *)(vd.data() + i) = result;
-          }            
-          for (uint32_t i = vl_; i < VLMAX; i++) {
-            *(uint8_t *)(vd.data() + i) = 0;
-          }
-        } else if (vtype_.vsew == 16) {
-          for (uint32_t i = 0; i < vl_; i++) {
-            uint16_t first  = *(uint16_t *)(vr1.data() + i);
-            uint16_t second = *(uint16_t *)(vr2.data() + i);
-            uint16_t first_value  = (first & 0x1);
-            uint16_t second_value = (second & 0x1);
-            uint16_t result = (first_value & !second_value);
-            DP(3, "Comparing " << first << " + " << second << " = " << result);
-            *(uint16_t *)(vd.data() + i) = result;
-          }
-          for (uint32_t i = vl_; i < VLMAX; i++) {
-            *(uint16_t *)(vd.data() + i) = 0;
-          }
-        } else if (vtype_.vsew == 32) {
-          for (uint32_t i = 0; i < vl_; i++) {
-            uint32_t first  = *(uint32_t *)(vr1.data() + i);
-            uint32_t second = *(uint32_t *)(vr2.data() + i);
-            uint32_t first_value  = (first & 0x1);
-            uint32_t second_value = (second & 0x1);
-            uint32_t result = (first_value & !second_value);
-            DP(3, "Comparing " << first << " + " << second << " = " << result);
-            *(uint32_t *)(vd.data() + i) = result;
-          }
-          for (uint32_t i = vl_; i < VLMAX; i++) {
-            *(uint32_t *)(vd.data() + i) = 0;
-          }
-        }
-      } break;
-      case 25: {
-        // vmand
-        auto &vr1 = vreg_file_.at(rsrc0);
-        auto &vr2 = vreg_file_.at(rsrc1);
-        auto &vd = vreg_file_.at(rdest);
-        if (vtype_.vsew == 8) {
-          for (uint32_t i = 0; i < vl_; i++) {
-            uint8_t first  = *(uint8_t *)(vr1.data() + i);
-            uint8_t second = *(uint8_t *)(vr2.data() + i);
-            uint8_t first_value  = (first & 0x1);
-            uint8_t second_value = (second & 0x1);
-            uint8_t result = (first_value & second_value);
-            DP(3, "Comparing " << first << " + " << second << " = " << result);
-            *(uint8_t *)(vd.data() + i) = result;
-          }
-          for (uint32_t i = vl_; i < VLMAX; i++) {
-            *(uint8_t *)(vd.data() + i) = 0;
-          }
-        } else if (vtype_.vsew == 16) {
-          for (uint32_t i = 0; i < vl_; i++) {
-            uint16_t first  = *(uint16_t *)(vr1.data() + i);
-            uint16_t second = *(uint16_t *)(vr2.data() + i);
-            uint16_t first_value  = (first & 0x1);
-            uint16_t second_value = (second & 0x1);
-            uint16_t result = (first_value & second_value);
-            DP(3, "Comparing " << first << " + " << second << " = " << result);
-            *(uint16_t *)(vd.data() + i) = result;
-          }
-          for (uint32_t i = vl_; i < VLMAX; i++) {
-            *(uint16_t *)(vd.data() + i) = 0;
-          }
-        } else if (vtype_.vsew == 32) {
-          for (uint32_t i = 0; i < vl_; i++) {
-            uint32_t first  = *(uint32_t *)(vr1.data() + i);
-            uint32_t second = *(uint32_t *)(vr2.data() + i);
-            uint32_t first_value  = (first & 0x1);
-            uint32_t second_value = (second & 0x1);
-            uint32_t result = (first_value & second_value);
-            DP(3, "Comparing " << first << " + " << second << " = " << result);
-            *(uint32_t *)(vd.data() + i) = result;
-          }
-          for (uint32_t i = vl_; i < VLMAX; i++) {
-            *(uint32_t *)(vd.data() + i) = 0;
-          }
-        }
-      } break;
-      case 26: {
-        // vmor
-        auto &vr1 = vreg_file_.at(rsrc0);
-        auto &vr2 = vreg_file_.at(rsrc1);
-        auto &vd = vreg_file_.at(rdest);
-        if (vtype_.vsew == 8) {
-          for (uint32_t i = 0; i < vl_; i++) {
-            uint8_t first  = *(uint8_t *)(vr1.data() + i);
-            uint8_t second = *(uint8_t *)(vr2.data() + i);
-            uint8_t first_value  = (first & 0x1);
-            uint8_t second_value = (second & 0x1);
-            uint8_t result = (first_value | second_value);
-            DP(3, "Comparing " << first << " + " << second << " = " << result);
-            *(uint8_t *)(vd.data() + i) = result;
-          }
-          for (uint32_t i = vl_; i < VLMAX; i++) {
-            *(uint8_t *)(vd.data() + i) = 0;
-          }
-        } else if (vtype_.vsew == 16) {
-          for (uint32_t i = 0; i < vl_; i++) {
-            uint16_t first  = *(uint16_t *)(vr1.data() + i);
-            uint16_t second = *(uint16_t *)(vr2.data() + i);
-            uint16_t first_value  = (first & 0x1);
-            uint16_t second_value = (second & 0x1);
-            uint16_t result = (first_value | second_value);
-            DP(3, "Comparing " << first << " + " << second << " = " << result);
-            *(uint16_t *)(vd.data() + i) = result;
-          }
-          for (uint32_t i = vl_; i < VLMAX; i++) {
-            *(uint16_t *)(vd.data() + i) = 0;
-          }
-        } else if (vtype_.vsew == 32) {
-          for (uint32_t i = 0; i < vl_; i++) {
-            uint32_t first  = *(uint32_t *)(vr1.data() + i);
-            uint32_t second = *(uint32_t *)(vr2.data() + i);
-            uint32_t first_value  = (first & 0x1);
-            uint32_t second_value = (second & 0x1);
-            uint32_t result = (first_value | second_value);
-            DP(3, "Comparing " << first << " + " << second << " = " << result);
-            *(uint32_t *)(vd.data() + i) = result;
-          }
-          for (uint32_t i = vl_; i < VLMAX; i++) {
-            *(uint32_t *)(vd.data() + i) = 0;
-          }
-        }
-      } break;
-      case 27: { 
-        // vmxor
-        auto &vr1 = vreg_file_.at(rsrc0);
-        auto &vr2 = vreg_file_.at(rsrc1);
-        auto &vd = vreg_file_.at(rdest);
-        if (vtype_.vsew == 8) {
-          for (uint32_t i = 0; i < vl_; i++) {
-            uint8_t first  = *(uint8_t *)(vr1.data() + i);
-            uint8_t second = *(uint8_t *)(vr2.data() + i);
-            uint8_t first_value  = (first & 0x1);
-            uint8_t second_value = (second & 0x1);
-            uint8_t result = (first_value ^ second_value);
-            DP(3, "Comparing " << first << " + " << second << " = " << result);
-            *(uint8_t *)(vd.data() + i) = result;
-          }
-          for (uint32_t i = vl_; i < VLMAX; i++) {
-            *(uint8_t *)(vd.data() + i) = 0;
-          }
-        } else if (vtype_.vsew == 16) {
-          for (uint32_t i = 0; i < vl_; i++) {
-            uint16_t first  = *(uint16_t *)(vr1.data() + i);
-            uint16_t second = *(uint16_t *)(vr2.data() + i);
-            uint16_t first_value  = (first & 0x1);
-            uint16_t second_value = (second & 0x1);
-            uint16_t result = (first_value ^ second_value);
-            DP(3, "Comparing " << first << " + " << second << " = " << result);
-            *(uint16_t *)(vd.data() + i) = result;
-          }
-          for (uint32_t i = vl_; i < VLMAX; i++) {
-            *(uint16_t *)(vd.data() + i) = 0;
-          }
-        } else if (vtype_.vsew == 32) {
-          for (uint32_t i = 0; i < vl_; i++) {
-            uint32_t first  = *(uint32_t *)(vr1.data() + i);
-            uint32_t second = *(uint32_t *)(vr2.data() + i);
-            uint32_t first_value  = (first & 0x1);
-            uint32_t second_value = (second & 0x1);
-            uint32_t result = (first_value ^ second_value);
-            DP(3, "Comparing " << first << " + " << second << " = " << result);
-            *(uint32_t *)(vd.data() + i) = result;
-          }
-          for (uint32_t i = vl_; i < VLMAX; i++) {
-            *(uint32_t *)(vd.data() + i) = 0;
-          }
-        }
-      } break;
-      case 28: {
-        // vmornot
-        auto &vr1 = vreg_file_.at(rsrc0);
-        auto &vr2 = vreg_file_.at(rsrc1);
-        auto &vd = vreg_file_.at(rdest);
-        if (vtype_.vsew == 8) {
-          for (uint32_t i = 0; i < vl_; i++) {
-            uint8_t first  = *(uint8_t *)(vr1.data() + i);
-            uint8_t second = *(uint8_t *)(vr2.data() + i);
-            uint8_t first_value  = (first & 0x1);
-            uint8_t second_value = (second & 0x1);
-            uint8_t result = (first_value | !second_value);
-            DP(3, "Comparing " << first << " + " << second << " = " << result);
-            *(uint8_t *)(vd.data() + i) = result;
-          }
-          for (uint32_t i = vl_; i < VLMAX; i++) {
-            *(uint8_t *)(vd.data() + i) = 0;
-          }
-        } else if (vtype_.vsew == 16) {
-          for (uint32_t i = 0; i < vl_; i++) {
-            uint16_t first  = *(uint16_t *)(vr1.data() + i);
-            uint16_t second = *(uint16_t *)(vr2.data() + i);
-            uint16_t first_value  = (first & 0x1);
-            uint16_t second_value = (second & 0x1);
-            uint16_t result = (first_value | !second_value);
-            DP(3, "Comparing " << first << " + " << second << " = " << result);
-            *(uint16_t *)(vd.data() + i) = result;
-          }
-          for (uint32_t i = vl_; i < VLMAX; i++) {
-            *(uint16_t *)(vd.data() + i) = 0;
-          }
-        } else if (vtype_.vsew == 32) {
-          for (uint32_t i = 0; i < vl_; i++) {
-            uint32_t first  = *(uint32_t *)(vr1.data() + i);
-            uint32_t second = *(uint32_t *)(vr2.data() + i);
-            uint32_t first_value  = (first & 0x1);
-            uint32_t second_value = (second & 0x1);
-            uint32_t result = (first_value | !second_value);
-            DP(3, "Comparing " << first << " + " << second << " = " << result);
-            *(uint32_t *)(vd.data() + i) = result;
-          }
-          for (uint32_t i = vl_; i < VLMAX; i++) {
-            *(uint32_t *)(vd.data() + i) = 0;
-          }
-        }
-      } break;
-      case 29: {
-        // vmnand
-        auto &vr1 = vreg_file_.at(rsrc0);
-        auto &vr2 = vreg_file_.at(rsrc1);
-        auto &vd = vreg_file_.at(rdest);
-        if (vtype_.vsew == 8) {
-          for (uint32_t i = 0; i < vl_; i++) {
-            uint8_t first  = *(uint8_t *)(vr1.data() + i);
-            uint8_t second = *(uint8_t *)(vr2.data() + i);
-            uint8_t first_value  = (first & 0x1);
-            uint8_t second_value = (second & 0x1);
-            uint8_t result = !(first_value & second_value);
-            DP(3, "Comparing " << first << " + " << second << " = " << result);
-            *(uint8_t *)(vd.data() + i) = result;
-          }
-          for (uint32_t i = vl_; i < VLMAX; i++) {
-            *(uint8_t *)(vd.data() + i) = 0;
-          }
-        } else if (vtype_.vsew == 16) {
-          for (uint32_t i = 0; i < vl_; i++) {
-            uint16_t first  = *(uint16_t *)(vr1.data() + i);
-            uint16_t second = *(uint16_t *)(vr2.data() + i);
-            uint16_t first_value  = (first & 0x1);
-            uint16_t second_value = (second & 0x1);
-            uint16_t result = !(first_value & second_value);
-            DP(3, "Comparing " << first << " + " << second << " = " << result);
-            *(uint16_t *)(vd.data() + i) = result;
-          }
-          for (uint32_t i = vl_; i < VLMAX; i++) {
-            *(uint16_t *)(vd.data() + i) = 0;
-          }
-        } else if (vtype_.vsew == 32) {
-          for (uint32_t i = 0; i < vl_; i++) {
-            uint32_t first  = *(uint32_t *)(vr1.data() + i);
-            uint32_t second = *(uint32_t *)(vr2.data() + i);
-            uint32_t first_value  = (first & 0x1);
-            uint32_t second_value = (second & 0x1);
-            uint32_t result = !(first_value & second_value);
-            DP(3, "Comparing " << first << " + " << second << " = " << result);
-            *(uint32_t *)(vd.data() + i) = result;
-          }
-          for (uint32_t i = vl_; i < VLMAX; i++) {
-            *(uint32_t *)(vd.data() + i) = 0;
-          }
-        }
-      } break;
-      case 30: {
-        // vmnor
-        auto &vr1 = vreg_file_.at(rsrc0);
-        auto &vr2 = vreg_file_.at(rsrc1);
-        auto &vd = vreg_file_.at(rdest);
-        if (vtype_.vsew == 8) {
-          for (uint32_t i = 0; i < vl_; i++) {
-            uint8_t first  = *(uint8_t *)(vr1.data() + i);
-            uint8_t second = *(uint8_t *)(vr2.data() + i);
-            uint8_t first_value  = (first & 0x1);
-            uint8_t second_value = (second & 0x1);
-            uint8_t result = !(first_value | second_value);
-            DP(3, "Comparing " << first << " + " << second << " = " << result);
-            *(uint8_t *)(vd.data() + i) = result;
-          }
-          for (uint32_t i = vl_; i < VLMAX; i++) {
-            *(uint8_t *)(vd.data() + i) = 0;
-          }
-        } else if (vtype_.vsew == 16) {
-          for (uint32_t i = 0; i < vl_; i++) {
-            uint16_t first  = *(uint16_t *)(vr1.data() + i);
-            uint16_t second = *(uint16_t *)(vr2.data() + i);
-            uint16_t first_value  = (first & 0x1);
-            uint16_t second_value = (second & 0x1);
-            uint16_t result = !(first_value | second_value);
-            DP(3, "Comparing " << first << " + " << second << " = " << result);
-            *(uint16_t *)(vd.data() + i) = result;
-          }
-          for (uint32_t i = vl_; i < VLMAX; i++) {
-            *(uint16_t *)(vd.data() + i) = 0;
-          }
-        } else if (vtype_.vsew == 32) {
-          for (uint32_t i = 0; i < vl_; i++) {
-            uint32_t first  = *(uint32_t *)(vr1.data() + i);
-            uint32_t second = *(uint32_t *)(vr2.data() + i);
-            uint32_t first_value  = (first & 0x1);
-            uint32_t second_value = (second & 0x1);
-            uint32_t result = !(first_value | second_value);
-            DP(3, "Comparing " << first << " + " << second << " = " << result);
-            *(uint32_t *)(vd.data() + i) = result;
-          }
-          for (uint32_t i = vl_; i < VLMAX; i++) {
-            *(uint32_t *)(vd.data() + i) = 0;
-          }
-        }
-      } break;
-      case 31: {
-        // vmxnor
-        auto &vr1 = vreg_file_.at(rsrc0);
-        auto &vr2 = vreg_file_.at(rsrc1);
-        auto &vd = vreg_file_.at(rdest);
-        if (vtype_.vsew == 8) {
-          for (uint32_t i = 0; i < vl_; i++) {
-            uint8_t first  = *(uint8_t *)(vr1.data() + i);
-            uint8_t second = *(uint8_t *)(vr2.data() + i);
-            uint8_t first_value  = (first & 0x1);
-            uint8_t second_value = (second & 0x1);
-            uint8_t result = !(first_value ^ second_value);
-            DP(3, "Comparing " << first << " + " << second << " = " << result);
-            *(uint8_t *)(vd.data() + i) = result;
-          }
-          for (uint32_t i = vl_; i < VLMAX; i++) {
-            *(uint8_t *)(vd.data() + i) = 0;
-          }
-        } else if (vtype_.vsew == 16) {
-          for (uint32_t i = 0; i < vl_; i++) {
-            uint16_t first  = *(uint16_t *)(vr1.data() + i);
-            uint16_t second = *(uint16_t *)(vr2.data() + i);
-            uint16_t first_value  = (first & 0x1);
-            uint16_t second_value = (second & 0x1);
-            uint16_t result = !(first_value ^ second_value);
-            DP(3, "Comparing " << first << " + " << second << " = " << result);
-            *(uint16_t *)(vd.data() + i) = result;
-          }
-          for (uint32_t i = vl_; i < VLMAX; i++) {
-            *(uint16_t *)(vd.data() + i) = 0;
-          }
-        } else if (vtype_.vsew == 32) {
-          for (uint32_t i = 0; i < vl_; i++) {
-            uint32_t first  = *(uint32_t *)(vr1.data() + i);
-            uint32_t second = *(uint32_t *)(vr2.data() + i);
-            uint32_t first_value  = (first & 0x1);
-            uint32_t second_value = (second & 0x1);
-            uint32_t result = !(first_value ^ second_value);
-            DP(3, "Comparing " << first << " + " << second << " = " << result);
-            *(uint32_t *)(vd.data() + i) = result;
-          }
-          for (uint32_t i = vl_; i < VLMAX; i++) {
-            *(uint32_t *)(vd.data() + i) = 0;
-          }
-        }
-      } break;
-      case 37: {
-        // vmul
-        auto &vr1 = vreg_file_.at(rsrc0);
-        auto &vr2 = vreg_file_.at(rsrc1);
-        auto &vd = vreg_file_.at(rdest);
-        if (vtype_.vsew == 8) {
-          for (uint32_t i = 0; i < vl_; i++) {
-            uint8_t first  = *(uint8_t *)(vr1.data() + i);
-            uint8_t second = *(uint8_t *)(vr2.data() + i);
-            uint8_t result = (first * second);
-            DP(3, "Comparing " << first << " + " << second << " = " << result);
-            *(uint8_t *)(vd.data() + i) = result;
-          }
-          for (uint32_t i = vl_; i < VLMAX; i++) {
-            *(uint8_t *)(vd.data() + i) = 0;
-          }
-        } else if (vtype_.vsew == 16) {
-          for (uint32_t i = 0; i < vl_; i++) {
-            uint16_t first  = *(uint16_t *)(vr1.data() + i);
-            uint16_t second = *(uint16_t *)(vr2.data() + i);
-            uint16_t result = (first * second);
-            DP(3, "Comparing " << first << " + " << second << " = " << result);
-            *(uint16_t *)(vd.data() + i) = result;
-          }
-          for (uint32_t i = vl_; i < VLMAX; i++) {
-            *(uint16_t *)(vd.data() + i) = 0;
-          }
-        } else if (vtype_.vsew == 32) {
-          for (uint32_t i = 0; i < vl_; i++) {
-            uint32_t first  = *(uint32_t *)(vr1.data() + i);
-            uint32_t second = *(uint32_t *)(vr2.data() + i);
-            uint32_t result = (first * second);
-            DP(3, "Comparing " << first << " + " << second << " = " << result);
-            *(uint32_t *)(vd.data() + i) = result;
-          }
-          for (uint32_t i = vl_; i < VLMAX; i++) {
-            *(uint32_t *)(vd.data() + i) = 0;
-          }
-        }
-      } break;
-      case 45: {
-        // vmacc
-        auto &vr1 = vreg_file_.at(rsrc0);
-        auto &vr2 = vreg_file_.at(rsrc1);
-        auto &vd = vreg_file_.at(rdest);
-        if (vtype_.vsew == 8) {
-          for (uint32_t i = 0; i < vl_; i++) {
-            uint8_t first  = *(uint8_t *)(vr1.data() + i);
-            uint8_t second = *(uint8_t *)(vr2.data() + i);
-            uint8_t result = (first * second);
-            DP(3, "Comparing " << first << " + " << second << " = " << result);
-            *(uint8_t *)(vd.data() + i) += result;
-          }
-          for (uint32_t i = vl_; i < VLMAX; i++) {
-            *(uint8_t *)(vd.data() + i) = 0;
-          }
-        } else if (vtype_.vsew == 16) {
-          for (uint32_t i = 0; i < vl_; i++) {
-            uint16_t first  = *(uint16_t *)(vr1.data() + i);
-            uint16_t second = *(uint16_t *)(vr2.data() + i);
-            uint16_t result = (first * second);
-            DP(3, "Comparing " << first << " + " << second << " = " << result);
-            *(uint16_t *)(vd.data() + i) += result;
-          }
-          for (uint32_t i = vl_; i < VLMAX; i++) {
-            *(uint16_t *)(vd.data() + i) = 0;
-          }
-        } else if (vtype_.vsew == 32) {
-          for (uint32_t i = 0; i < vl_; i++) {
-            uint32_t first  = *(uint32_t *)(vr1.data() + i);
-            uint32_t second = *(uint32_t *)(vr2.data() + i);
-            uint32_t result = (first * second);
-            DP(3, "Comparing " << first << " + " << second << " = " << result);
-            *(uint32_t *)(vd.data() + i) += result;
-          }
-          for (uint32_t i = vl_; i < VLMAX; i++) {
-            *(uint32_t *)(vd.data() + i) = 0;
-          }
-        }
-      } break;
-      }
-    } break;
-    case 6: {
-      switch (func6) {
-      case 0: {
-        auto &vr2 = vreg_file_.at(rsrc1);
-        auto &vd = vreg_file_.at(rdest);
-        if (vtype_.vsew == 8) {
-          for (uint32_t i = 0; i < vl_; i++) {
-            uint8_t second = *(uint8_t *)(vr2.data() + i);
-            uint8_t result = (rsdata[i][0].i + second);
-            DP(3, "Comparing " << rsdata[i][0].i << " + " << second << " = " << result);
-            *(uint8_t *)(vd.data() + i) = result;
-          }
-          for (uint32_t i = vl_; i < VLMAX; i++) {
-            *(uint8_t *)(vd.data() + i) = 0;
-          }
-        } else if (vtype_.vsew == 16) {
-          for (uint32_t i = 0; i < vl_; i++) {
-            uint16_t second = *(uint16_t *)(vr2.data() + i);
-            uint16_t result = (rsdata[i][0].i + second);
-            DP(3, "Comparing " << rsdata[i][0].i << " + " << second << " = " << result);
-            *(uint16_t *)(vd.data() + i) = result;
-          }
-          for (uint32_t i = vl_; i < VLMAX; i++) {
-            *(uint16_t *)(vd.data() + i) = 0;
-          }
-        } else if (vtype_.vsew == 32) {
-          for (uint32_t i = 0; i < vl_; i++) {
-            uint32_t second = *(uint32_t *)(vr2.data() + i);
-            uint32_t result = (rsdata[i][0].i + second);
-            DP(3, "Comparing " << rsdata[i][0].i << " + " << second << " = " << result);
-            *(uint32_t *)(vd.data() + i) = result;
-          }
-          for (uint32_t i = vl_; i < VLMAX; i++) {
-            *(uint32_t *)(vd.data() + i) = 0;
-          }
-        }
-      } break;
-      case 37: {
-        // vmul.vx
-        auto &vr2 = vreg_file_.at(rsrc1);
-        auto &vd = vreg_file_.at(rdest);
-        if (vtype_.vsew == 8) {
-          for (uint32_t i = 0; i < vl_; i++) {
-            uint8_t second = *(uint8_t *)(vr2.data() + i);
-            uint8_t result = (rsdata[i][0].i * second);
-            DP(3, "Comparing " << rsdata[i][0].i << " + " << second << " = " << result);
-            *(uint8_t *)(vd.data() + i) = result;
-          }
-          for (uint32_t i = vl_; i < VLMAX; i++) {
-            *(uint8_t *)(vd.data() + i) = 0;
-          }
-        } else if (vtype_.vsew == 16) {
-          for (uint32_t i = 0; i < vl_; i++) {
-            uint16_t second = *(uint16_t *)(vr2.data() + i);
-            uint16_t result = (rsdata[i][0].i * second);
-            DP(3, "Comparing " << rsdata[i][0].i << " + " << second << " = " << result);
-            *(uint16_t *)(vd.data() + i) = result;
-          }
-          for (uint32_t i = vl_; i < VLMAX; i++) {
-            *(uint16_t *)(vd.data() + i) = 0;
-          }
-        } else if (vtype_.vsew == 32) {
-          for (uint32_t i = 0; i < vl_; i++) {
-            uint32_t second = *(uint32_t *)(vr2.data() + i);
-            uint32_t result = (rsdata[i][0].i * second);
-            DP(3, "Comparing " << rsdata[i][0].i << " + " << second << " = " << result);
-            *(uint32_t *)(vd.data() + i) = result;
-          }
-          for (uint32_t i = vl_; i < VLMAX; i++) {
-            *(uint32_t *)(vd.data() + i) = 0;
-          }
-        }
-      } break;
-      }
-    } break;
-    case 7: {
-      vtype_.vill  = 0;
-      vtype_.vediv = instr.getVediv();
-      vtype_.vsew  = instr.getVsew();
-      vtype_.vlmul = instr.getVlmul();
-
-      DP(3, "lmul:" << vtype_.vlmul << " sew:" << vtype_.vsew  << " ediv: " << vtype_.vediv << "rsrc_" << rsdata[0][0].i << "VLMAX" << VLMAX);
-
-      auto s0 = rsdata[0][0].i;
-      if (s0 <= VLMAX) {
-        vl_ = s0;
-      } else if (s0 < (2 * VLMAX)) {
-        vl_ = (uint32_t)ceil((s0 * 1.0) / 2.0);
-      } else if (s0 >= (2 * VLMAX)) {
-        vl_ = VLMAX;
-      }        
-      rddata[0].i = vl_;
-    } break;
-    default:
-      std::abort();
-    }
-  } break;    
-  default:
-    std::abort();
-  }
+  #endif // EXT_TCU_ENABLE
+  );
 
   if (rd_write) {
     trace->wb = true;
-    DPH(2, "Dest Reg: ");
-    auto type = instr.getRDType();    
-    switch (type) {
-    case RegType::Integer:      
-      if (rdest) {    
-        DPN(2, type << std::dec << rdest << "={");    
+    switch (rdest.type) {
+    case RegType::None:
+      break;
+    case RegType::Integer:
+      if (rdest.idx != 0) {
+        DPH(2, "Dest Reg: " << rdest << "={");
         for (uint32_t t = 0; t < num_threads; ++t) {
           if (t) DPN(2, ", ");
-          if (!tmask_.test(t)) {
+          if (!warp.tmask.test(t)) {
             DPN(2, "-");
-            continue;            
+            continue;
           }
-          ireg_file_.at(t)[rdest] = rddata[t].i;
-          DPN(2, "0x" << std::hex << rddata[t].i);         
+          warp.ireg_file.at(rdest.idx).at(t) = rd_data[t].i;
+          DPN(2, "0x" << std::hex << rd_data[t].u << std::dec);
         }
         DPN(2, "}" << std::endl);
-        trace->used_iregs[rdest] = 1;
+      } else {
+        // disable writes to x0
+        trace->wb = false;
       }
       break;
     case RegType::Float:
-      DPN(2, type << std::dec << rdest << "={");
+      DPH(2, "Dest Reg: " << rdest << "={");
       for (uint32_t t = 0; t < num_threads; ++t) {
         if (t) DPN(2, ", ");
-        if (!tmask_.test(t)) {
+        if (!warp.tmask.test(t)) {
           DPN(2, "-");
-          continue;            
+          continue;
         }
-        freg_file_.at(t)[rdest] = rddata[t].f;        
-        DPN(2, "0x" << std::hex << rddata[t].f);         
+        warp.freg_file.at(rdest.idx).at(t) = rd_data[t].u64;
+        if ((rd_data[t].u64 >> 32) == 0xffffffff) {
+          DPN(2, "0x" << std::hex << rd_data[t].u32 << std::dec);
+        } else {
+          DPN(2, "0x" << std::hex << rd_data[t].u64 << std::dec);
+        }
       }
       DPN(2, "}" << std::endl);
-      trace->used_fregs[rdest] = 1;
       break;
+  #ifdef EXT_V_ENABLE
+    case RegType::Vector:
+      DPH(2, "Dest Reg: " << rdest << "={");
+      for (uint32_t t = 0; t < num_threads; ++t) {
+        if (t) DPN(2, ", ");
+        if (!warp.tmask.test(t)) {
+          DPN(2, "-");
+          continue;
+        }
+        DPN(2, vec_unit_->dumpRegister(wid, t, rdest.idx));
+      }
+      DPN(2, "}" << std::endl);
+      break;
+  #endif
     default:
+      std::cout << "Unrecognized register write back type: " << rdest.type << std::endl;
       std::abort();
       break;
     }
   }
 
-  PC_ += core_->arch().wsize();
-  if (PC_ != nextPC) {
-    DP(3, "*** Next PC: " << std::hex << nextPC << std::dec);
-    PC_ = nextPC;
+  warp.PC += 4;
+
+  if (warp.PC != next_pc) {
+    DP(3, "*** Next PC=0x" << std::hex << next_pc << std::dec);
+    warp.PC = next_pc;
   }
+
+  if (warp.tmask != next_tmask) {
+    DP(3, "*** New Tmask=" << next_tmask);
+    warp.tmask = next_tmask;
+    if (!next_tmask.any()) {
+      active_warps_.reset(wid);
+    }
+  }
+
+  DP(5, "Register state:");
+  for (uint32_t i = 0; i < MAX_NUM_REGS; ++i) {
+    DPN(5, "  %r" << std::setfill('0') << std::setw(2) << i << ':' << std::hex);
+    // Integer register file
+    for (uint32_t j = 0; j < arch_.num_threads(); ++j) {
+      DPN(5, ' ' << std::setfill('0') << std::setw(XLEN/4) << warp.ireg_file.at(i).at(j) << std::setfill(' ') << ' ');
+    }
+    DPN(5, '|');
+    // Floating point register file
+    for (uint32_t j = 0; j < arch_.num_threads(); ++j) {
+      DPN(5, ' ' << std::setfill('0') << std::setw(16) << warp.freg_file.at(i).at(j) << std::setfill(' ') << ' ');
+    }
+    DPN(5, std::dec << std::endl);
+  }
+
+  return trace;
 }

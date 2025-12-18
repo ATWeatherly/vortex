@@ -1,20 +1,16 @@
-all: fpnew cocogfx softfloat ramulator
+all: cvfpu softfloat ramulator
 
-fpnew:
-
-cocogfx:
-	$(MAKE) -C cocogfx
+cvfpu:
 
 softfloat:
 	SPECIALIZE_TYPE=RISCV SOFTFLOAT_OPTS="-fPIC -DSOFTFLOAT_ROUND_ODD -DINLINE_LEVEL=5 -DSOFTFLOAT_FAST_DIV32TO16 -DSOFTFLOAT_FAST_DIV64TO32" $(MAKE) -C softfloat/build/Linux-x86_64-GCC
 
-ramulator:
-	cd ramulator && git apply ../../miscs/patch/ramulator.patch 2> /dev/null; true
-	$(MAKE) -C ramulator libramulator.a
+ramulator/libramulator.so:
+	cd ramulator && mkdir -p build && cd build && cmake .. && make -j4
+ramulator: ramulator/libramulator.so
 
 clean:
-	$(MAKE) -C cocogfx clean
 	$(MAKE) -C softfloat/build/Linux-x86_64-GCC clean
-	$(MAKE) -C ramulator clean
+	rm -rf ramulator/build ramulator/libramulator.so
 
-.PHONY: all fpnew cocogfx softfloat ramulator
+.PHONY: all cvfpu softfloat ramulator

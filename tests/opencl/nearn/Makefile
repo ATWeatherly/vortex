@@ -1,72 +1,23 @@
-XLEN ?= 32
+ROOT_DIR := $(realpath ../../..)
+include $(ROOT_DIR)/config.mk
 
-LLVM_PREFIX ?= /opt/llvm-riscv
-RISCV_TOOLCHAIN_PATH ?= /opt/riscv-gnu-toolchain
-SYSROOT ?= $(RISCV_TOOLCHAIN_PATH)/riscv32-unknown-elf
-POCL_CC_PATH ?= /opt/pocl/compiler
-POCL_RT_PATH ?= /opt/pocl/runtime
+PROJECT := nearn
 
-OPTS ?= filelist.txt
+SRC_DIR := $(VORTEX_HOME)/tests/opencl/$(PROJECT)
 
-VORTEX_DRV_PATH ?= $(realpath ../../../driver)
-VORTEX_RT_PATH ?= $(realpath ../../../runtime)
+SRCS := $(SRC_DIR)/main.cc $(SRC_DIR)/clutils.cpp $(SRC_DIR)/utils.cpp
 
-K_LLCFLAGS += "-O3 -march=riscv32 -target-abi=ilp32f -mcpu=generic-rv32 -mattr=+m,+f -mattr=+vortex -float-abi=hard -code-model=small"
-K_CFLAGS   += "-v -O3 --sysroot=$(SYSROOT) --gcc-toolchain=$(RISCV_TOOLCHAIN_PATH) -march=rv32imf -mabi=ilp32f -Xclang -target-feature -Xclang +vortex -I$(VORTEX_RT_PATH)/include -fno-rtti -fno-exceptions -ffreestanding -nostartfiles -fdata-sections -ffunction-sections"
-K_LDFLAGS  += "-Wl,-Bstatic,-T$(VORTEX_RT_PATH)/linker/vx_link$(XLEN).ld -Wl,--gc-sections $(VORTEX_RT_PATH)/libvortexrt.a -lm"
+filelist.log:
+	echo "$(SRC_DIR)/cane4_0.db\n$(SRC_DIR)/cane4_1.db" > filelist.log
 
-CXXFLAGS += -std=c++11 -Wall -Wextra -Wfatal-errors
+setup: filelist.log
+USE_SETUP := yes
 
-CXXFLAGS += -Wno-deprecated-declarations -Wno-unused-parameter 
-CXXFLAGS += -Wno-unused-variable -Wno-narrowing -Wno-unused-result -Wno-unused-but-set-variable
+kernel.cl: $(SRC_DIR)/kernel.cl
+	cp $< $@
 
-CXXFLAGS += -I$(POCL_RT_PATH)/include
+KERNEL_SRCS := kernel.cl filelist.log
 
-LDFLAGS += -L$(POCL_RT_PATH)/lib -L$(VORTEX_DRV_PATH)/stub -lOpenCL -lvortex
+OPTS ?= filelist.log
 
-# Debugigng
-ifdef DEBUG
-	CXXFLAGS += -g -O0
-else    
-	CXXFLAGS += -O2 -DNDEBUG
-endif
-
-PROJECT = nearn
-
-SRCS = main.cc clutils.cpp utils.cpp
-
-all: $(PROJECT) kernel.pocl
-
-kernel.pocl: kernel.cl
-	LLVM_PREFIX=$(LLVM_PREFIX) POCL_DEBUG=all LD_LIBRARY_PATH=$(LLVM_PREFIX)/lib:$(POCL_CC_PATH)/lib $(POCL_CC_PATH)/bin/poclcc -LLCFLAGS $(K_LLCFLAGS) -CFLAGS $(K_CFLAGS) -LDFLAGS $(K_LDFLAGS) -o kernel.pocl kernel.cl
- 
-$(PROJECT): $(SRCS)
-	$(CXX) $(CXXFLAGS) $^ $(LDFLAGS) -o $@
-
-run-fpga: $(PROJECT) kernel.pocl   
-	LD_LIBRARY_PATH=$(POCL_RT_PATH)/lib:$(VORTEX_DRV_PATH)/fpga:$(LD_LIBRARY_PATH) ./$(PROJECT) $(OPTS)
-
-run-asesim: $(PROJECT) kernel.pocl   
-	LD_LIBRARY_PATH=$(POCL_RT_PATH)/lib:$(VORTEX_DRV_PATH)/asesim:$(LD_LIBRARY_PATH) ./$(PROJECT) $(OPTS)
-	
-run-vlsim: $(PROJECT) kernel.pocl   
-	LD_LIBRARY_PATH=$(POCL_RT_PATH)/lib:$(VORTEX_DRV_PATH)/vlsim:$(LD_LIBRARY_PATH) ./$(PROJECT) $(OPTS)
-
-run-simx: $(PROJECT) kernel.pocl   
-	LD_LIBRARY_PATH=$(POCL_RT_PATH)/lib:$(VORTEX_DRV_PATH)/simx:$(LD_LIBRARY_PATH) ./$(PROJECT) $(OPTS)
-
-run-rtlsim: $(PROJECT) kernel.pocl   
-	LD_LIBRARY_PATH=$(POCL_RT_PATH)/lib:$(VORTEX_DRV_PATH)/rtlsim:$(LD_LIBRARY_PATH) ./$(PROJECT) $(OPTS)
-
-.depend: $(SRCS)
-	$(CXX) $(CXXFLAGS) -MM $^ > .depend;
-
-clean:
-	rm -rf $(PROJECT) *.o .depend 
-
-clean-all: clean
-	rm -rf *.pocl *.dump
-
-ifneq ($(MAKECMDGOALS),clean)
-    -include .depend
-endif
+include ../common.mk

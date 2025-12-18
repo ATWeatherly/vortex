@@ -1,113 +1,187 @@
+// Copyright © 2019-2023
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 `include "VX_platform.vh"
 
 `TRACING_OFF
-module VX_priority_encoder #( 
-    parameter N       = 1,  
-    parameter REVERSE = 0,
+module VX_priority_encoder #(
+    parameter N       = 1,
+    parameter REVERSE = 0, // 0 -> LSB, 1 -> MSB
     parameter MODEL   = 1,
     parameter LN      = `LOG2UP(N)
 ) (
-    input  wire [N-1:0]  data_in,  
-    output wire [N-1:0]  onehot,
-    output wire [LN-1:0] index,
+    input  wire [N-1:0]  data_in,
+    output wire [N-1:0]  onehot_out,
+    output wire [LN-1:0] index_out,
     output wire          valid_out
 );
-    wire [N-1:0] reversed; 
+    if (REVERSE) begin : g_msb
 
-    if (REVERSE) begin
-        for (genvar i = 0; i < N; ++i) begin
-            assign reversed[N-i-1] = data_in[i];
-        end        
-    end else begin
-        assign reversed = data_in;
-    end
+        if (N == 1) begin : g_n1
 
-    if (N == 1) begin
+            assign onehot_out = data_in;
+            assign index_out  = '0;
+            assign valid_out  = data_in;
 
-        assign onehot    = reversed;
-        assign index     = 0;
-        assign valid_out = reversed;
+        end else if (N == 2) begin : g_n2
 
-    end else if (N == 2) begin
+            assign onehot_out = {data_in[1], data_in[0] & ~data_in[1]};
+            assign index_out  = data_in[1];
+            assign valid_out  = (| data_in);
 
-        assign onehot    = {~reversed[0], reversed[0]};
-        assign index     = ~reversed[0];
-        assign valid_out = (| reversed);
+        end else if (MODEL != 0) begin : g_model1
 
-    end else if (MODEL == 1) begin
+        `IGNORE_UNOPTFLAT_BEGIN
+            wire [N-1:0] higher_pri_regs;
+        `IGNORE_UNOPTFLAT_END
 
-        wire [N-1:0] scan_lo;
+            assign higher_pri_regs[N-1] = 1'b0;
+            for (genvar i = N-2; i >= 0; --i) begin : g_higher_pri_regs
+                assign higher_pri_regs[i] = higher_pri_regs[i+1] | data_in[i+1];
+            end
+            assign onehot_out = data_in & ~higher_pri_regs;
 
-        VX_scan #(
-            .N  (N),
-            .OP (2)
-        ) scan (
-            .data_in  (reversed),
-            .data_out (scan_lo)
-        );
+            wire [N-1:0][LN-1:0] indices;
+            for (genvar i = 0; i < N; ++i) begin : g_indices
+                assign indices[i] = LN'(i);
+            end
 
-        VX_lzc #(
-            .N (N)
-        ) lzc (
-            .in_i  (reversed),            
-            .cnt_o (index),
-            `UNUSED_PIN (valid_o)
-        );
+            VX_find_first #(
+                .N (N),
+                .DATAW (LN),
+                .REVERSE (1)
+            ) find_first (
+                .valid_in  (data_in),
+                .data_in   (indices),
+                .data_out  (index_out),
+                .valid_out (valid_out)
+            );
 
-        assign onehot    = scan_lo & {(~scan_lo[N-2:0]), 1'b1};
-        assign valid_out = scan_lo[N-1];
+        end else begin : g_model0
 
-    end else if (MODEL == 2) begin
+            reg [LN-1:0] index_w;
+            reg [N-1:0]  onehot_w;
 
-    `IGNORE_WARNINGS_BEGIN
-        wire [N-1:0] higher_pri_regs;
-    `IGNORE_WARNINGS_END
-        assign higher_pri_regs[N-1:1] = higher_pri_regs[N-2:0] | reversed[N-2:0];
-        assign higher_pri_regs[0]     = 1'b0;
-        assign onehot[N-1:0] = reversed[N-1:0] & ~higher_pri_regs[N-1:0];
-
-        VX_lzc #(
-            .N (N)
-        ) lzc (
-            .in_i    (reversed),            
-            .cnt_o   (index),
-            .valid_o (valid_out)
-        );
-
-    end else if (MODEL == 3) begin
-
-        assign onehot = reversed & ~(reversed-1);
-
-        VX_lzc #(
-            .N (N)
-        ) lzc (
-            .in_i    (reversed),           
-            .cnt_o   (index),
-            .valid_o (valid_out)
-        );
-
-    end else begin
-
-        reg [LN-1:0] index_r;
-        reg [N-1:0]  onehot_r;
-
-        always @(*) begin
-            index_r  = 'x;
-            onehot_r = 'x;
-            for (integer i = N-1; i >= 0; --i) begin
-                if (reversed[i]) begin
-                    index_r     = LN'(i);
-                    onehot_r    = 0;
-                    onehot_r[i] = 1'b1;
+            always @(*) begin
+                index_w  = 'x;
+                onehot_w = 'x;
+                for (integer i = 0; i < N-1; ++i) begin
+                    if (data_in[i]) begin
+                        index_w  = LN'(i);
+                        onehot_w = N'(1) << i;
+                    end
                 end
             end
-        end        
 
-        assign index  = index_r;
-        assign onehot = onehot_r;
-        assign valid_out = (| reversed);
+            assign index_out  = index_w;
+            assign onehot_out = onehot_w;
+            assign valid_out  = (| data_in);
 
-    end    
+        end
+
+    end else begin: g_lsb
+
+        if (N == 1) begin : g_n1
+
+            assign onehot_out = data_in;
+            assign index_out  = '0;
+            assign valid_out  = data_in;
+
+        end else if (N == 2) begin : g_n2
+
+            assign onehot_out = {data_in[1] && ~data_in[0], data_in[0]};
+            assign index_out  = ~data_in[0];
+            assign valid_out  = (| data_in);
+
+        end else if (MODEL == 1) begin : g_model1
+
+        `IGNORE_UNOPTFLAT_BEGIN
+            wire [N-1:0] higher_pri_regs;
+        `IGNORE_UNOPTFLAT_END
+
+            assign higher_pri_regs[0] = 1'b0;
+            for (genvar i = 1; i < N; ++i) begin : g_higher_pri_regs
+                assign higher_pri_regs[i] = higher_pri_regs[i-1] | data_in[i-1];
+            end
+            assign onehot_out[N-1:0] = data_in[N-1:0] & ~higher_pri_regs[N-1:0];
+
+            VX_lzc #(
+                .N       (N),
+                .REVERSE (1)
+            ) lzc (
+                .data_in   (data_in),
+                .data_out  (index_out),
+                .valid_out (valid_out)
+            );
+
+        end else if (MODEL == 2) begin : g_model2
+
+            wire [N-1:0] scan_lo;
+
+            VX_scan #(
+                .N  (N),
+                .OP ("|")
+            ) scan (
+                .data_in  (data_in),
+                .data_out (scan_lo)
+            );
+
+            assign onehot_out = scan_lo & {(~scan_lo[N-2:0]), 1'b1};
+
+            VX_lzc #(
+                .N       (N),
+                .REVERSE (1)
+            ) lzc (
+                .data_in  (data_in),
+                .data_out (index_out),
+                .valid_out(valid_out)
+            );
+
+        end else if (MODEL == 3) begin : g_model3
+
+            assign onehot_out = data_in & -data_in;
+
+            VX_lzc #(
+                .N       (N),
+                .REVERSE (1)
+            ) lzc (
+                .data_in   (data_in),
+                .data_out  (index_out),
+                .valid_out (valid_out)
+            );
+
+        end else begin : g_model0
+
+            reg [LN-1:0] index_w;
+            reg [N-1:0]  onehot_w;
+
+            always @(*) begin
+                index_w  = 'x;
+                onehot_w = 'x;
+                for (integer i = N-1; i >= 0; --i) begin
+                    if (data_in[i]) begin
+                        index_w  = LN'(i);
+                        onehot_w = N'(1) << i;
+                    end
+                end
+            end
+
+            assign index_out  = index_w;
+            assign onehot_out = onehot_w;
+            assign valid_out  = (| data_in);
+
+        end
+    end
 
 endmodule
 `TRACING_ON

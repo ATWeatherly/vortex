@@ -35,7 +35,7 @@ double gettime() {
 #elif defined(RD_WG_SIZE)
 #define BLOCK_SIZE RD_WG_SIZE
 #else
-#define BLOCK_SIZE 256
+#define BLOCK_SIZE 1 //256
 #endif
 
 #ifdef RD_WG_SIZE_1_0
@@ -45,7 +45,7 @@ double gettime() {
 #elif defined(RD_WG_SIZE)
 #define BLOCK_SIZE2 RD_WG_SIZE
 #else
-#define BLOCK_SIZE2 256
+#define BLOCK_SIZE2 1 //256
 #endif
 
 // local variables
@@ -104,8 +104,8 @@ static int initialize(int use_gpu) {
   context = clCreateContext(NULL, 1, device_list, NULL, NULL,  &result);
 
   // create command queue for the first device
-  cmd_queue = clCreateCommandQueue(context, device_list[0], 0, NULL);
-  if (!cmd_queue) {
+  cmd_queue = clCreateCommandQueue(context, device_list[0], 0, &result);
+  if (!cmd_queue || result != CL_SUCCESS) {
     printf("ERROR: clCreateCommandQueue() failed\n");
     return -1;
   }
@@ -120,7 +120,7 @@ static int shutdown() {
   if (context)
     clReleaseContext(context);
   if (device_list)
-    delete device_list;
+    delete [] device_list;
 
   // reset all variables
   cmd_queue = 0;
@@ -147,7 +147,7 @@ float *feature_d;
 float *clusters_d;
 float *center_d;
 
-	
+
 static int read_kernel_file(const char* filename, uint8_t** data, size_t* size) {
   if (nullptr == filename || nullptr == data || 0 == size)
     return -1;
@@ -163,9 +163,9 @@ static int read_kernel_file(const char* filename, uint8_t** data, size_t* size) 
 
   *data = (uint8_t*)malloc(fsize);
   *size = fread(*data, 1, fsize, fp);
-  
+
   fclose(fp);
-  
+
   return 0;
 }
 
@@ -197,12 +197,22 @@ int allocate(int n_points, int n_features, int n_clusters, float **feature) {
   cl_int err = 0;
   //const char *slist[2] = {source, 0};
   //cl_program prog = clCreateProgramWithSource(context, 1, slist, NULL, &err);
-  cl_program prog = clCreateProgramWithBuiltInKernels(context, 1, device_list, "kmeans_kernel_c;kmeans_swap", &err);       
+  uint8_t *kernel_bin = NULL;
+  size_t kernel_size;
+  cl_int binary_status = 0;
+  cl_program prog;
+  
+  err = read_kernel_file("kernel.cl", &kernel_bin, &kernel_size);
   if (err != CL_SUCCESS) {
-    printf("ERROR: clCreateProgramWithSource() => %d\n", err);
+    printf("ERROR: read_kernel_file() => %d\n", err);
     return -1;
   }
-  err = clBuildProgram(prog, 0, NULL, NULL, NULL, NULL);
+  prog = clCreateProgramWithSource(
+      context, 1, (const char**)&kernel_bin, &kernel_size, &err);
+
+  free(kernel_bin);
+
+  err = clBuildProgram(prog, 1, &device_list[0], NULL, NULL, NULL);
   { // show warnings/errors
     //	static char log[65536]; memset(log, 0, sizeof(log));
     //	cl_device_id device_id = 0;
@@ -226,6 +236,7 @@ int allocate(int n_points, int n_features, int n_clusters, float **feature) {
     printf("ERROR: clCreateKernel() 0 => %d\n", err);
     return -1;
   }
+
   kernel2 = clCreateKernel(prog, kernel_swap, &err);
   if (err != CL_SUCCESS) {
     printf("ERROR: clCreateKernel() 0 => %d\n", err);
@@ -241,6 +252,7 @@ int allocate(int n_points, int n_features, int n_clusters, float **feature) {
            n_points * n_features, err);
     return -1;
   }
+
   d_feature_swap =
       clCreateBuffer(context, CL_MEM_READ_WRITE,
                      n_points * n_features * sizeof(float), NULL, &err);
@@ -249,6 +261,7 @@ int allocate(int n_points, int n_features, int n_clusters, float **feature) {
            n_points * n_features, err);
     return -1;
   }
+
   d_cluster =
       clCreateBuffer(context, CL_MEM_READ_WRITE,
                      n_clusters * n_features * sizeof(float), NULL, &err);
@@ -257,6 +270,7 @@ int allocate(int n_points, int n_features, int n_clusters, float **feature) {
            n_clusters * n_features, err);
     return -1;
   }
+
   d_membership = clCreateBuffer(context, CL_MEM_READ_WRITE,
                                 n_points * sizeof(int), NULL, &err);
   if (err != CL_SUCCESS) {
@@ -296,6 +310,8 @@ int allocate(int n_points, int n_features, int n_clusters, float **feature) {
   }
 
   membership_OCL = (int *)malloc(n_points * sizeof(int));
+
+  return 0;
 }
 
 void deallocateMemory() {

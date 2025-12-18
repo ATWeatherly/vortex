@@ -1,34 +1,10 @@
-VORTEX_DRV_PATH ?= $(realpath ../../../driver)
+ROOT_DIR := $(realpath ../../..)
+include $(ROOT_DIR)/config.mk
 
-CXXFLAGS += -std=c++11 -Wall -Wextra -pedantic -Wfatal-errors
+PROJECT := vx_malloc
 
-CXXFLAGS += -I$(VORTEX_DRV_PATH)/common
+SRC_DIR := $(VORTEX_HOME)/tests/unittest/$(PROJECT)
 
-# Debugigng
-ifdef DEBUG
-	CXXFLAGS += -g -O0
-else    
-	CXXFLAGS += -O2 -DNDEBUG
-endif
+SRCS := $(SRC_DIR)/main.cpp
 
-PROJECT = vx_malloc
-
-SRCS = main.cpp
-
-all: $(PROJECT)
-
-$(PROJECT): $(SRCS)
-	$(CXX) $(CXXFLAGS) $^ $(LDFLAGS) -o $@
-
-run:
-	./$(PROJECT)
-
-clean:
-	rm -rf $(PROJECT) *.o .depend
-
-clean-all: clean
-	rm -rf *.elf *.bin *.dump
-
-ifneq ($(MAKECMDGOALS),clean)
-    -include .depend
-endif
+include ../common.mk

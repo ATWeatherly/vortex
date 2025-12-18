@@ -1,195 +1,158 @@
+// Copyright © 2019-2023
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 `include "VX_define.vh"
 
-module VX_cluster #(
-    parameter CLUSTER_ID = 0
-) ( 
-    `SCOPE_IO_VX_cluster
+module VX_cluster import VX_gpu_pkg::*; #(
+    parameter CLUSTER_ID = 0,
+    parameter `STRING INSTANCE_ID = ""
+) (
+    `SCOPE_IO_DECL
 
     // Clock
-    input  wire                             clk,
-    input  wire                             reset,
+    input  wire                 clk,
+    input  wire                 reset,
 
-    // Memory request
-    output wire                             mem_req_valid,
-    output wire                             mem_req_rw,    
-    output wire [`L2_MEM_BYTEEN_WIDTH-1:0]  mem_req_byteen,    
-    output wire [`L2_MEM_ADDR_WIDTH-1:0]    mem_req_addr,
-    output wire [`L2_MEM_DATA_WIDTH-1:0]    mem_req_data,
-    output wire [`L2_MEM_TAG_WIDTH-1:0]     mem_req_tag,
-    input  wire                             mem_req_ready,
+`ifdef PERF_ENABLE
+    input sysmem_perf_t         sysmem_perf,
+`endif
 
-    // Memory response    
-    input wire                              mem_rsp_valid,        
-    input wire [`L2_MEM_DATA_WIDTH-1:0]     mem_rsp_data,
-    input wire [`L2_MEM_TAG_WIDTH-1:0]      mem_rsp_tag,
-    output wire                             mem_rsp_ready,
+    // DCRs
+    VX_dcr_bus_if.slave         dcr_bus_if,
+
+    // Memory
+    VX_mem_bus_if.master        mem_bus_if [`L2_MEM_PORTS],
 
     // Status
-    output wire                             busy
-); 
-    `STATIC_ASSERT((`L2_ENABLE == 0 || `NUM_CORES > 1), ("invalid parameter"))
+    output wire                 busy
+);
 
-    wire [`NUM_CORES-1:0]                       per_core_mem_req_valid;
-    wire [`NUM_CORES-1:0]                       per_core_mem_req_rw;    
-    wire [`NUM_CORES-1:0][`DCACHE_MEM_BYTEEN_WIDTH-1:0] per_core_mem_req_byteen;    
-    wire [`NUM_CORES-1:0][`DCACHE_MEM_ADDR_WIDTH-1:0] per_core_mem_req_addr;
-    wire [`NUM_CORES-1:0][`DCACHE_MEM_DATA_WIDTH-1:0] per_core_mem_req_data;
-    wire [`NUM_CORES-1:0][`L1_MEM_TAG_WIDTH-1:0] per_core_mem_req_tag;
-    wire [`NUM_CORES-1:0]                       per_core_mem_req_ready;
+`ifdef SCOPE
+    localparam scope_socket = 0;
+    `SCOPE_IO_SWITCH (NUM_SOCKETS);
+`endif
 
-    wire [`NUM_CORES-1:0]                       per_core_mem_rsp_valid;            
-    wire [`NUM_CORES-1:0][`DCACHE_MEM_DATA_WIDTH-1:0] per_core_mem_rsp_data;
-    wire [`NUM_CORES-1:0][`L1_MEM_TAG_WIDTH-1:0] per_core_mem_rsp_tag;
-    wire [`NUM_CORES-1:0]                       per_core_mem_rsp_ready;
+`ifdef PERF_ENABLE
+    cache_perf_t l2_perf;
+    sysmem_perf_t sysmem_perf_tmp;
+    always @(*) begin
+        sysmem_perf_tmp = sysmem_perf;
+        sysmem_perf_tmp.l2cache = l2_perf;
+    end
+`endif
 
-    wire [`NUM_CORES-1:0]                       per_core_busy;
+`ifdef GBAR_ENABLE
 
-    for (genvar i = 0; i < `NUM_CORES; i++) begin
+    VX_gbar_bus_if per_socket_gbar_bus_if[NUM_SOCKETS]();
+    VX_gbar_bus_if gbar_bus_if();
 
-        `RESET_RELAY (core_reset);
+    VX_gbar_arb #(
+        .NUM_REQS (NUM_SOCKETS),
+        .OUT_BUF  ((NUM_SOCKETS > 2) ? 1 : 0) // bgar_unit has no backpressure
+    ) gbar_arb (
+        .clk        (clk),
+        .reset      (reset),
+        .bus_in_if  (per_socket_gbar_bus_if),
+        .bus_out_if (gbar_bus_if)
+    );
 
-        VX_core #(
-            .CORE_ID(i + (CLUSTER_ID * `NUM_CORES))
-        ) core (
-            `SCOPE_BIND_VX_cluster_core(i)
+    VX_gbar_unit #(
+        .INSTANCE_ID (`SFORMATF(("gbar%0d", CLUSTER_ID)))
+    ) gbar_unit (
+        .clk         (clk),
+        .reset       (reset),
+        .gbar_bus_if (gbar_bus_if)
+    );
+
+`endif
+
+    VX_mem_bus_if #(
+        .DATA_SIZE (`L1_LINE_SIZE),
+        .TAG_WIDTH (L1_MEM_ARB_TAG_WIDTH)
+    ) per_socket_mem_bus_if[NUM_SOCKETS * `L1_MEM_PORTS]();
+
+    `RESET_RELAY (l2_reset, reset);
+
+    VX_cache_wrap #(
+        .INSTANCE_ID    (`SFORMATF(("%s-l2cache", INSTANCE_ID))),
+        .CACHE_SIZE     (`L2_CACHE_SIZE),
+        .LINE_SIZE      (`L2_LINE_SIZE),
+        .NUM_BANKS      (`L2_NUM_BANKS),
+        .NUM_WAYS       (`L2_NUM_WAYS),
+        .WORD_SIZE      (L2_WORD_SIZE),
+        .NUM_REQS       (L2_NUM_REQS),
+        .MEM_PORTS      (`L2_MEM_PORTS),
+        .CRSQ_SIZE      (`L2_CRSQ_SIZE),
+        .MSHR_SIZE      (`L2_MSHR_SIZE),
+        .MRSQ_SIZE      (`L2_MRSQ_SIZE),
+        .MREQ_SIZE      (`L2_WRITEBACK ? `L2_MSHR_SIZE : `L2_MREQ_SIZE),
+        .TAG_WIDTH      (L2_TAG_WIDTH),
+        .WRITE_ENABLE   (1),
+        .WRITEBACK      (`L2_WRITEBACK),
+        .DIRTY_BYTES    (`L2_DIRTYBYTES),
+        .REPL_POLICY    (`L2_REPL_POLICY),
+        .CORE_OUT_BUF   (3),
+        .MEM_OUT_BUF    (3),
+        .NC_ENABLE      (1),
+        .PASSTHRU       (!`L2_ENABLED)
+    ) l2cache (
+        .clk            (clk),
+        .reset          (l2_reset),
+    `ifdef PERF_ENABLE
+        .cache_perf     (l2_perf),
+    `endif
+        .core_bus_if    (per_socket_mem_bus_if),
+        .mem_bus_if     (mem_bus_if)
+    );
+
+    ///////////////////////////////////////////////////////////////////////////
+
+    wire [NUM_SOCKETS-1:0] per_socket_busy;
+
+    // Generate all sockets
+    for (genvar socket_id = 0; socket_id < NUM_SOCKETS; ++socket_id) begin : g_sockets
+
+        `RESET_RELAY (socket_reset, reset);
+
+        VX_dcr_bus_if socket_dcr_bus_if();
+        wire is_base_dcr_addr = (dcr_bus_if.write_addr >= `VX_DCR_BASE_STATE_BEGIN && dcr_bus_if.write_addr < `VX_DCR_BASE_STATE_END);
+        `BUFFER_DCR_BUS_IF (socket_dcr_bus_if, dcr_bus_if, is_base_dcr_addr, (NUM_SOCKETS > 1))
+
+        VX_socket #(
+            .SOCKET_ID ((CLUSTER_ID * NUM_SOCKETS) + socket_id),
+            .INSTANCE_ID (`SFORMATF(("%s-socket%0d", INSTANCE_ID, socket_id)))
+        ) socket (
+            `SCOPE_IO_BIND  (scope_socket+socket_id)
 
             .clk            (clk),
-            .reset          (core_reset),
-
-            .mem_req_valid  (per_core_mem_req_valid[i]),
-            .mem_req_rw     (per_core_mem_req_rw   [i]),                
-            .mem_req_byteen (per_core_mem_req_byteen[i]),                
-            .mem_req_addr   (per_core_mem_req_addr [i]),
-            .mem_req_data   (per_core_mem_req_data [i]),
-            .mem_req_tag    (per_core_mem_req_tag  [i]),
-            .mem_req_ready  (per_core_mem_req_ready[i]),
-                     
-            .mem_rsp_valid  (per_core_mem_rsp_valid[i]),                
-            .mem_rsp_data   (per_core_mem_rsp_data [i]),
-            .mem_rsp_tag    (per_core_mem_rsp_tag  [i]),
-            .mem_rsp_ready  (per_core_mem_rsp_ready[i]),
-
-            .busy           (per_core_busy         [i])
-        );
-    end
-    
-    assign busy = (| per_core_busy);
-
-    if (`L2_ENABLE) begin
-    `ifdef PERF_ENABLE
-        VX_perf_cache_if perf_l2cache_if();
-    `endif
-
-        `RESET_RELAY (l2_reset);
-
-        VX_cache #(
-            .CACHE_ID           (`L2_CACHE_ID),
-            .CACHE_SIZE         (`L2_CACHE_SIZE),
-            .CACHE_LINE_SIZE    (`L2_CACHE_LINE_SIZE),
-            .NUM_BANKS          (`L2_NUM_BANKS),
-            .NUM_PORTS          (`L2_NUM_PORTS),
-            .WORD_SIZE          (`L2_WORD_SIZE),
-            .NUM_REQS           (`L2_NUM_REQS),
-            .CREQ_SIZE          (`L2_CREQ_SIZE),
-            .CRSQ_SIZE          (`L2_CRSQ_SIZE),
-            .MSHR_SIZE          (`L2_MSHR_SIZE),
-            .MRSQ_SIZE          (`L2_MRSQ_SIZE),
-            .MREQ_SIZE          (`L2_MREQ_SIZE),
-            .WRITE_ENABLE       (1),          
-            .CORE_TAG_WIDTH     (`L1_MEM_TAG_WIDTH),
-            .CORE_TAG_ID_BITS   (0),
-            .MEM_TAG_WIDTH      (`L2_MEM_TAG_WIDTH),
-            .NC_ENABLE          (1)
-        ) l2cache (
-            `SCOPE_BIND_VX_cluster_l2cache
-              
-            .clk                (clk),
-            .reset              (l2_reset),
+            .reset          (socket_reset),
 
         `ifdef PERF_ENABLE
-            .perf_cache_if      (perf_l2cache_if),
+            .sysmem_perf    (sysmem_perf_tmp),
         `endif
 
-            // Core request
-            .core_req_valid     (per_core_mem_req_valid),
-            .core_req_rw        (per_core_mem_req_rw),
-            .core_req_byteen    (per_core_mem_req_byteen),
-            .core_req_addr      (per_core_mem_req_addr),
-            .core_req_data      (per_core_mem_req_data),  
-            .core_req_tag       (per_core_mem_req_tag),  
-            .core_req_ready     (per_core_mem_req_ready),
+            .dcr_bus_if     (socket_dcr_bus_if),
 
-            // Core response
-            .core_rsp_valid     (per_core_mem_rsp_valid),
-            .core_rsp_data      (per_core_mem_rsp_data),
-            .core_rsp_tag       (per_core_mem_rsp_tag),
-            .core_rsp_ready     (per_core_mem_rsp_ready),
-            `UNUSED_PIN (core_rsp_tmask),
+            .mem_bus_if     (per_socket_mem_bus_if[socket_id * `L1_MEM_PORTS +: `L1_MEM_PORTS]),
 
-            // Memory request
-            .mem_req_valid      (mem_req_valid),
-            .mem_req_rw         (mem_req_rw),        
-            .mem_req_byteen     (mem_req_byteen),
-            .mem_req_addr       (mem_req_addr),
-            .mem_req_data       (mem_req_data),
-            .mem_req_tag        (mem_req_tag),
-            .mem_req_ready      (mem_req_ready),
-            
-            // Memory response
-            .mem_rsp_valid      (mem_rsp_valid),
-            .mem_rsp_tag        (mem_rsp_tag),
-            .mem_rsp_data       (mem_rsp_data),
-            .mem_rsp_ready      (mem_rsp_ready)
+        `ifdef GBAR_ENABLE
+            .gbar_bus_if    (per_socket_gbar_bus_if[socket_id]),
+        `endif
+
+            .busy           (per_socket_busy[socket_id])
         );
-
-    end else begin
-
-        `RESET_RELAY (mem_arb_reset);
-
-        VX_mem_arb #(
-            .NUM_REQS     (`NUM_CORES),
-            .DATA_WIDTH   (`DCACHE_MEM_DATA_WIDTH),
-            .ADDR_WIDTH   (`DCACHE_MEM_ADDR_WIDTH),           
-            .TAG_IN_WIDTH (`L1_MEM_TAG_WIDTH),            
-            .TYPE         ("R"),
-            .TAG_SEL_IDX  (1), // Skip 0 for NC flag
-            .BUFFERED_REQ (1),
-            .BUFFERED_RSP (1)
-        ) mem_arb (
-            .clk            (clk),
-            .reset          (mem_arb_reset),
-
-            // Core request
-            .req_valid_in   (per_core_mem_req_valid),
-            .req_rw_in      (per_core_mem_req_rw),
-            .req_byteen_in  (per_core_mem_req_byteen),
-            .req_addr_in    (per_core_mem_req_addr),
-            .req_data_in    (per_core_mem_req_data),  
-            .req_tag_in     (per_core_mem_req_tag),  
-            .req_ready_in   (per_core_mem_req_ready),
-
-            // Memory request
-            .req_valid_out  (mem_req_valid),
-            .req_rw_out     (mem_req_rw),        
-            .req_byteen_out (mem_req_byteen),        
-            .req_addr_out   (mem_req_addr),
-            .req_data_out   (mem_req_data),
-            .req_tag_out    (mem_req_tag),
-            .req_ready_out  (mem_req_ready),
-
-            // Core response
-            .rsp_valid_out  (per_core_mem_rsp_valid),
-            .rsp_data_out   (per_core_mem_rsp_data),
-            .rsp_tag_out    (per_core_mem_rsp_tag),
-            .rsp_ready_out  (per_core_mem_rsp_ready),
-            
-            // Memory response
-            .rsp_valid_in   (mem_rsp_valid),
-            .rsp_tag_in     (mem_rsp_tag),
-            .rsp_data_in    (mem_rsp_data),
-            .rsp_ready_in   (mem_rsp_ready)
-        );
-
     end
+
+    `BUFFER_EX(busy, (| per_socket_busy), 1'b1, 1, (NUM_SOCKETS > 1));
 
 endmodule
