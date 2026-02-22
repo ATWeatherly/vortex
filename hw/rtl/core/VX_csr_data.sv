@@ -131,7 +131,6 @@ import VX_fpu_pkg::*;
                 `VX_CSR_FRM,
                 `VX_CSR_FCSR,
             `endif
-                `VX_CSR_SATP,
                 `VX_CSR_MSTATUS,
                 `VX_CSR_MNSTATUS,
                 `VX_CSR_MEDELEG,
@@ -140,8 +139,9 @@ import VX_fpu_pkg::*;
                 `VX_CSR_MTVEC,
                 `VX_CSR_MEPC,
                 `VX_CSR_PMPCFG0,
-                `VX_CSR_PMPADDR0: begin
-                    // do nothing!
+                `VX_CSR_PMPADDR0,
+                `VX_CSR_SATP: begin
+                    // do nothing! SATP is read-only from core's perspective (controlled by host via DCR)
                 end
                 `VX_CSR_MSCRATCH: begin
                     mscratch <= write_data;
@@ -191,7 +191,8 @@ import VX_fpu_pkg::*;
 
             `CSR_READ_64(`VX_CSR_MINSTRET, read_data_ro_w, commit_csr_if.instret);
 
-            `VX_CSR_SATP,
+            `VX_CSR_SATP: read_data_rw_w = base_dcrs.satp;
+            
             `VX_CSR_MSTATUS,
             `VX_CSR_MNSTATUS,
             `VX_CSR_MEDELEG,

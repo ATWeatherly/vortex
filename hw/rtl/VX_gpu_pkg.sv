@@ -486,6 +486,8 @@ package VX_gpu_pkg;
         logic [`XLEN-1:0]   startup_addr;
         logic [`XLEN-1:0]   startup_arg;
         logic [7:0]         mpm_class;
+        // SATP value written by host via DCR. Cores may read SATP via CSR.
+        logic [`XLEN-1:0]   satp;
     } base_dcrs_t;
 
     //////////////////////// instruction arguments ////////////////////////////
