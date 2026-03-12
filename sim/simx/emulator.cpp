@@ -299,7 +299,7 @@ void Emulator::icache_read(void *data, uint64_t addr, uint32_t size) {
 }
 #endif
 
-#ifdef VM_ENABLE
+#ifdef VM_ENABLE // SB-ATTN: set_satp here, this is what is ran for simx
 void Emulator::set_satp(uint64_t satp) {
   DPH(3, "set satp 0x" << std::hex << satp << " in emulator module\n");
   set_csr(VX_CSR_SATP,satp,0,0);
@@ -471,8 +471,8 @@ Word Emulator::get_csr(uint32_t addr, uint32_t wid, uint32_t tid) {
     if (vec_unit_->get_csr(addr, wid, tid, &value))
       return value;
   #endif
-    if ((addr >= VX_CSR_MPM_BASE && addr < (VX_CSR_MPM_BASE + 32))
-     || (addr >= VX_CSR_MPM_BASE_H && addr < (VX_CSR_MPM_BASE_H + 32))) {
+    if ((addr >= VX_CSR_MPM_BASE && addr < (VX_CSR_MPM_BASE + 48))
+     || (addr >= VX_CSR_MPM_BASE_H && addr < (VX_CSR_MPM_BASE_H + 48))) {
       // user-defined MPM CSRs
       auto perf_class = dcrs_.base_dcrs.read(VX_DCR_BASE_MPM_CLASS);
       switch (perf_class) {

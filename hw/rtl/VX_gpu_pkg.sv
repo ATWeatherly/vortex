@@ -100,7 +100,7 @@ package VX_gpu_pkg;
 
     localparam MEM_REQ_FLAG_FLUSH =  0;
     localparam MEM_REQ_FLAG_IO =     1;
-    localparam MEM_REQ_FLAG_LOCAL =  2; // shoud be last since optional
+    localparam MEM_REQ_FLAG_LOCAL =  2; // should be last since optional
     localparam MEM_FLAGS_WIDTH = (MEM_REQ_FLAG_LOCAL + `LMEM_ENABLED);
 
     localparam VX_DCR_ADDR_WIDTH = `VX_DCR_ADDR_BITS;
@@ -630,7 +630,6 @@ package VX_gpu_pkg;
         logic                               eop;
     } operands_t;
 
-    // warning: this layout should not be modified without updating VX_dispatch_unit!!!
     typedef struct packed {
         logic [UUID_WIDTH-1:0]              uuid;
         logic [ISSUE_WIS_W-1:0]             wis;
@@ -752,6 +751,17 @@ package VX_gpu_pkg;
         logic [PERF_CTR_BITS-1:0] load_latency;
    } pipeline_perf_t;
 
+`ifdef VM_ENABLE
+    typedef struct packed {
+        logic [PERF_CTR_BITS-1:0] tlb_reads;      // Total TLB lookups
+        logic [PERF_CTR_BITS-1:0] tlb_hits;       // TLB hits
+        logic [PERF_CTR_BITS-1:0] tlb_misses;     // TLB misses (triggered PTW)
+        logic [PERF_CTR_BITS-1:0] tlb_evictions;  // TLB evictions on fill
+        logic [PERF_CTR_BITS-1:0] ptw_walks;      // PTW walks completed
+        logic [PERF_CTR_BITS-1:0] ptw_latency;    // Total cycles spent in PTW
+    } mmu_perf_t;
+`endif
+
     ///////////////////////// LSU memory Parameters ///////////////////////////
 
     localparam LSU_WORD_SIZE        = XLENB;
@@ -774,8 +784,20 @@ package VX_gpu_pkg;
     // Core request tag Id bits
     localparam ICACHE_TAG_ID_BITS	= NW_WIDTH;
 
-    // Core request tag bits
-    localparam ICACHE_TAG_WIDTH	    = (UUID_WIDTH + ICACHE_TAG_ID_BITS);
+    // Base tag width (internal to core, before MMU expansion)
+    localparam ICACHE_TAG_WIDTH_BASE = (UUID_WIDTH + ICACHE_TAG_ID_BITS);
+
+`ifdef VM_ENABLE
+    // MMU expansion bits for icache (single request port)
+    localparam ICACHE_NUM_REQS        = 1;
+    localparam ICACHE_TLB_SOURCE_BITS = `UP(`CLOG2(ICACHE_NUM_REQS));  // = 1
+    localparam ICACHE_ARB_BITS        = `CLOG2(`CDIV(2 * ICACHE_NUM_REQS + 1, ICACHE_NUM_REQS));  // = 2
+
+    // ICACHE_TAG_WIDTH = external icache interface width (expanded by MMU)
+    localparam ICACHE_TAG_WIDTH       = ICACHE_TAG_WIDTH_BASE + ICACHE_TLB_SOURCE_BITS + ICACHE_ARB_BITS;
+`else
+    localparam ICACHE_TAG_WIDTH       = ICACHE_TAG_WIDTH_BASE;
+`endif
 
     // Memory request data bits
     localparam ICACHE_MEM_DATA_WIDTH = (ICACHE_LINE_SIZE * 8);
@@ -801,21 +823,42 @@ package VX_gpu_pkg;
     localparam DCACHE_NUM_REQS	    = `NUM_LSU_BLOCKS * DCACHE_CHANNELS;
 
     // Core request tag Id bits
-    localparam DCACHE_MERGED_REQS   = (`NUM_LSU_LANES * LSU_WORD_SIZE) / DCACHE_WORD_SIZE;
-    localparam DCACHE_MEM_BATCHES   = `CDIV(DCACHE_MERGED_REQS, DCACHE_CHANNELS);
-    localparam DCACHE_TAG_ID_BITS   = (`CLOG2(`LSUQ_OUT_SIZE) + `CLOG2(DCACHE_MEM_BATCHES));
+    localparam DCACHE_MERGED_REQS     = (`NUM_LSU_LANES * LSU_WORD_SIZE) / DCACHE_WORD_SIZE;
+    localparam DCACHE_MEM_BATCHES     = `CDIV(DCACHE_MERGED_REQS, DCACHE_CHANNELS);
+    localparam DCACHE_TAG_ID_BITS_BASE = (`CLOG2(`LSUQ_OUT_SIZE) + `CLOG2(DCACHE_MEM_BATCHES));
 
-    // Core request tag bits
-    localparam DCACHE_TAG_WIDTH	    = (UUID_WIDTH + DCACHE_TAG_ID_BITS);
+    // Core request tag Id bits
+    localparam DCACHE_TAG_ID_BITS = DCACHE_TAG_ID_BITS_BASE;
+
+    // Base tag width (internal to core, before MMU expansion)
+    // Used by VX_mem_unit, VX_mmu input interface
+    localparam DCACHE_TAG_WIDTH_BASE = (UUID_WIDTH + DCACHE_TAG_ID_BITS);
+
+`ifdef VM_ENABLE
+    // MMU expansion bits
+    // - TLB serialization: UP(CLOG2(DCACHE_NUM_REQS)) bits for lane encoding
+    // - ARB bits: Merge arbiter selector (bypass + TLB + PTW paths)
+    localparam DCACHE_TLB_SOURCE_BITS = `UP(`CLOG2(DCACHE_NUM_REQS));
+    localparam DCACHE_ARB_BITS        = `CLOG2(`CDIV(2 * DCACHE_NUM_REQS + 1, DCACHE_NUM_REQS));
+
+    // DCACHE_TAG_WIDTH = external dcache interface width (expanded by MMU)
+    // Used by VX_core_top, VX_socket, VX_dcache interfaces
+    localparam DCACHE_TAG_WIDTH     = DCACHE_TAG_WIDTH_BASE + DCACHE_TLB_SOURCE_BITS + DCACHE_ARB_BITS;
+    localparam DCACHE_TAG_WIDTH_MMU = DCACHE_TAG_WIDTH;  // Alias for compatibility
+`else
+    // When VM disabled, no expansion needed
+    localparam DCACHE_TAG_WIDTH     = DCACHE_TAG_WIDTH_BASE;
+    localparam DCACHE_TAG_WIDTH_MMU = DCACHE_TAG_WIDTH;
+`endif
 
     // Memory request data bits
     localparam DCACHE_MEM_DATA_WIDTH = (DCACHE_LINE_SIZE * 8);
 
-    // Memory request tag bits
+    // Memory request tag bits (use MMU-expanded width for cache interface)
 `ifdef DCACHE_ENABLE
-    localparam DCACHE_MEM_TAG_WIDTH = `CACHE_CLUSTER_NC_MEM_TAG_WIDTH(`DCACHE_MSHR_SIZE, `DCACHE_NUM_BANKS, DCACHE_NUM_REQS, `L1_MEM_PORTS, DCACHE_LINE_SIZE, DCACHE_WORD_SIZE, DCACHE_TAG_WIDTH, `SOCKET_SIZE, `NUM_DCACHES, UUID_WIDTH);
+    localparam DCACHE_MEM_TAG_WIDTH = `CACHE_CLUSTER_NC_MEM_TAG_WIDTH(`DCACHE_MSHR_SIZE, `DCACHE_NUM_BANKS, DCACHE_NUM_REQS, `L1_MEM_PORTS, DCACHE_LINE_SIZE, DCACHE_WORD_SIZE, DCACHE_TAG_WIDTH_MMU, `SOCKET_SIZE, `NUM_DCACHES, UUID_WIDTH);
 `else
-    localparam DCACHE_MEM_TAG_WIDTH = `CACHE_CLUSTER_BYPASS_MEM_TAG_WIDTH(DCACHE_NUM_REQS, `L1_MEM_PORTS, DCACHE_LINE_SIZE, DCACHE_WORD_SIZE, DCACHE_TAG_WIDTH, `SOCKET_SIZE, `NUM_DCACHES);
+    localparam DCACHE_MEM_TAG_WIDTH = `CACHE_CLUSTER_BYPASS_MEM_TAG_WIDTH(DCACHE_NUM_REQS, `L1_MEM_PORTS, DCACHE_LINE_SIZE, DCACHE_WORD_SIZE, DCACHE_TAG_WIDTH_MMU, `SOCKET_SIZE, `NUM_DCACHES);
 `endif
 
     /////////////////////////////// L1 Parameters /////////////////////////////
