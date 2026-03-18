@@ -143,6 +143,86 @@ module VX_core_top import VX_gpu_pkg::*; #(
     `UNUSED_VAR (scope_bus_out_w)
 `endif
 
+`ifdef VM_ENABLE
+    // Shared PTW wires (NUM_REQUESTORS=2: index 0=dTLB, index 1=iTLB)
+    wire        dtlb_ptw_req_valid, dtlb_ptw_req_ready;
+    wire [31:0] dtlb_ptw_req_vaddr;
+    wire        dtlb_ptw_rsp_valid, dtlb_ptw_rsp_ready;
+    wire [31:0] dtlb_ptw_rsp_vaddr, dtlb_ptw_rsp_paddr;
+    wire [7:0]  dtlb_ptw_rsp_flags;
+
+    wire        itlb_ptw_req_valid, itlb_ptw_req_ready;
+    wire [31:0] itlb_ptw_req_vaddr;
+    wire        itlb_ptw_rsp_valid, itlb_ptw_rsp_ready;
+    wire [31:0] itlb_ptw_rsp_vaddr, itlb_ptw_rsp_paddr;
+    wire [7:0]  itlb_ptw_rsp_flags;
+
+    // Array wires for PTW miss/fill unpacked array ports
+    wire [1:0]  ptw_miss_valid_w, ptw_miss_ready_w;
+    wire [31:0] ptw_miss_vaddr_w [2];
+    wire [1:0]  ptw_fill_valid_w, ptw_fill_ready_w;
+    wire [31:0] ptw_fill_vaddr_w [2], ptw_fill_paddr_w [2];
+    wire [7:0]  ptw_fill_flags_w [2];
+
+    assign ptw_miss_valid_w[0]  = dtlb_ptw_req_valid;
+    assign ptw_miss_valid_w[1]  = itlb_ptw_req_valid;
+    assign dtlb_ptw_req_ready   = ptw_miss_ready_w[0];
+    assign itlb_ptw_req_ready   = ptw_miss_ready_w[1];
+    assign ptw_miss_vaddr_w[0]  = dtlb_ptw_req_vaddr;
+    assign ptw_miss_vaddr_w[1]  = itlb_ptw_req_vaddr;
+    assign dtlb_ptw_rsp_valid   = ptw_fill_valid_w[0];
+    assign itlb_ptw_rsp_valid   = ptw_fill_valid_w[1];
+    assign ptw_fill_ready_w[0]  = dtlb_ptw_rsp_ready;
+    assign ptw_fill_ready_w[1]  = itlb_ptw_rsp_ready;
+    assign dtlb_ptw_rsp_vaddr   = ptw_fill_vaddr_w[0];
+    assign itlb_ptw_rsp_vaddr   = ptw_fill_vaddr_w[1];
+    assign dtlb_ptw_rsp_paddr   = ptw_fill_paddr_w[0];
+    assign itlb_ptw_rsp_paddr   = ptw_fill_paddr_w[1];
+    assign dtlb_ptw_rsp_flags   = ptw_fill_flags_w[0];
+    assign itlb_ptw_rsp_flags   = ptw_fill_flags_w[1];
+
+    // SATP from DCR bus
+    reg [31:0] ptw_satp;
+    always @(posedge clk) begin
+        if (dcr_bus_if.write_valid && dcr_bus_if.write_addr == `VX_DCR_BASE_SATP0)
+            ptw_satp <= dcr_bus_if.write_data;
+    end
+
+    // PTW memory interface: VX_mmu_ptw (master) → VX_core.dtlb_ptw_mem_if (slave)
+    // → VX_mmu merge arbiter → VX_core.dcache_bus_if
+    localparam CTR_PTW_MEM_TAG_WIDTH = DCACHE_TAG_WIDTH_BASE + DCACHE_TLB_SOURCE_BITS;
+    VX_mem_bus_if #(
+        .DATA_SIZE (DCACHE_WORD_SIZE),
+        .TAG_WIDTH (CTR_PTW_MEM_TAG_WIDTH)
+    ) ptw_mem_bus();
+
+    VX_mmu_ptw #(
+        .DATA_SIZE      (DCACHE_WORD_SIZE),
+        .TAG_WIDTH      (CTR_PTW_MEM_TAG_WIDTH),
+        .ADDR_WIDTH     (DCACHE_ADDR_WIDTH),
+        .PTW_SIZE       (8),
+        .NUM_REQUESTORS (2)
+    ) core_top_ptw (
+        .clk        (clk),
+        .reset      (reset),
+        .satp       (ptw_satp),
+        .miss_valid (ptw_miss_valid_w),
+        .miss_ready (ptw_miss_ready_w),
+        .miss_vaddr (ptw_miss_vaddr_w),
+        .fill_valid (ptw_fill_valid_w),
+        .fill_ready (ptw_fill_ready_w),
+        .fill_vaddr (ptw_fill_vaddr_w),
+        .fill_paddr (ptw_fill_paddr_w),
+        .fill_flags (ptw_fill_flags_w),
+        .ptw_mem_if (ptw_mem_bus)
+    `ifdef PERF_ENABLE
+        ,.perf_ptw_latency ()
+    `else
+        ,`UNUSED_PIN (perf_ptw_latency_placeholder)
+    `endif
+    );
+`endif // VM_ENABLE
+
     VX_core #(
         .INSTANCE_ID (`SFORMATF(("core"))),
         .CORE_ID (CORE_ID)
@@ -163,6 +243,26 @@ module VX_core_top import VX_gpu_pkg::*; #(
 
     `ifdef GBAR_ENABLE
         .gbar_bus_if    (gbar_bus_if),
+    `endif
+
+    `ifdef VM_ENABLE
+        .dtlb_ptw_req_valid (dtlb_ptw_req_valid),
+        .dtlb_ptw_req_ready (dtlb_ptw_req_ready),
+        .dtlb_ptw_req_vaddr (dtlb_ptw_req_vaddr),
+        .dtlb_ptw_rsp_valid (dtlb_ptw_rsp_valid),
+        .dtlb_ptw_rsp_ready (dtlb_ptw_rsp_ready),
+        .dtlb_ptw_rsp_vaddr (dtlb_ptw_rsp_vaddr),
+        .dtlb_ptw_rsp_paddr (dtlb_ptw_rsp_paddr),
+        .dtlb_ptw_rsp_flags (dtlb_ptw_rsp_flags),
+        .itlb_ptw_req_valid (itlb_ptw_req_valid),
+        .itlb_ptw_req_ready (itlb_ptw_req_ready),
+        .itlb_ptw_req_vaddr (itlb_ptw_req_vaddr),
+        .itlb_ptw_rsp_valid (itlb_ptw_rsp_valid),
+        .itlb_ptw_rsp_ready (itlb_ptw_rsp_ready),
+        .itlb_ptw_rsp_vaddr (itlb_ptw_rsp_vaddr),
+        .itlb_ptw_rsp_paddr (itlb_ptw_rsp_paddr),
+        .itlb_ptw_rsp_flags (itlb_ptw_rsp_flags),
+        .dtlb_ptw_mem_if    (ptw_mem_bus),
     `endif
 
         .busy           (busy)

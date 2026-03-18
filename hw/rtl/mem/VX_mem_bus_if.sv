@@ -12,6 +12,7 @@
 // limitations under the License.
 
 `include "VX_define.vh"
+/* verilator lint_off UNUSEDSIGNAL */
 
 interface VX_mem_bus_if import VX_gpu_pkg::*; #(
     parameter DATA_SIZE  = 1,

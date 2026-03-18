@@ -41,6 +41,33 @@ module VX_core import VX_gpu_pkg::*; #(
     VX_gbar_bus_if.master   gbar_bus_if,
 `endif
 
+`ifdef VM_ENABLE
+    // dTLB PTW miss/fill (routed to shared PTW at socket level)
+    output wire             dtlb_ptw_req_valid,
+    input  wire             dtlb_ptw_req_ready,
+    output wire [31:0]      dtlb_ptw_req_vaddr,
+    input  wire             dtlb_ptw_rsp_valid,
+    output wire             dtlb_ptw_rsp_ready,
+    input  wire [31:0]      dtlb_ptw_rsp_vaddr,
+    input  wire [31:0]      dtlb_ptw_rsp_paddr,
+    input  wire [7:0]       dtlb_ptw_rsp_flags,
+
+    // iTLB PTW miss/fill (routed to shared PTW at socket level)
+    output wire             itlb_ptw_req_valid,
+    input  wire             itlb_ptw_req_ready,
+    output wire [31:0]      itlb_ptw_req_vaddr,
+    input  wire             itlb_ptw_rsp_valid,
+    output wire             itlb_ptw_rsp_ready,
+    input  wire [31:0]      itlb_ptw_rsp_vaddr,
+    input  wire [31:0]      itlb_ptw_rsp_paddr,
+    input  wire [7:0]       itlb_ptw_rsp_flags,
+
+    // dTLB PTW memory passthrough: socket PTW drives page table reads here.
+    // TAG_WIDTH = DCACHE_TAG_WIDTH_BASE + DCACHE_TLB_SOURCE_BITS (TAG_WIDTH_TLB
+    // inside VX_mmu; the merge arbiter adds DCACHE_ARB_BITS on top).
+    VX_mem_bus_if.slave     dtlb_ptw_mem_if,
+`endif
+
     // Status
     output wire             busy
 );
@@ -90,6 +117,21 @@ module VX_core import VX_gpu_pkg::*; #(
         .DATA_SIZE (ICACHE_WORD_SIZE),
         .TAG_WIDTH (ICACHE_TAG_WIDTH)
     ) icache_mmu_out_if[1]();
+
+    // Tie-off for iTLB VX_mmu's ptw_mem_if slave port.
+    // The socket-level PTW does all its walks via the dTLB path (dtlb_ptw_mem_if).
+    // iTLB misses still reach the shared PTW via itlb_ptw_req/rsp ports, but
+    // the PTW's memory requests never flow through the iTLB VX_mmu.
+    localparam ICACHE_TLB_TAG_WIDTH = ICACHE_TAG_WIDTH_BASE + ICACHE_TLB_SOURCE_BITS;
+    /* verilator lint_off UNUSEDSIGNAL */
+    VX_mem_bus_if #(
+        .DATA_SIZE (ICACHE_WORD_SIZE),
+        .TAG_WIDTH (ICACHE_TLB_TAG_WIDTH)
+    ) itlb_ptw_mem_tie();
+    /* verilator lint_on UNUSEDSIGNAL */
+    assign itlb_ptw_mem_tie.req_valid = 1'b0;
+    assign itlb_ptw_mem_tie.req_data  = '0;
+    assign itlb_ptw_mem_tie.rsp_ready = 1'b1;
 `endif
 
 `ifdef PERF_ENABLE
@@ -262,13 +304,22 @@ module VX_core import VX_gpu_pkg::*; #(
         .DATA_SIZE (DCACHE_WORD_SIZE),
         .TAG_WIDTH (DCACHE_TAG_WIDTH_BASE)
     ) mmu (
-        .clk           (clk),
-        .reset         (reset),
-        .satp          (satp_value),
-        .lsu_mem_if    (mem_unit_dcache_if),
-        .dcache_mem_if (dcache_bus_if),
+        .clk              (clk),
+        .reset            (reset),
+        .satp             (satp_value),
+        .lsu_mem_if       (mem_unit_dcache_if),
+        .dcache_mem_if    (dcache_bus_if),
+        .ptw_req_valid    (dtlb_ptw_req_valid),
+        .ptw_req_ready    (dtlb_ptw_req_ready),
+        .ptw_req_vaddr    (dtlb_ptw_req_vaddr),
+        .ptw_rsp_valid    (dtlb_ptw_rsp_valid),
+        .ptw_rsp_ready    (dtlb_ptw_rsp_ready),
+        .ptw_rsp_vaddr    (dtlb_ptw_rsp_vaddr),
+        .ptw_rsp_paddr    (dtlb_ptw_rsp_paddr),
+        .ptw_rsp_flags    (dtlb_ptw_rsp_flags),
+        .ptw_mem_if       (dtlb_ptw_mem_if),
     `ifdef PERF_ENABLE
-        .mmu_perf      (mmu_perf)
+        .mmu_perf         (mmu_perf)
     `else
         `UNUSED_PIN (mmu_perf_placeholder)
     `endif
@@ -292,13 +343,22 @@ module VX_core import VX_gpu_pkg::*; #(
         .DATA_SIZE (ICACHE_WORD_SIZE),
         .TAG_WIDTH (ICACHE_TAG_WIDTH_BASE)
     ) icache_mmu (
-        .clk           (clk),
-        .reset         (reset),
-        .satp          (satp_value),
-        .lsu_mem_if    (fetch_icache_if),      // Array[1] input
-        .dcache_mem_if (icache_mmu_out_if),    // Array[1] output
+        .clk              (clk),
+        .reset            (reset),
+        .satp             (satp_value),
+        .lsu_mem_if       (fetch_icache_if),      // Array[1] input
+        .dcache_mem_if    (icache_mmu_out_if),    // Array[1] output
+        .ptw_req_valid    (itlb_ptw_req_valid),
+        .ptw_req_ready    (itlb_ptw_req_ready),
+        .ptw_req_vaddr    (itlb_ptw_req_vaddr),
+        .ptw_rsp_valid    (itlb_ptw_rsp_valid),
+        .ptw_rsp_ready    (itlb_ptw_rsp_ready),
+        .ptw_rsp_vaddr    (itlb_ptw_rsp_vaddr),
+        .ptw_rsp_paddr    (itlb_ptw_rsp_paddr),
+        .ptw_rsp_flags    (itlb_ptw_rsp_flags),
+        .ptw_mem_if       (itlb_ptw_mem_tie),
     `ifdef PERF_ENABLE
-        .mmu_perf      (icache_mmu_perf)
+        .mmu_perf         (icache_mmu_perf)
     `else
         `UNUSED_PIN (mmu_perf_placeholder)
     `endif

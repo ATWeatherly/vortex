@@ -4,6 +4,7 @@
 `include "VX_define.vh"
 /* verilator lint_off WIDTHTRUNC */
 /* verilator lint_off WIDTHEXPAND */
+/* verilator lint_off UNUSEDSIGNAL */
 
 module VX_mmu import VX_gpu_pkg::*; #(
     parameter NUM_REQS       = DCACHE_NUM_REQS,
@@ -21,6 +22,21 @@ module VX_mmu import VX_gpu_pkg::*; #(
 
     VX_mem_bus_if.slave  lsu_mem_if [NUM_REQS],
     VX_mem_bus_if.master dcache_mem_if [NUM_REQS],
+
+    // PTW miss/fill interface (shared PTW lives at socket level)
+    output wire        ptw_req_valid,
+    input  wire        ptw_req_ready,
+    output wire [31:0] ptw_req_vaddr,
+
+    input  wire        ptw_rsp_valid,
+    output wire        ptw_rsp_ready,
+    input  wire [31:0] ptw_rsp_vaddr,
+    input  wire [31:0] ptw_rsp_paddr,
+    input  wire [7:0]  ptw_rsp_flags,
+
+    // PTW memory passthrough: socket-level PTW drives page table reads through
+    // this slot in the merge arbiter, preserving DCACHE_ARB_BITS tag format.
+    VX_mem_bus_if.slave ptw_mem_if,
 
 `ifdef PERF_ENABLE
     output mmu_perf_t    mmu_perf
@@ -78,17 +94,10 @@ module VX_mmu import VX_gpu_pkg::*; #(
         .FLAGS_WIDTH (FLAGS_WIDTH)
     ) bypass_dcache_if[NUM_REQS]();
 
-    VX_mem_bus_if #(
-        .DATA_SIZE   (DATA_SIZE),
-        .TAG_WIDTH   (TAG_WIDTH_TLB),
-        .FLAGS_WIDTH (FLAGS_WIDTH)
-    ) ptw_mem_if();
-
 `ifdef PERF_ENABLE
     /* verilator lint_off UNUSEDSIGNAL */
     mmu_perf_t mmu_perf_tlb;
     /* verilator lint_on UNUSEDSIGNAL */
-    wire [PERF_CTR_BITS-1:0] ptw_latency_counter;
 `endif
 
     // [0..NUM_REQS-1]=bypass, [NUM_REQS..2*NUM_REQS-1]=TLB, [2*NUM_REQS]=PTW
@@ -177,20 +186,6 @@ module VX_mmu import VX_gpu_pkg::*; #(
     end
 
     // =========================================================================
-    // TLB Miss/Fill Interface
-    // =========================================================================
-
-    wire        tlb_miss_valid;
-    wire        tlb_miss_ready;
-    wire [31:0] tlb_miss_vaddr;
-
-    wire        tlb_fill_valid;
-    wire        tlb_fill_ready;
-    wire [31:0] tlb_fill_vaddr;
-    wire [31:0] tlb_fill_paddr;
-    wire [7:0]  tlb_fill_flags;
-
-    // =========================================================================
     // TLB Module
     // =========================================================================
 
@@ -206,14 +201,14 @@ module VX_mmu import VX_gpu_pkg::*; #(
         .reset         (reset),
         .tlb_in_if     (buffered_if),
         .tlb_out_if    (tlb_out_if),
-        .miss_valid    (tlb_miss_valid),
-        .miss_ready    (tlb_miss_ready),
-        .miss_vaddr    (tlb_miss_vaddr),
-        .fill_valid    (tlb_fill_valid),
-        .fill_ready    (tlb_fill_ready),
-        .fill_vaddr    (tlb_fill_vaddr),
-        .fill_paddr    (tlb_fill_paddr),
-        .fill_flags    (tlb_fill_flags),
+        .miss_valid    (ptw_req_valid),
+        .miss_ready    (ptw_req_ready),
+        .miss_vaddr    (ptw_req_vaddr),
+        .fill_valid    (ptw_rsp_valid),
+        .fill_ready    (ptw_rsp_ready),
+        .fill_vaddr    (ptw_rsp_vaddr),
+        .fill_paddr    (ptw_rsp_paddr),
+        .fill_flags    (ptw_rsp_flags),
     `ifdef PERF_ENABLE
         .mmu_perf      (mmu_perf_tlb)
     `else
@@ -221,34 +216,7 @@ module VX_mmu import VX_gpu_pkg::*; #(
     `endif
     );
 
-    // =========================================================================
-    // PTW Module
-    // =========================================================================
-
-    VX_mmu_ptw #(
-        .DATA_SIZE     (DATA_SIZE),
-        .TAG_WIDTH     (TAG_WIDTH_TLB),
-        .ADDR_WIDTH    (ADDR_WIDTH),
-        .FLAGS_WIDTH   (FLAGS_WIDTH)
-    ) ptw_unit (
-        .clk           (clk),
-        .reset         (reset),
-        .satp          (satp),
-        .miss_valid    (tlb_miss_valid),
-        .miss_ready    (tlb_miss_ready),
-        .miss_vaddr    (tlb_miss_vaddr),
-        .fill_valid    (tlb_fill_valid),
-        .fill_ready    (tlb_fill_ready),
-        .fill_vaddr    (tlb_fill_vaddr),
-        .fill_paddr    (tlb_fill_paddr),
-        .fill_flags    (tlb_fill_flags),
-        .ptw_mem_if    (ptw_mem_if),
-    `ifdef PERF_ENABLE
-        .perf_ptw_latency (ptw_latency_counter)
-    `else
-        `UNUSED_PIN (perf_ptw_latency_placeholder)
-    `endif
-    );
+    // PTW is now shared at socket level; miss/fill ports are exposed externally.
 
     // =========================================================================
     // Bypass Path
@@ -297,11 +265,12 @@ module VX_mmu import VX_gpu_pkg::*; #(
         assign merge_in_if[NUM_REQS + i].rsp_ready = tlb_out_if[i].rsp_ready;
     end
 
+    // PTW memory slot: socket-level PTW drives page table walks through here
     assign merge_in_if[2 * NUM_REQS].req_valid = ptw_mem_if.req_valid;
     assign merge_in_if[2 * NUM_REQS].req_data  = ptw_mem_if.req_data;
-    assign ptw_mem_if.req_ready            = merge_in_if[2 * NUM_REQS].req_ready;
-    assign ptw_mem_if.rsp_valid            = merge_in_if[2 * NUM_REQS].rsp_valid;
-    assign ptw_mem_if.rsp_data             = merge_in_if[2 * NUM_REQS].rsp_data;
+    assign ptw_mem_if.req_ready                = merge_in_if[2 * NUM_REQS].req_ready;
+    assign ptw_mem_if.rsp_valid                = merge_in_if[2 * NUM_REQS].rsp_valid;
+    assign ptw_mem_if.rsp_data                 = merge_in_if[2 * NUM_REQS].rsp_data;
     assign merge_in_if[2 * NUM_REQS].rsp_ready = ptw_mem_if.rsp_ready;
 
     // =========================================================================
@@ -393,7 +362,7 @@ module VX_mmu import VX_gpu_pkg::*; #(
     assign mmu_perf.tlb_misses    = mmu_perf_tlb.tlb_misses;
     assign mmu_perf.tlb_evictions = mmu_perf_tlb.tlb_evictions;
     assign mmu_perf.ptw_walks     = mmu_perf_tlb.ptw_walks;
-    assign mmu_perf.ptw_latency   = ptw_latency_counter;
+    assign mmu_perf.ptw_latency   = '0; // PTW latency now tracked at socket level
 `else
     assign mmu_perf_placeholder = 1'b0;
 `endif

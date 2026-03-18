@@ -246,10 +246,151 @@ module VX_socket import VX_gpu_pkg::*; #(
             .gbar_bus_if    (per_core_gbar_bus_if[core_id]),
         `endif
 
+        `ifdef VM_ENABLE
+            .dtlb_ptw_req_valid (per_core_dtlb_ptw_req_valid[core_id]),
+            .dtlb_ptw_req_ready (per_core_dtlb_ptw_req_ready[core_id]),
+            .dtlb_ptw_req_vaddr (per_core_dtlb_ptw_req_vaddr[core_id]),
+            .dtlb_ptw_rsp_valid (per_core_dtlb_ptw_rsp_valid[core_id]),
+            .dtlb_ptw_rsp_ready (per_core_dtlb_ptw_rsp_ready[core_id]),
+            .dtlb_ptw_rsp_vaddr (per_core_dtlb_ptw_rsp_vaddr[core_id]),
+            .dtlb_ptw_rsp_paddr (per_core_dtlb_ptw_rsp_paddr[core_id]),
+            .dtlb_ptw_rsp_flags (per_core_dtlb_ptw_rsp_flags[core_id]),
+            .itlb_ptw_req_valid (per_core_itlb_ptw_req_valid[core_id]),
+            .itlb_ptw_req_ready (per_core_itlb_ptw_req_ready[core_id]),
+            .itlb_ptw_req_vaddr (per_core_itlb_ptw_req_vaddr[core_id]),
+            .itlb_ptw_rsp_valid (per_core_itlb_ptw_rsp_valid[core_id]),
+            .itlb_ptw_rsp_ready (per_core_itlb_ptw_rsp_ready[core_id]),
+            .itlb_ptw_rsp_vaddr (per_core_itlb_ptw_rsp_vaddr[core_id]),
+            .itlb_ptw_rsp_paddr (per_core_itlb_ptw_rsp_paddr[core_id]),
+            .itlb_ptw_rsp_flags (per_core_itlb_ptw_rsp_flags[core_id]),
+            .dtlb_ptw_mem_if    (per_core_dtlb_ptw_mem_if[core_id]),
+        `endif
+
             .busy           (per_core_busy[core_id])
         );
     end
 
     `BUFFER_EX(busy, (| per_core_busy), 1'b1, 1, (`SOCKET_SIZE > 1));
+
+`ifdef VM_ENABLE
+
+    ///////////////////////////////////////////////////////////////////////////
+    // Shared page table walker (HPCA14 Design 3, Phase 2)
+    // One PTW shared across all SOCKET_SIZE cores, serving both dTLB and iTLB.
+    // Memory port is routed through core 0's dTLB VX_mmu merge-arbiter slot,
+    // which preserves DCACHE_ARB_BITS tag format without changing cache params.
+    ///////////////////////////////////////////////////////////////////////////
+
+    // Per-core PTW miss/fill signals — collected and routed to shared PTW.
+    // Layout: [0..SOCKET_SIZE-1] = dTLB (one per core)
+    //         [SOCKET_SIZE..2*SOCKET_SIZE-1] = iTLB (one per core)
+    localparam NUM_PTW_REQS = `SOCKET_SIZE * 2;
+
+    // One bit/value per core, for dTLB
+    wire [`SOCKET_SIZE-1:0] per_core_dtlb_ptw_req_valid;
+    wire [`SOCKET_SIZE-1:0] per_core_dtlb_ptw_req_ready;
+    wire [31:0]              per_core_dtlb_ptw_req_vaddr [`SOCKET_SIZE];
+    wire [`SOCKET_SIZE-1:0] per_core_dtlb_ptw_rsp_valid;
+    wire [`SOCKET_SIZE-1:0] per_core_dtlb_ptw_rsp_ready;
+    wire [31:0]              per_core_dtlb_ptw_rsp_vaddr [`SOCKET_SIZE];
+    wire [31:0]              per_core_dtlb_ptw_rsp_paddr [`SOCKET_SIZE];
+    wire [7:0]               per_core_dtlb_ptw_rsp_flags [`SOCKET_SIZE];
+
+    // One bit/value per core, for iTLB
+    wire [`SOCKET_SIZE-1:0] per_core_itlb_ptw_req_valid;
+    wire [`SOCKET_SIZE-1:0] per_core_itlb_ptw_req_ready;
+    wire [31:0]              per_core_itlb_ptw_req_vaddr [`SOCKET_SIZE];
+    wire [`SOCKET_SIZE-1:0] per_core_itlb_ptw_rsp_valid;
+    wire [`SOCKET_SIZE-1:0] per_core_itlb_ptw_rsp_ready;
+    wire [31:0]              per_core_itlb_ptw_rsp_vaddr [`SOCKET_SIZE];
+    wire [31:0]              per_core_itlb_ptw_rsp_paddr [`SOCKET_SIZE];
+    wire [7:0]               per_core_itlb_ptw_rsp_flags [`SOCKET_SIZE];
+
+    // Flatten per-core miss/fill into PTW arrays.
+    // PTW requestor index: dTLB of core i → i, iTLB of core i → SOCKET_SIZE+i
+    wire [NUM_PTW_REQS-1:0] ptw_miss_valid;
+    wire [NUM_PTW_REQS-1:0] ptw_miss_ready;
+    wire [31:0]              ptw_miss_vaddr [NUM_PTW_REQS];
+    wire [NUM_PTW_REQS-1:0] ptw_fill_valid;
+    wire [NUM_PTW_REQS-1:0] ptw_fill_ready;
+    wire [31:0]              ptw_fill_vaddr [NUM_PTW_REQS];
+    wire [31:0]              ptw_fill_paddr [NUM_PTW_REQS];
+    wire [7:0]               ptw_fill_flags [NUM_PTW_REQS];
+
+    for (genvar i = 0; i < `SOCKET_SIZE; i++) begin : g_ptw_wire
+        // dTLB slot i
+        assign ptw_miss_valid[i]                   = per_core_dtlb_ptw_req_valid[i];
+        assign per_core_dtlb_ptw_req_ready[i]      = ptw_miss_ready[i];
+        assign ptw_miss_vaddr[i]                   = per_core_dtlb_ptw_req_vaddr[i];
+        assign per_core_dtlb_ptw_rsp_valid[i]      = ptw_fill_valid[i];
+        assign ptw_fill_ready[i]                   = per_core_dtlb_ptw_rsp_ready[i];
+        assign per_core_dtlb_ptw_rsp_vaddr[i]      = ptw_fill_vaddr[i];
+        assign per_core_dtlb_ptw_rsp_paddr[i]      = ptw_fill_paddr[i];
+        assign per_core_dtlb_ptw_rsp_flags[i]      = ptw_fill_flags[i];
+        // iTLB slot SOCKET_SIZE+i
+        assign ptw_miss_valid[`SOCKET_SIZE + i]               = per_core_itlb_ptw_req_valid[i];
+        assign per_core_itlb_ptw_req_ready[i]                 = ptw_miss_ready[`SOCKET_SIZE + i];
+        assign ptw_miss_vaddr[`SOCKET_SIZE + i]               = per_core_itlb_ptw_req_vaddr[i];
+        assign per_core_itlb_ptw_rsp_valid[i]                 = ptw_fill_valid[`SOCKET_SIZE + i];
+        assign ptw_fill_ready[`SOCKET_SIZE + i]               = per_core_itlb_ptw_rsp_ready[i];
+        assign per_core_itlb_ptw_rsp_vaddr[i]                 = ptw_fill_vaddr[`SOCKET_SIZE + i];
+        assign per_core_itlb_ptw_rsp_paddr[i]                 = ptw_fill_paddr[`SOCKET_SIZE + i];
+        assign per_core_itlb_ptw_rsp_flags[i]                 = ptw_fill_flags[`SOCKET_SIZE + i];
+    end
+
+    // PTW memory interface: word-level reads to dcache, via core 0's dTLB VX_mmu.
+    // TAG_WIDTH = TAG_WIDTH_TLB inside VX_mmu = DCACHE_TAG_WIDTH minus DCACHE_ARB_BITS.
+    localparam PTW_MEM_TAG_WIDTH = DCACHE_TAG_WIDTH_BASE + DCACHE_TLB_SOURCE_BITS;
+
+    VX_mem_bus_if #(
+        .DATA_SIZE (DCACHE_WORD_SIZE),
+        .TAG_WIDTH (PTW_MEM_TAG_WIDTH)
+    ) per_core_dtlb_ptw_mem_if[`SOCKET_SIZE]();
+
+    // Cores 1..N-1: tie off their dTLB ptw_mem slot (no PTW memory through them).
+    for (genvar i = 1; i < `SOCKET_SIZE; i++) begin : g_ptw_mem_tie
+        assign per_core_dtlb_ptw_mem_if[i].req_valid = 1'b0;
+        assign per_core_dtlb_ptw_mem_if[i].req_data  = '0;
+        assign per_core_dtlb_ptw_mem_if[i].rsp_ready = 1'b1;
+    end
+
+    // SATP register: host writes SATP via DCR bus before kernel launch.
+    reg [31:0] socket_satp;
+    always @(posedge clk) begin
+        if (dcr_bus_if.write_valid && dcr_bus_if.write_addr == `VX_DCR_BASE_SATP0)
+            socket_satp <= dcr_bus_if.write_data;
+    end
+
+    `RESET_RELAY (ptw_reset, reset);
+
+    VX_mmu_ptw #(
+        .DATA_SIZE      (DCACHE_WORD_SIZE),
+        .TAG_WIDTH      (PTW_MEM_TAG_WIDTH),
+        .ADDR_WIDTH     (DCACHE_ADDR_WIDTH),
+        .PTW_SIZE       (8),
+        .NUM_REQUESTORS (NUM_PTW_REQS)
+    ) shared_ptw (
+        .clk        (clk),
+        .reset      (ptw_reset),
+        .satp       (socket_satp),
+        .miss_valid (ptw_miss_valid),
+        .miss_ready (ptw_miss_ready),
+        .miss_vaddr (ptw_miss_vaddr),
+        .fill_valid (ptw_fill_valid),
+        .fill_ready (ptw_fill_ready),
+        .fill_vaddr (ptw_fill_vaddr),
+        .fill_paddr (ptw_fill_paddr),
+        .fill_flags (ptw_fill_flags),
+        .ptw_mem_if (per_core_dtlb_ptw_mem_if[0])
+    `ifdef PERF_ENABLE
+        /* verilator lint_off PINCONNECTEMPTY */
+        ,.perf_ptw_latency ()
+        /* verilator lint_on PINCONNECTEMPTY */
+    `else
+        ,`UNUSED_PIN (perf_ptw_latency_placeholder)
+    `endif
+    );
+
+`endif // VM_ENABLE
 
 endmodule
