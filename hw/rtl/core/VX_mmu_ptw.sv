@@ -1,7 +1,7 @@
 // Copyright 2024
 // PTW: SV32 multi-threaded shared page table walker (HPCA14 Design 3)
 // Supports PTW_SIZE concurrent walks from NUM_REQUESTORS TLBs.
-// Each walk slot tracks its own state independently; slots share one memory port.
+// Single central FSM updates all slot state; slots share one memory port.
 
 `include "VX_define.vh"
 /* verilator lint_off UNUSEDSIGNAL */
@@ -57,7 +57,7 @@ module VX_mmu_ptw import VX_gpu_pkg::*; #(
     localparam SEL_BITS         = `CLOG2(NUM_WORDS);
 
     // =========================================================================
-    // Per-slot state
+    // Per-slot state registers
     // =========================================================================
 
     typedef enum logic [2:0] {
@@ -118,14 +118,6 @@ module VX_mmu_ptw import VX_gpu_pkg::*; #(
         assign miss_ready[r] = miss_grant && (selected_req == REQ_BITS'(r));
     end
 
-    always_ff @(posedge clk) begin
-        if (reset) begin
-            miss_rr_base <= '0;
-        end else if (miss_grant) begin
-            miss_rr_base <= REQ_BITS'((int'(selected_req) + 1) % NUM_REQUESTORS);
-        end
-    end
-
     // =========================================================================
     // Memory request arbitration: rotating priority among slots wanting mem
     // =========================================================================
@@ -157,48 +149,47 @@ module VX_mmu_ptw import VX_gpu_pkg::*; #(
     wire mem_rsp_fire = ptw_mem_if.rsp_valid && ptw_mem_if.rsp_ready;
     wire [SLOT_BITS-1:0] rsp_slot = ptw_mem_if.rsp_data.tag[SLOT_BITS-1:0];
 
-    always_ff @(posedge clk) begin
-        if (reset) begin
-            mem_rr_base <= '0;
-        end else if (mem_req_fire) begin
-            mem_rr_base <= SLOT_BITS'((int'(mem_req_slot) + 1) % PTW_SIZE);
-        end
+    // =========================================================================
+    // PTE address for the current memory arbiter winner (used by both the
+    // memory interface and the central FSM to save into slot_pte_addr_r)
+    // =========================================================================
+
+    wire [31:0] req_pte_addr =
+        (slot_state[mem_req_slot] == PTW_L1_REQ) ?
+            ({satp[PPN_WIDTH-1:0], {PAGE_OFFSET_BITS{1'b0}}} +
+             {{(32-VPN_LEVEL_BITS-PTE_SHIFT){1'b0}},
+              slot_vaddr[mem_req_slot][31:22], {PTE_SHIFT{1'b0}}})
+        :
+            ({slot_l1_ppn[mem_req_slot], {PAGE_OFFSET_BITS{1'b0}}} +
+             {{(32-VPN_LEVEL_BITS-PTE_SHIFT){1'b0}},
+              slot_vaddr[mem_req_slot][21:12], {PTE_SHIFT{1'b0}}});
+
+    // =========================================================================
+    // Response PTE decode: computed once for rsp_slot only
+    // =========================================================================
+
+    wire [31:0] rsp_pte_data;
+    if (NUM_WORDS > 1) begin : g_pte_sel
+        wire [SEL_BITS-1:0] word_sel = slot_pte_addr_r[rsp_slot][SEL_BITS+1:2];
+        assign rsp_pte_data = ptw_mem_if.rsp_data.data[word_sel * 32 +: 32];
+    end else begin : g_pte_direct
+        assign rsp_pte_data = ptw_mem_if.rsp_data.data[31:0];
     end
 
+    wire [PPN_WIDTH-1:0] rsp_pte_ppn   = rsp_pte_data[29:10];
+    wire [7:0]           rsp_pte_flags = rsp_pte_data[7:0];
+
     // =========================================================================
-    // Per-slot state machines
+    // Central state machine
+    //
+    // Each of the four sections below writes to a disjoint set of slots,
+    // partitioned by state: IDLE, L1/L0_REQ, L1/L0_RESP, FILL. No slot can
+    // be in two of those groups simultaneously, so there are no write conflicts.
     // =========================================================================
 
-    for (genvar s = 0; s < PTW_SIZE; s++) begin : g_slots
-
-        wire [VPN_LEVEL_BITS-1:0] vpn1 = slot_vaddr[s][31:22];
-        wire [VPN_LEVEL_BITS-1:0] vpn0 = slot_vaddr[s][21:12];
-
-        wire [31:0] l1_pte_addr = {satp[PPN_WIDTH-1:0], {PAGE_OFFSET_BITS{1'b0}}} +
-                                  {{(32-VPN_LEVEL_BITS-PTE_SHIFT){1'b0}}, vpn1, {PTE_SHIFT{1'b0}}};
-        wire [31:0] l0_pte_addr = {slot_l1_ppn[s], {PAGE_OFFSET_BITS{1'b0}}} +
-                                  {{(32-VPN_LEVEL_BITS-PTE_SHIFT){1'b0}}, vpn0, {PTE_SHIFT{1'b0}}};
-
-        // PTE extraction from response data (shared bus; only used when this_rsp)
-        wire [31:0] pte_data;
-        if (NUM_WORDS > 1) begin : g_pte_sel
-            wire [SEL_BITS-1:0] word_sel = slot_pte_addr_r[s][SEL_BITS+1:2];
-            assign pte_data = ptw_mem_if.rsp_data.data[word_sel * 32 +: 32];
-        end else begin : g_pte_direct
-            assign pte_data = ptw_mem_if.rsp_data.data[31:0];
-        end
-
-        wire [PPN_WIDTH-1:0] pte_ppn   = pte_data[29:10];
-        wire [7:0]           pte_flags = pte_data[7:0];
-
-        wire slot_alloc        = miss_grant && (free_slot == SLOT_BITS'(s));
-        wire this_mem_req_fire = mem_req_fire && (mem_req_slot == SLOT_BITS'(s));
-        wire this_rsp          = mem_rsp_fire && (rsp_slot == SLOT_BITS'(s));
-        wire this_fill_ack     = fill_valid[slot_src[s]] && fill_ready[slot_src[s]]
-                                 && (slot_state[s] == PTW_FILL);
-
-        always_ff @(posedge clk) begin
-            if (reset) begin
+    always_ff @(posedge clk) begin
+        if (reset) begin
+            for (int s = 0; s < PTW_SIZE; s++) begin
                 slot_state[s]      <= PTW_IDLE;
                 slot_vaddr[s]      <= '0;
                 slot_l1_ppn[s]     <= '0;
@@ -206,48 +197,47 @@ module VX_mmu_ptw import VX_gpu_pkg::*; #(
                 slot_flags[s]      <= '0;
                 slot_pte_addr_r[s] <= '0;
                 slot_src[s]        <= '0;
-            end else begin
-                case (slot_state[s])
-                    PTW_IDLE: begin
-                        if (slot_alloc) begin
-                            slot_state[s] <= PTW_L1_REQ;
-                            slot_vaddr[s] <= miss_vaddr[selected_req];
-                            slot_src[s]   <= selected_req;
-                        end
-                    end
-                    PTW_L1_REQ: begin
-                        if (this_mem_req_fire) begin
-                            slot_state[s]      <= PTW_L1_RESP;
-                            slot_pte_addr_r[s] <= l1_pte_addr;
-                        end
-                    end
-                    PTW_L1_RESP: begin
-                        if (this_rsp) begin
-                            slot_state[s]  <= PTW_L0_REQ;
-                            slot_l1_ppn[s] <= pte_ppn;
-                        end
-                    end
-                    PTW_L0_REQ: begin
-                        if (this_mem_req_fire) begin
-                            slot_state[s]      <= PTW_L0_RESP;
-                            slot_pte_addr_r[s] <= l0_pte_addr;
-                        end
-                    end
-                    PTW_L0_RESP: begin
-                        if (this_rsp) begin
-                            slot_state[s] <= PTW_FILL;
-                            slot_ppn[s]   <= pte_ppn;
-                            slot_flags[s] <= pte_flags;
-                        end
-                    end
-                    PTW_FILL: begin
-                        if (this_fill_ack) begin
-                            slot_state[s] <= PTW_IDLE;
-                        end
-                    end
-                    default: slot_state[s] <= PTW_IDLE;
-                endcase
             end
+            miss_rr_base <= '0;
+            mem_rr_base  <= '0;
+        end else begin
+
+            // IDLE → L1_REQ: new miss accepted into free slot
+            if (miss_grant) begin
+                slot_state[free_slot] <= PTW_L1_REQ;
+                slot_vaddr[free_slot] <= miss_vaddr[selected_req];
+                slot_src[free_slot]   <= selected_req;
+                miss_rr_base <= REQ_BITS'((int'(selected_req) + 1) % NUM_REQUESTORS);
+            end
+
+            // L1_REQ/L0_REQ → L1_RESP/L0_RESP: memory request fired
+            if (mem_req_fire) begin
+                slot_state[mem_req_slot]      <= (slot_state[mem_req_slot] == PTW_L1_REQ)
+                                                  ? PTW_L1_RESP : PTW_L0_RESP;
+                slot_pte_addr_r[mem_req_slot] <= req_pte_addr;
+                mem_rr_base <= SLOT_BITS'((int'(mem_req_slot) + 1) % PTW_SIZE);
+            end
+
+            // L1_RESP → L0_REQ  or  L0_RESP → FILL: memory response received
+            if (mem_rsp_fire) begin
+                if (slot_state[rsp_slot] == PTW_L1_RESP) begin
+                    slot_state[rsp_slot]  <= PTW_L0_REQ;
+                    slot_l1_ppn[rsp_slot] <= rsp_pte_ppn;
+                end else begin
+                    slot_state[rsp_slot] <= PTW_FILL;
+                    slot_ppn[rsp_slot]   <= rsp_pte_ppn;
+                    slot_flags[rsp_slot] <= rsp_pte_flags;
+                end
+            end
+
+            // FILL → IDLE: fill acknowledged by TLB
+            for (int s = 0; s < PTW_SIZE; s++) begin
+                if ((slot_state[s] == PTW_FILL) &&
+                    fill_valid[slot_src[s]] && fill_ready[slot_src[s]]) begin
+                    slot_state[s] <= PTW_IDLE;
+                end
+            end
+
         end
     end
 
@@ -288,16 +278,6 @@ module VX_mmu_ptw import VX_gpu_pkg::*; #(
     // =========================================================================
     // Memory interface
     // =========================================================================
-
-    wire [31:0] req_pte_addr =
-        (slot_state[mem_req_slot] == PTW_L1_REQ) ?
-            ({satp[PPN_WIDTH-1:0], {PAGE_OFFSET_BITS{1'b0}}} +
-             {{(32-VPN_LEVEL_BITS-PTE_SHIFT){1'b0}},
-              slot_vaddr[mem_req_slot][31:22], {PTE_SHIFT{1'b0}}})
-        :
-            ({slot_l1_ppn[mem_req_slot], {PAGE_OFFSET_BITS{1'b0}}} +
-             {{(32-VPN_LEVEL_BITS-PTE_SHIFT){1'b0}},
-              slot_vaddr[mem_req_slot][21:12], {PTE_SHIFT{1'b0}}});
 
     wire [PTW_SIZE-1:0] slot_awaiting_rsp;
     for (genvar s = 0; s < PTW_SIZE; s++) begin : g_rsp_ready

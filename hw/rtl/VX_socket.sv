@@ -234,6 +234,9 @@ module VX_socket import VX_gpu_pkg::*; #(
 
         `ifdef PERF_ENABLE
             .sysmem_perf    (sysmem_perf_tmp),
+        `ifdef VM_ENABLE
+            .ptw_latency_in (socket_ptw_latency),
+        `endif
         `endif
 
             .dcr_bus_if     (core_dcr_bus_if),
@@ -383,13 +386,15 @@ module VX_socket import VX_gpu_pkg::*; #(
         .fill_flags (ptw_fill_flags),
         .ptw_mem_if (per_core_dtlb_ptw_mem_if[0])
     `ifdef PERF_ENABLE
-        /* verilator lint_off PINCONNECTEMPTY */
-        ,.perf_ptw_latency ()
-        /* verilator lint_on PINCONNECTEMPTY */
+        ,.perf_ptw_latency (socket_ptw_latency)
     `else
         ,`UNUSED_PIN (perf_ptw_latency_placeholder)
     `endif
     );
+
+`ifdef PERF_ENABLE
+    wire [PERF_CTR_BITS-1:0] socket_ptw_latency;
+`endif
 
 `endif // VM_ENABLE
 

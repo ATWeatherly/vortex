@@ -216,11 +216,15 @@ module VX_core_top import VX_gpu_pkg::*; #(
         .fill_flags (ptw_fill_flags_w),
         .ptw_mem_if (ptw_mem_bus)
     `ifdef PERF_ENABLE
-        ,.perf_ptw_latency ()
+        ,.perf_ptw_latency (core_top_ptw_latency)
     `else
         ,`UNUSED_PIN (perf_ptw_latency_placeholder)
     `endif
     );
+
+`ifdef PERF_ENABLE
+    wire [PERF_CTR_BITS-1:0] core_top_ptw_latency;
+`endif
 `endif // VM_ENABLE
 
     VX_core #(
@@ -233,6 +237,9 @@ module VX_core_top import VX_gpu_pkg::*; #(
 
     `ifdef PERF_ENABLE
         .sysmem_perf    (sysmem_perf),
+    `ifdef VM_ENABLE
+        .ptw_latency_in (core_top_ptw_latency),
+    `endif
     `endif
 
         .dcr_bus_if     (dcr_bus_if),

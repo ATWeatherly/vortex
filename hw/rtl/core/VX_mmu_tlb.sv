@@ -468,6 +468,7 @@ module VX_mmu_tlb import VX_gpu_pkg::*; #(
     reg [PERF_CTR_BITS-1:0] perf_tlb_hits;
     reg [PERF_CTR_BITS-1:0] perf_tlb_misses;
     reg [PERF_CTR_BITS-1:0] perf_tlb_evictions;
+    reg [PERF_CTR_BITS-1:0] perf_ptw_walks;
     wire victim_was_valid = tlb_entries[victim_index].valid;
 
     always @(posedge clk) begin
@@ -476,6 +477,7 @@ module VX_mmu_tlb import VX_gpu_pkg::*; #(
             perf_tlb_hits      <= '0;
             perf_tlb_misses    <= '0;
             perf_tlb_evictions <= '0;
+            perf_ptw_walks     <= '0;
         end else begin
             if (state == TLB_READY && input_handshake)
                 perf_tlb_reads <= perf_tlb_reads + PERF_CTR_BITS'(1);
@@ -483,6 +485,8 @@ module VX_mmu_tlb import VX_gpu_pkg::*; #(
                 perf_tlb_hits <= perf_tlb_hits + PERF_CTR_BITS'(1);
             if (miss_valid && miss_ready)
                 perf_tlb_misses <= perf_tlb_misses + PERF_CTR_BITS'(1);
+            if (fill_valid && fill_ready)
+                perf_ptw_walks <= perf_ptw_walks + PERF_CTR_BITS'(1);
             if (fill_valid && fill_ready && victim_was_valid)
                 perf_tlb_evictions <= perf_tlb_evictions + PERF_CTR_BITS'(1);
         end
@@ -492,7 +496,7 @@ module VX_mmu_tlb import VX_gpu_pkg::*; #(
     assign mmu_perf.tlb_hits      = perf_tlb_hits;
     assign mmu_perf.tlb_misses    = perf_tlb_misses;
     assign mmu_perf.tlb_evictions = perf_tlb_evictions;
-    assign mmu_perf.ptw_walks     = perf_tlb_misses;
+    assign mmu_perf.ptw_walks     = perf_ptw_walks;
     assign mmu_perf.ptw_latency   = '0;
 `else
     assign mmu_perf_placeholder = 1'b0;
