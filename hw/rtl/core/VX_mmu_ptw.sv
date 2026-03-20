@@ -36,7 +36,9 @@ module VX_mmu_ptw import VX_gpu_pkg::*; #(
     VX_mem_bus_if.master ptw_mem_if,
 
 `ifdef PERF_ENABLE
-    output wire [PERF_CTR_BITS-1:0] perf_ptw_latency
+    output wire [PERF_CTR_BITS-1:0] perf_ptw_latency,
+    output wire [PERF_CTR_BITS-1:0] perf_pwc_hits,
+    output wire [PERF_CTR_BITS-1:0] perf_pwc_misses
 `else
     output wire perf_ptw_latency_placeholder
 `endif
@@ -347,14 +349,25 @@ module VX_mmu_ptw import VX_gpu_pkg::*; #(
     end
 
     reg [PERF_CTR_BITS-1:0] perf_ptw_latency_r;
+    reg [PERF_CTR_BITS-1:0] perf_pwc_hits_r;
+    reg [PERF_CTR_BITS-1:0] perf_pwc_misses_r;
     always_ff @(posedge clk) begin
         if (reset) begin
             perf_ptw_latency_r <= '0;
-        end else if (|slot_active) begin
-            perf_ptw_latency_r <= perf_ptw_latency_r + PERF_CTR_BITS'(1);
+            perf_pwc_hits_r    <= '0;
+            perf_pwc_misses_r  <= '0;
+        end else begin
+            if (|slot_active)
+                perf_ptw_latency_r <= perf_ptw_latency_r + PERF_CTR_BITS'(1);
+            if (miss_grant && pwc_hit)
+                perf_pwc_hits_r <= perf_pwc_hits_r + PERF_CTR_BITS'(1);
+            if (miss_grant && !pwc_hit)
+                perf_pwc_misses_r <= perf_pwc_misses_r + PERF_CTR_BITS'(1);
         end
     end
     assign perf_ptw_latency = perf_ptw_latency_r;
+    assign perf_pwc_hits    = perf_pwc_hits_r;
+    assign perf_pwc_misses  = perf_pwc_misses_r;
 `else
     assign perf_ptw_latency_placeholder = 1'b0;
 `endif

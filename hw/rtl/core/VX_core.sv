@@ -31,6 +31,8 @@ module VX_core import VX_gpu_pkg::*; #(
     input sysmem_perf_t     sysmem_perf,
 `ifdef VM_ENABLE
     input wire [PERF_CTR_BITS-1:0] ptw_latency_in,
+    input wire [PERF_CTR_BITS-1:0] pwc_hits_in,
+    input wire [PERF_CTR_BITS-1:0] pwc_misses_in,
 `endif
 `endif
 
@@ -149,10 +151,12 @@ module VX_core import VX_gpu_pkg::*; #(
     end
 `ifdef VM_ENABLE
     mmu_perf_t mmu_perf;
-    mmu_perf_t mmu_perf_csr;  // mmu_perf with ptw_latency_in merged in
+    mmu_perf_t mmu_perf_csr;  // mmu_perf with socket PTW counters merged in
     always_comb begin
         mmu_perf_csr             = mmu_perf;
         mmu_perf_csr.ptw_latency = ptw_latency_in;
+        mmu_perf_csr.pwc_hits    = pwc_hits_in;
+        mmu_perf_csr.pwc_misses  = pwc_misses_in;
     end
     /* verilator lint_off UNUSEDSIGNAL */
     mmu_perf_t icache_mmu_perf;  // iTLB perf counters (for future use)

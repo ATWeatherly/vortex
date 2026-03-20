@@ -289,6 +289,8 @@ import VX_fpu_pkg::*;
                         `CSR_READ_64(`VX_CSR_MPM_TLB_EVICTS, read_data_ro_w, mmu_perf.tlb_evictions);
                         `CSR_READ_64(`VX_CSR_MPM_PTW_WALKS, read_data_ro_w, mmu_perf.ptw_walks);
                         `CSR_READ_64(`VX_CSR_MPM_PTW_LATENCY, read_data_ro_w, mmu_perf.ptw_latency);
+                        `CSR_READ_64(`VX_CSR_MPM_PWC_HITS, read_data_ro_w, mmu_perf.pwc_hits);
+                        `CSR_READ_64(`VX_CSR_MPM_PWC_MISSES, read_data_ro_w, mmu_perf.pwc_misses);
                     `endif
                         default:;
                         endcase

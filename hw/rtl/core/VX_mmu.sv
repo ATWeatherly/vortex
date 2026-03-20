@@ -363,6 +363,8 @@ module VX_mmu import VX_gpu_pkg::*; #(
     assign mmu_perf.tlb_evictions = mmu_perf_tlb.tlb_evictions;
     assign mmu_perf.ptw_walks     = mmu_perf_tlb.ptw_walks;
     assign mmu_perf.ptw_latency   = '0; // overridden in VX_core with ptw_latency_in from socket PTW
+    assign mmu_perf.pwc_hits      = '0; // overridden in VX_core with pwc_hits_in from socket PTW
+    assign mmu_perf.pwc_misses    = '0; // overridden in VX_core with pwc_misses_in from socket PTW
 `else
     assign mmu_perf_placeholder = 1'b0;
 `endif

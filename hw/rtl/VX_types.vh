@@ -197,6 +197,10 @@
 `define VX_CSR_MPM_PTW_WALKS_H          12'hBA4
 `define VX_CSR_MPM_PTW_LATENCY          12'hB25     // PTW total latency cycles
 `define VX_CSR_MPM_PTW_LATENCY_H        12'hBA5
+`define VX_CSR_MPM_PWC_HITS             12'hB26     // Page walk cache hits
+`define VX_CSR_MPM_PWC_HITS_H           12'hBA6
+`define VX_CSR_MPM_PWC_MISSES           12'hB27     // Page walk cache misses
+`define VX_CSR_MPM_PWC_MISSES_H         12'hBA7
 
 // <Add your own counters: use addresses hB03..B1F, hB83..hB9F>
 

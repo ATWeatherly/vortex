@@ -759,6 +759,8 @@ package VX_gpu_pkg;
         logic [PERF_CTR_BITS-1:0] tlb_evictions;  // TLB evictions on fill
         logic [PERF_CTR_BITS-1:0] ptw_walks;      // PTW walks completed
         logic [PERF_CTR_BITS-1:0] ptw_latency;    // Total cycles spent in PTW
+        logic [PERF_CTR_BITS-1:0] pwc_hits;       // Page walk cache hits
+        logic [PERF_CTR_BITS-1:0] pwc_misses;     // Page walk cache misses (full 2-level walk)
     } mmu_perf_t;
 `endif
 

@@ -236,6 +236,8 @@ module VX_socket import VX_gpu_pkg::*; #(
             .sysmem_perf    (sysmem_perf_tmp),
         `ifdef VM_ENABLE
             .ptw_latency_in (socket_ptw_latency),
+            .pwc_hits_in    (socket_pwc_hits),
+            .pwc_misses_in  (socket_pwc_misses),
         `endif
         `endif
 
@@ -387,6 +389,8 @@ module VX_socket import VX_gpu_pkg::*; #(
         .ptw_mem_if (per_core_dtlb_ptw_mem_if[0])
     `ifdef PERF_ENABLE
         ,.perf_ptw_latency (socket_ptw_latency)
+        ,.perf_pwc_hits    (socket_pwc_hits)
+        ,.perf_pwc_misses  (socket_pwc_misses)
     `else
         ,`UNUSED_PIN (perf_ptw_latency_placeholder)
     `endif
@@ -394,6 +398,8 @@ module VX_socket import VX_gpu_pkg::*; #(
 
 `ifdef PERF_ENABLE
     wire [PERF_CTR_BITS-1:0] socket_ptw_latency;
+    wire [PERF_CTR_BITS-1:0] socket_pwc_hits;
+    wire [PERF_CTR_BITS-1:0] socket_pwc_misses;
 `endif
 
 `endif // VM_ENABLE
