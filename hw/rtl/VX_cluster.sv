@@ -34,7 +34,31 @@ module VX_cluster import VX_gpu_pkg::*; #(
     VX_mem_bus_if.master        mem_bus_if [`L2_MEM_PORTS],
 
     // Status
-    output wire                 busy
+    output wire                 busy,
+
+`ifdef VM_ENABLE
+    // PTW miss requests from all sockets — routed up to device-level shared PTW
+    output wire [NUM_SOCKETS*`SOCKET_SIZE*2-1:0] ptw_miss_valid,
+    output wire [31:0]                            ptw_miss_vaddr [NUM_SOCKETS*`SOCKET_SIZE*2],
+    input  wire [NUM_SOCKETS*`SOCKET_SIZE*2-1:0] ptw_miss_ready,
+    // PTW fill responses coming back down from device-level shared PTW
+    input  wire [NUM_SOCKETS*`SOCKET_SIZE*2-1:0] ptw_fill_valid,
+    output wire [NUM_SOCKETS*`SOCKET_SIZE*2-1:0] ptw_fill_ready,
+    input  wire [31:0]                            ptw_fill_vaddr [NUM_SOCKETS*`SOCKET_SIZE*2],
+    input  wire [31:0]                            ptw_fill_paddr [NUM_SOCKETS*`SOCKET_SIZE*2],
+    input  wire [7:0]                             ptw_fill_flags [NUM_SOCKETS*`SOCKET_SIZE*2],
+    // PTW memory port: threaded from socket 0 up to device-level PTW
+    VX_mem_bus_if.slave                           ptw_mem_if
+`endif
+
+`ifdef PERF_ENABLE
+`ifdef VM_ENABLE
+    // PTW perf counters from device-level PTW, passed down to all sockets/cores
+    , input wire [PERF_CTR_BITS-1:0]  ptw_latency_in
+    , input wire [PERF_CTR_BITS-1:0]  pwc_hits_in
+    , input wire [PERF_CTR_BITS-1:0]  pwc_misses_in
+`endif
+`endif
 );
 
 `ifdef SCOPE
@@ -119,6 +143,37 @@ module VX_cluster import VX_gpu_pkg::*; #(
 
     wire [NUM_SOCKETS-1:0] per_socket_busy;
 
+`ifdef VM_ENABLE
+    localparam SOCKET_PTW_REQS = `SOCKET_SIZE * 2;
+
+    wire [SOCKET_PTW_REQS-1:0]  per_socket_ptw_miss_valid [NUM_SOCKETS];
+    wire [SOCKET_PTW_REQS-1:0]  per_socket_ptw_miss_ready [NUM_SOCKETS];
+    wire [31:0]                      per_socket_ptw_miss_vaddr [NUM_SOCKETS][SOCKET_PTW_REQS];
+    wire [SOCKET_PTW_REQS-1:0]  per_socket_ptw_fill_valid [NUM_SOCKETS];
+    wire [SOCKET_PTW_REQS-1:0]  per_socket_ptw_fill_ready [NUM_SOCKETS];
+    wire [31:0]                      per_socket_ptw_fill_vaddr [NUM_SOCKETS][SOCKET_PTW_REQS];
+    wire [31:0]                      per_socket_ptw_fill_paddr [NUM_SOCKETS][SOCKET_PTW_REQS];
+    wire [7:0]                       per_socket_ptw_fill_flags [NUM_SOCKETS][SOCKET_PTW_REQS];
+
+    // PTW memory interface per socket:
+    //   socket 0 is connected to the cluster ptw_mem_if pass-through port.
+    //   sockets 1..N-1 are tied off (they never drive PTW mem traffic).
+    localparam PTW_MEM_TAG_WIDTH_CL = DCACHE_TAG_WIDTH_BASE + DCACHE_TLB_SOURCE_BITS;
+
+    VX_mem_bus_if #(
+        .DATA_SIZE (DCACHE_WORD_SIZE),
+        .TAG_WIDTH (PTW_MEM_TAG_WIDTH_CL)
+    ) per_socket_ptw_mem_if[NUM_SOCKETS]();
+
+    `ASSIGN_VX_MEM_BUS_IF (per_socket_ptw_mem_if[0], ptw_mem_if);
+
+    for (genvar s = 1; s < NUM_SOCKETS; s++) begin : g_ptw_mem_tie
+        assign per_socket_ptw_mem_if[s].req_valid = 1'b0;
+        assign per_socket_ptw_mem_if[s].req_data  = '0;
+        assign per_socket_ptw_mem_if[s].rsp_ready = 1'b1;
+    end
+`endif // VM_ENABLE
+
     // Generate all sockets
     for (genvar socket_id = 0; socket_id < NUM_SOCKETS; ++socket_id) begin : g_sockets
 
@@ -149,10 +204,47 @@ module VX_cluster import VX_gpu_pkg::*; #(
             .gbar_bus_if    (per_socket_gbar_bus_if[socket_id]),
         `endif
 
+        `ifdef VM_ENABLE
+            .ptw_miss_valid (per_socket_ptw_miss_valid[socket_id]),
+            .ptw_miss_vaddr (per_socket_ptw_miss_vaddr[socket_id]),
+            .ptw_miss_ready (per_socket_ptw_miss_ready[socket_id]),
+            .ptw_fill_valid (per_socket_ptw_fill_valid[socket_id]),
+            .ptw_fill_ready (per_socket_ptw_fill_ready[socket_id]),
+            .ptw_fill_vaddr (per_socket_ptw_fill_vaddr[socket_id]),
+            .ptw_fill_paddr (per_socket_ptw_fill_paddr[socket_id]),
+            .ptw_fill_flags (per_socket_ptw_fill_flags[socket_id]),
+            .ptw_mem_if     (per_socket_ptw_mem_if[socket_id]),
+        `endif
+
+        `ifdef PERF_ENABLE
+        `ifdef VM_ENABLE
+            .ptw_latency_in (ptw_latency_in),
+            .pwc_hits_in    (pwc_hits_in),
+            .pwc_misses_in  (pwc_misses_in),
+        `endif
+        `endif
+
             .busy           (per_socket_busy[socket_id])
         );
     end
 
     `BUFFER_EX(busy, (| per_socket_busy), 1'b1, 1, (NUM_SOCKETS > 1));
+
+`ifdef VM_ENABLE
+    // Flatten per-socket miss/fill into cluster-level port arrays.
+    // Layout: socket s occupies indices [s*SOCKET_SIZE*2 .. (s+1)*SOCKET_SIZE*2-1]
+    for (genvar s = 0; s < NUM_SOCKETS; s++) begin : g_cluster_ptw_wire
+        for (genvar r = 0; r < SOCKET_PTW_REQS; r++) begin : g_req
+            assign ptw_miss_valid[s * SOCKET_PTW_REQS + r]                          = per_socket_ptw_miss_valid[s][r];
+            assign per_socket_ptw_miss_ready[s][r]                                   = ptw_miss_ready[s * SOCKET_PTW_REQS + r];
+            assign ptw_miss_vaddr[s * SOCKET_PTW_REQS + r]                           = per_socket_ptw_miss_vaddr[s][r];
+            assign per_socket_ptw_fill_valid[s][r]                                   = ptw_fill_valid[s * SOCKET_PTW_REQS + r];
+            assign ptw_fill_ready[s * SOCKET_PTW_REQS + r]                           = per_socket_ptw_fill_ready[s][r];
+            assign per_socket_ptw_fill_vaddr[s][r]                                   = ptw_fill_vaddr[s * SOCKET_PTW_REQS + r];
+            assign per_socket_ptw_fill_paddr[s][r]                                   = ptw_fill_paddr[s * SOCKET_PTW_REQS + r];
+            assign per_socket_ptw_fill_flags[s][r]                                   = ptw_fill_flags[s * SOCKET_PTW_REQS + r];
+        end
+    end
+`endif // VM_ENABLE
 
 endmodule

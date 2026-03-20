@@ -37,6 +37,31 @@ module VX_socket import VX_gpu_pkg::*; #(
     // Barrier
     VX_gbar_bus_if.master   gbar_bus_if,
 `endif
+
+`ifdef VM_ENABLE
+    // PTW miss requests from all TLBs — routed up to device-level shared PTW
+    output wire [`SOCKET_SIZE*2-1:0] ptw_miss_valid,
+    output wire [31:0]               ptw_miss_vaddr [`SOCKET_SIZE*2],
+    input  wire [`SOCKET_SIZE*2-1:0] ptw_miss_ready,
+    // PTW fill responses coming back down from device-level shared PTW
+    input  wire [`SOCKET_SIZE*2-1:0] ptw_fill_valid,
+    output wire [`SOCKET_SIZE*2-1:0] ptw_fill_ready,
+    input  wire [31:0]               ptw_fill_vaddr [`SOCKET_SIZE*2],
+    input  wire [31:0]               ptw_fill_paddr [`SOCKET_SIZE*2],
+    input  wire [7:0]                ptw_fill_flags [`SOCKET_SIZE*2],
+    // PTW memory port: device-level PTW drives reads through core 0's dcache path
+    VX_mem_bus_if.slave              ptw_mem_if,
+`endif
+
+`ifdef PERF_ENABLE
+`ifdef VM_ENABLE
+    // PTW perf counters from device-level PTW, passed down to all cores
+    input wire [PERF_CTR_BITS-1:0]  ptw_latency_in,
+    input wire [PERF_CTR_BITS-1:0]  pwc_hits_in,
+    input wire [PERF_CTR_BITS-1:0]  pwc_misses_in,
+`endif
+`endif
+
     // Status
     output wire             busy
 );
@@ -235,9 +260,9 @@ module VX_socket import VX_gpu_pkg::*; #(
         `ifdef PERF_ENABLE
             .sysmem_perf    (sysmem_perf_tmp),
         `ifdef VM_ENABLE
-            .ptw_latency_in (socket_ptw_latency),
-            .pwc_hits_in    (socket_pwc_hits),
-            .pwc_misses_in  (socket_pwc_misses),
+            .ptw_latency_in (ptw_latency_in),
+            .pwc_hits_in    (pwc_hits_in),
+            .pwc_misses_in  (pwc_misses_in),
         `endif
         `endif
 
@@ -280,16 +305,10 @@ module VX_socket import VX_gpu_pkg::*; #(
 `ifdef VM_ENABLE
 
     ///////////////////////////////////////////////////////////////////////////
-    // Shared page table walker (HPCA14 Design 3, Phase 2)
-    // One PTW shared across all SOCKET_SIZE cores, serving both dTLB and iTLB.
-    // Memory port is routed through core 0's dTLB VX_mmu merge-arbiter slot,
-    // which preserves DCACHE_ARB_BITS tag format without changing cache params.
-    ///////////////////////////////////////////////////////////////////////////
-
-    // Per-core PTW miss/fill signals — collected and routed to shared PTW.
+    // Per-core PTW miss/fill signals — pass-through to device-level shared PTW.
     // Layout: [0..SOCKET_SIZE-1] = dTLB (one per core)
     //         [SOCKET_SIZE..2*SOCKET_SIZE-1] = iTLB (one per core)
-    localparam NUM_PTW_REQS = `SOCKET_SIZE * 2;
+    ///////////////////////////////////////////////////////////////////////////
 
     // One bit/value per core, for dTLB
     wire [`SOCKET_SIZE-1:0] per_core_dtlb_ptw_req_valid;
@@ -311,17 +330,8 @@ module VX_socket import VX_gpu_pkg::*; #(
     wire [31:0]              per_core_itlb_ptw_rsp_paddr [`SOCKET_SIZE];
     wire [7:0]               per_core_itlb_ptw_rsp_flags [`SOCKET_SIZE];
 
-    // Flatten per-core miss/fill into PTW arrays.
+    // Connect per-core dTLB/iTLB miss/fill wires to socket-level PTW ports.
     // PTW requestor index: dTLB of core i → i, iTLB of core i → SOCKET_SIZE+i
-    wire [NUM_PTW_REQS-1:0] ptw_miss_valid;
-    wire [NUM_PTW_REQS-1:0] ptw_miss_ready;
-    wire [31:0]              ptw_miss_vaddr [NUM_PTW_REQS];
-    wire [NUM_PTW_REQS-1:0] ptw_fill_valid;
-    wire [NUM_PTW_REQS-1:0] ptw_fill_ready;
-    wire [31:0]              ptw_fill_vaddr [NUM_PTW_REQS];
-    wire [31:0]              ptw_fill_paddr [NUM_PTW_REQS];
-    wire [7:0]               ptw_fill_flags [NUM_PTW_REQS];
-
     for (genvar i = 0; i < `SOCKET_SIZE; i++) begin : g_ptw_wire
         // dTLB slot i
         assign ptw_miss_valid[i]                   = per_core_dtlb_ptw_req_valid[i];
@@ -343,8 +353,9 @@ module VX_socket import VX_gpu_pkg::*; #(
         assign per_core_itlb_ptw_rsp_flags[i]                 = ptw_fill_flags[`SOCKET_SIZE + i];
     end
 
-    // PTW memory interface: word-level reads to dcache, via core 0's dTLB VX_mmu.
-    // TAG_WIDTH = TAG_WIDTH_TLB inside VX_mmu = DCACHE_TAG_WIDTH minus DCACHE_ARB_BITS.
+    // PTW memory interface: device-level PTW drives reads through core 0's dcache.
+    // Core 0's dtlb_ptw_mem_if slave is connected to the socket ptw_mem_if port.
+    // Cores 1..N-1 have their dTLB ptw_mem slot tied off (not used by PTW).
     localparam PTW_MEM_TAG_WIDTH = DCACHE_TAG_WIDTH_BASE + DCACHE_TLB_SOURCE_BITS;
 
     VX_mem_bus_if #(
@@ -352,55 +363,13 @@ module VX_socket import VX_gpu_pkg::*; #(
         .TAG_WIDTH (PTW_MEM_TAG_WIDTH)
     ) per_core_dtlb_ptw_mem_if[`SOCKET_SIZE]();
 
-    // Cores 1..N-1: tie off their dTLB ptw_mem slot (no PTW memory through them).
+    `ASSIGN_VX_MEM_BUS_IF (per_core_dtlb_ptw_mem_if[0], ptw_mem_if);
+
     for (genvar i = 1; i < `SOCKET_SIZE; i++) begin : g_ptw_mem_tie
         assign per_core_dtlb_ptw_mem_if[i].req_valid = 1'b0;
         assign per_core_dtlb_ptw_mem_if[i].req_data  = '0;
         assign per_core_dtlb_ptw_mem_if[i].rsp_ready = 1'b1;
     end
-
-    // SATP register: host writes SATP via DCR bus before kernel launch.
-    reg [31:0] socket_satp;
-    always @(posedge clk) begin
-        if (dcr_bus_if.write_valid && dcr_bus_if.write_addr == `VX_DCR_BASE_SATP0)
-            socket_satp <= dcr_bus_if.write_data;
-    end
-
-    `RESET_RELAY (ptw_reset, reset);
-
-    VX_mmu_ptw #(
-        .DATA_SIZE      (DCACHE_WORD_SIZE),
-        .TAG_WIDTH      (PTW_MEM_TAG_WIDTH),
-        .ADDR_WIDTH     (DCACHE_ADDR_WIDTH),
-        .PTW_SIZE       (8),
-        .NUM_REQUESTORS (NUM_PTW_REQS)
-    ) shared_ptw (
-        .clk        (clk),
-        .reset      (ptw_reset),
-        .satp       (socket_satp),
-        .miss_valid (ptw_miss_valid),
-        .miss_ready (ptw_miss_ready),
-        .miss_vaddr (ptw_miss_vaddr),
-        .fill_valid (ptw_fill_valid),
-        .fill_ready (ptw_fill_ready),
-        .fill_vaddr (ptw_fill_vaddr),
-        .fill_paddr (ptw_fill_paddr),
-        .fill_flags (ptw_fill_flags),
-        .ptw_mem_if (per_core_dtlb_ptw_mem_if[0])
-    `ifdef PERF_ENABLE
-        ,.perf_ptw_latency (socket_ptw_latency)
-        ,.perf_pwc_hits    (socket_pwc_hits)
-        ,.perf_pwc_misses  (socket_pwc_misses)
-    `else
-        ,`UNUSED_PIN (perf_ptw_latency_placeholder)
-    `endif
-    );
-
-`ifdef PERF_ENABLE
-    wire [PERF_CTR_BITS-1:0] socket_ptw_latency;
-    wire [PERF_CTR_BITS-1:0] socket_pwc_hits;
-    wire [PERF_CTR_BITS-1:0] socket_pwc_misses;
-`endif
 
 `endif // VM_ENABLE
 

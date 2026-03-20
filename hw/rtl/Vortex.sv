@@ -127,6 +127,116 @@ module Vortex import VX_gpu_pkg::*; (
     assign dcr_bus_if.write_addr  = dcr_wr_addr;
     assign dcr_bus_if.write_data  = dcr_wr_data;
 
+`ifdef VM_ENABLE
+    ///////////////////////////////////////////////////////////////////////////
+    // Device-level shared PTW (HPCA14 Design 3, Phase 3)
+    // One PTW for the entire device, shared across all clusters/sockets/cores.
+    // Memory accesses route through cluster 0 → socket 0 → core 0's dcache path.
+    ///////////////////////////////////////////////////////////////////////////
+
+    localparam TOTAL_PTW_REQS = `NUM_CLUSTERS * NUM_SOCKETS * `SOCKET_SIZE * 2;
+    localparam PTW_MEM_TAG_WIDTH_TOP = DCACHE_TAG_WIDTH_BASE + DCACHE_TLB_SOURCE_BITS;
+
+    // Per-cluster PTW miss/fill wires
+    wire [NUM_SOCKETS*`SOCKET_SIZE*2-1:0] per_cluster_ptw_miss_valid [`NUM_CLUSTERS];
+    wire [NUM_SOCKETS*`SOCKET_SIZE*2-1:0] per_cluster_ptw_miss_ready [`NUM_CLUSTERS];
+    wire [31:0] per_cluster_ptw_miss_vaddr [`NUM_CLUSTERS][NUM_SOCKETS*`SOCKET_SIZE*2];
+    wire [NUM_SOCKETS*`SOCKET_SIZE*2-1:0] per_cluster_ptw_fill_valid [`NUM_CLUSTERS];
+    wire [NUM_SOCKETS*`SOCKET_SIZE*2-1:0] per_cluster_ptw_fill_ready [`NUM_CLUSTERS];
+    wire [31:0] per_cluster_ptw_fill_vaddr [`NUM_CLUSTERS][NUM_SOCKETS*`SOCKET_SIZE*2];
+    wire [31:0] per_cluster_ptw_fill_paddr [`NUM_CLUSTERS][NUM_SOCKETS*`SOCKET_SIZE*2];
+    wire [7:0]  per_cluster_ptw_fill_flags [`NUM_CLUSTERS][NUM_SOCKETS*`SOCKET_SIZE*2];
+
+    // Flatten per-cluster miss/fill into global PTW arrays
+    wire [TOTAL_PTW_REQS-1:0] ptw_miss_valid_all;
+    wire [TOTAL_PTW_REQS-1:0] ptw_miss_ready_all;
+    wire [31:0] ptw_miss_vaddr_all [TOTAL_PTW_REQS];
+    wire [TOTAL_PTW_REQS-1:0] ptw_fill_valid_all;
+    wire [TOTAL_PTW_REQS-1:0] ptw_fill_ready_all;
+    wire [31:0] ptw_fill_vaddr_all [TOTAL_PTW_REQS];
+    wire [31:0] ptw_fill_paddr_all [TOTAL_PTW_REQS];
+    wire [7:0]  ptw_fill_flags_all [TOTAL_PTW_REQS];
+
+    localparam CLUSTER_PTW_REQS = NUM_SOCKETS * `SOCKET_SIZE * 2;
+
+    for (genvar c = 0; c < `NUM_CLUSTERS; c++) begin : g_ptw_flatten
+        for (genvar r = 0; r < CLUSTER_PTW_REQS; r++) begin : g_req
+            assign ptw_miss_valid_all[c * CLUSTER_PTW_REQS + r]          = per_cluster_ptw_miss_valid[c][r];
+            assign per_cluster_ptw_miss_ready[c][r]                       = ptw_miss_ready_all[c * CLUSTER_PTW_REQS + r];
+            assign ptw_miss_vaddr_all[c * CLUSTER_PTW_REQS + r]           = per_cluster_ptw_miss_vaddr[c][r];
+            assign per_cluster_ptw_fill_valid[c][r]                       = ptw_fill_valid_all[c * CLUSTER_PTW_REQS + r];
+            assign ptw_fill_ready_all[c * CLUSTER_PTW_REQS + r]           = per_cluster_ptw_fill_ready[c][r];
+            assign per_cluster_ptw_fill_vaddr[c][r]                       = ptw_fill_vaddr_all[c * CLUSTER_PTW_REQS + r];
+            assign per_cluster_ptw_fill_paddr[c][r]                       = ptw_fill_paddr_all[c * CLUSTER_PTW_REQS + r];
+            assign per_cluster_ptw_fill_flags[c][r]                       = ptw_fill_flags_all[c * CLUSTER_PTW_REQS + r];
+        end
+    end
+
+    // PTW memory interface: cluster 0 / socket 0 / core 0's dcache path.
+    // Only cluster 0 carries PTW memory traffic; clusters 1..N-1 are tied off.
+    VX_mem_bus_if #(
+        .DATA_SIZE (DCACHE_WORD_SIZE),
+        .TAG_WIDTH (PTW_MEM_TAG_WIDTH_TOP)
+    ) per_cluster_ptw_mem_if [`NUM_CLUSTERS] ();
+
+    `ASSIGN_VX_MEM_BUS_IF (per_cluster_ptw_mem_if[0], ptw_mem_bus);
+
+    for (genvar c = 1; c < `NUM_CLUSTERS; c++) begin : g_ptw_mem_tie
+        assign per_cluster_ptw_mem_if[c].req_valid = 1'b0;
+        assign per_cluster_ptw_mem_if[c].req_data  = '0;
+        assign per_cluster_ptw_mem_if[c].rsp_ready = 1'b1;
+    end
+
+    VX_mem_bus_if #(
+        .DATA_SIZE (DCACHE_WORD_SIZE),
+        .TAG_WIDTH (PTW_MEM_TAG_WIDTH_TOP)
+    ) ptw_mem_bus ();
+
+    // SATP register: host writes via DCR bus before kernel launch
+    reg [31:0] device_satp;
+    always @(posedge clk) begin
+        if (dcr_bus_if.write_valid && dcr_bus_if.write_addr == `VX_DCR_BASE_SATP0)
+            device_satp <= dcr_bus_if.write_data;
+    end
+
+    `RESET_RELAY (ptw_reset, reset);
+
+`ifdef PERF_ENABLE
+    wire [PERF_CTR_BITS-1:0] device_ptw_latency;
+    wire [PERF_CTR_BITS-1:0] device_pwc_hits;
+    wire [PERF_CTR_BITS-1:0] device_pwc_misses;
+`endif
+
+    VX_mmu_ptw #(
+        .DATA_SIZE      (DCACHE_WORD_SIZE),
+        .TAG_WIDTH      (PTW_MEM_TAG_WIDTH_TOP),
+        .ADDR_WIDTH     (DCACHE_ADDR_WIDTH),
+        .PTW_SIZE       (8),
+        .NUM_REQUESTORS (TOTAL_PTW_REQS)
+    ) shared_ptw (
+        .clk        (clk),
+        .reset      (ptw_reset),
+        .satp       (device_satp),
+        .miss_valid (ptw_miss_valid_all),
+        .miss_ready (ptw_miss_ready_all),
+        .miss_vaddr (ptw_miss_vaddr_all),
+        .fill_valid (ptw_fill_valid_all),
+        .fill_ready (ptw_fill_ready_all),
+        .fill_vaddr (ptw_fill_vaddr_all),
+        .fill_paddr (ptw_fill_paddr_all),
+        .fill_flags (ptw_fill_flags_all),
+        .ptw_mem_if (ptw_mem_bus)
+    `ifdef PERF_ENABLE
+        ,.perf_ptw_latency (device_ptw_latency)
+        ,.perf_pwc_hits    (device_pwc_hits)
+        ,.perf_pwc_misses  (device_pwc_misses)
+    `else
+        ,`UNUSED_PIN (perf_ptw_latency_placeholder)
+    `endif
+    );
+
+`endif // VM_ENABLE
+
     wire [`NUM_CLUSTERS-1:0] per_cluster_busy;
 
     // Generate all clusters
@@ -153,6 +263,26 @@ module Vortex import VX_gpu_pkg::*; (
             .dcr_bus_if         (cluster_dcr_bus_if),
 
             .mem_bus_if         (per_cluster_mem_bus_if[cluster_id * `L2_MEM_PORTS +: `L2_MEM_PORTS]),
+
+        `ifdef VM_ENABLE
+            .ptw_miss_valid     (per_cluster_ptw_miss_valid[cluster_id]),
+            .ptw_miss_vaddr     (per_cluster_ptw_miss_vaddr[cluster_id]),
+            .ptw_miss_ready     (per_cluster_ptw_miss_ready[cluster_id]),
+            .ptw_fill_valid     (per_cluster_ptw_fill_valid[cluster_id]),
+            .ptw_fill_ready     (per_cluster_ptw_fill_ready[cluster_id]),
+            .ptw_fill_vaddr     (per_cluster_ptw_fill_vaddr[cluster_id]),
+            .ptw_fill_paddr     (per_cluster_ptw_fill_paddr[cluster_id]),
+            .ptw_fill_flags     (per_cluster_ptw_fill_flags[cluster_id]),
+            .ptw_mem_if         (per_cluster_ptw_mem_if[cluster_id]),
+        `endif
+
+        `ifdef PERF_ENABLE
+        `ifdef VM_ENABLE
+            .ptw_latency_in     (device_ptw_latency),
+            .pwc_hits_in        (device_pwc_hits),
+            .pwc_misses_in      (device_pwc_misses),
+        `endif
+        `endif
 
             .busy               (per_cluster_busy[cluster_id])
         );
