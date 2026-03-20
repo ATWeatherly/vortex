@@ -356,7 +356,7 @@ module VX_socket import VX_gpu_pkg::*; #(
     // PTW memory interface: device-level PTW drives reads through core 0's dcache.
     // Core 0's dtlb_ptw_mem_if slave is connected to the socket ptw_mem_if port.
     // Cores 1..N-1 have their dTLB ptw_mem slot tied off (not used by PTW).
-    localparam PTW_MEM_TAG_WIDTH = DCACHE_TAG_WIDTH_BASE + DCACHE_TLB_SOURCE_BITS;
+    localparam PTW_MEM_TAG_WIDTH = `MAX(DCACHE_TAG_WIDTH_BASE + DCACHE_TLB_SOURCE_BITS, `CLOG2(`PTW_SIZE));
 
     VX_mem_bus_if #(
         .DATA_SIZE (DCACHE_WORD_SIZE),

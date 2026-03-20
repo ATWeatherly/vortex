@@ -158,7 +158,7 @@ module VX_cluster import VX_gpu_pkg::*; #(
     // PTW memory interface per socket:
     //   socket 0 is connected to the cluster ptw_mem_if pass-through port.
     //   sockets 1..N-1 are tied off (they never drive PTW mem traffic).
-    localparam PTW_MEM_TAG_WIDTH_CL = DCACHE_TAG_WIDTH_BASE + DCACHE_TLB_SOURCE_BITS;
+    localparam PTW_MEM_TAG_WIDTH_CL = `MAX(DCACHE_TAG_WIDTH_BASE + DCACHE_TLB_SOURCE_BITS, `CLOG2(`PTW_SIZE));
 
     VX_mem_bus_if #(
         .DATA_SIZE (DCACHE_WORD_SIZE),

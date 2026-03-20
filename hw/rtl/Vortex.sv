@@ -135,7 +135,7 @@ module Vortex import VX_gpu_pkg::*; (
     ///////////////////////////////////////////////////////////////////////////
 
     localparam TOTAL_PTW_REQS = `NUM_CLUSTERS * NUM_SOCKETS * `SOCKET_SIZE * 2;
-    localparam PTW_MEM_TAG_WIDTH_TOP = DCACHE_TAG_WIDTH_BASE + DCACHE_TLB_SOURCE_BITS;
+    localparam PTW_MEM_TAG_WIDTH_TOP = `MAX(DCACHE_TAG_WIDTH_BASE + DCACHE_TLB_SOURCE_BITS, `CLOG2(`PTW_SIZE));
 
     // Per-cluster PTW miss/fill wires
     wire [NUM_SOCKETS*`SOCKET_SIZE*2-1:0] per_cluster_ptw_miss_valid [`NUM_CLUSTERS];
@@ -211,7 +211,7 @@ module Vortex import VX_gpu_pkg::*; (
         .DATA_SIZE      (DCACHE_WORD_SIZE),
         .TAG_WIDTH      (PTW_MEM_TAG_WIDTH_TOP),
         .ADDR_WIDTH     (DCACHE_ADDR_WIDTH),
-        .PTW_SIZE       (8),
+        .PTW_SIZE       (`PTW_SIZE),
         .NUM_REQUESTORS (TOTAL_PTW_REQS)
     ) shared_ptw (
         .clk        (clk),

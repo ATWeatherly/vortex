@@ -190,7 +190,7 @@ module VX_core_top import VX_gpu_pkg::*; #(
 
     // PTW memory interface: VX_mmu_ptw (master) → VX_core.dtlb_ptw_mem_if (slave)
     // → VX_mmu merge arbiter → VX_core.dcache_bus_if
-    localparam CTR_PTW_MEM_TAG_WIDTH = DCACHE_TAG_WIDTH_BASE + DCACHE_TLB_SOURCE_BITS;
+    localparam CTR_PTW_MEM_TAG_WIDTH = `MAX(DCACHE_TAG_WIDTH_BASE + DCACHE_TLB_SOURCE_BITS, `CLOG2(`PTW_SIZE));
     VX_mem_bus_if #(
         .DATA_SIZE (DCACHE_WORD_SIZE),
         .TAG_WIDTH (CTR_PTW_MEM_TAG_WIDTH)

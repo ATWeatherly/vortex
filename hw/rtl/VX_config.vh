@@ -331,6 +331,14 @@
     `define TLB_SIZE (32)
     `endif
 
+    // PTW_SIZE: number of concurrent walk slots in the shared PTW.
+    // Must be <= 2^(DCACHE_TAG_WIDTH_BASE + DCACHE_TLB_SOURCE_BITS) because
+    // the slot ID is stored in the PTW mem tag field for response routing.
+    // With the default config that field is 4 bits, so PTW_SIZE <= 16.
+    `ifndef PTW_SIZE
+    `define PTW_SIZE 8
+    `endif
+
 `endif
 
 // Pipeline Configuration /////////////////////////////////////////////////////
