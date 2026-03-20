@@ -180,6 +180,43 @@ module VX_mmu_ptw import VX_gpu_pkg::*; #(
     wire [7:0]           rsp_pte_flags = rsp_pte_data[7:0];
 
     // =========================================================================
+    // Page Walk Cache (HPCA14 Design 3)
+    //
+    // Lookup fires combinatorially whenever miss_grant is asserted, using the
+    // selected miss's vpn1 and the current satp.ppn as key.  On a hit the slot
+    // skips L1_REQ/L1_RESP entirely and enters L0_REQ with l1_ppn pre-loaded.
+    // The cache is filled on every L1_RESP (the only memory fetch we want to
+    // eliminate on future walks to the same vpn1).
+    // =========================================================================
+
+    wire                      pwc_hit;
+    wire [PPN_WIDTH-1:0]      pwc_l1_ppn;
+
+    wire [VPN_LEVEL_BITS-1:0] pwc_lookup_vpn1     = miss_vaddr[selected_req][31:22];
+    wire [PPN_WIDTH-1:0]      pwc_lookup_satp_ppn = satp[PPN_WIDTH-1:0];
+
+    wire                      pwc_fill_valid    = mem_rsp_fire && (slot_state[rsp_slot] == PTW_L1_RESP);
+    wire [VPN_LEVEL_BITS-1:0] pwc_fill_vpn1     = slot_vaddr[rsp_slot][31:22];
+    wire [PPN_WIDTH-1:0]      pwc_fill_satp_ppn = satp[PPN_WIDTH-1:0];
+
+    VX_mmu_pwc #(
+        .PPN_WIDTH   (PPN_WIDTH),
+        .VPN_BITS    (VPN_LEVEL_BITS),
+        .NUM_ENTRIES (1 << VPN_LEVEL_BITS)
+    ) pwc (
+        .clk             (clk),
+        .reset           (reset),
+        .lookup_satp_ppn (pwc_lookup_satp_ppn),
+        .lookup_vpn1     (pwc_lookup_vpn1),
+        .hit             (pwc_hit),
+        .l1_ppn          (pwc_l1_ppn),
+        .fill_valid      (pwc_fill_valid),
+        .fill_satp_ppn   (pwc_fill_satp_ppn),
+        .fill_vpn1       (pwc_fill_vpn1),
+        .fill_l1_ppn     (rsp_pte_ppn)
+    );
+
+    // =========================================================================
     // Central state machine
     //
     // Each of the four sections below writes to a disjoint set of slots,
@@ -202,11 +239,16 @@ module VX_mmu_ptw import VX_gpu_pkg::*; #(
             mem_rr_base  <= '0;
         end else begin
 
-            // IDLE → L1_REQ: new miss accepted into free slot
+            // IDLE → L0_REQ (PWC hit) or L1_REQ (PWC miss): new miss accepted
             if (miss_grant) begin
-                slot_state[free_slot] <= PTW_L1_REQ;
                 slot_vaddr[free_slot] <= miss_vaddr[selected_req];
                 slot_src[free_slot]   <= selected_req;
+                if (pwc_hit) begin
+                    slot_state[free_slot]  <= PTW_L0_REQ;
+                    slot_l1_ppn[free_slot] <= pwc_l1_ppn;
+                end else begin
+                    slot_state[free_slot] <= PTW_L1_REQ;
+                end
                 miss_rr_base <= REQ_BITS'((int'(selected_req) + 1) % NUM_REQUESTORS);
             end
 
