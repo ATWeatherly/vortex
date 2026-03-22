@@ -843,9 +843,12 @@ package VX_gpu_pkg;
     localparam DCACHE_TLB_SOURCE_BITS = `UP(`CLOG2(DCACHE_NUM_REQS));
     localparam DCACHE_ARB_BITS        = `CLOG2(`CDIV(2 * DCACHE_NUM_REQS + 1, DCACHE_NUM_REQS));
 
+    // DCACHE_TLB_TAG_WIDTH = tag width at VX_mmu output before ARB bits.
+    // Must fit both the TLB lane-encoding bits and the PTW slot ID (CLOG2(PTW_SIZE)).
+    localparam DCACHE_TLB_TAG_WIDTH = `MAX(DCACHE_TAG_WIDTH_BASE + DCACHE_TLB_SOURCE_BITS, `CLOG2(`PTW_SIZE));
     // DCACHE_TAG_WIDTH = external dcache interface width (expanded by MMU)
     // Used by VX_core_top, VX_socket, VX_dcache interfaces
-    localparam DCACHE_TAG_WIDTH     = DCACHE_TAG_WIDTH_BASE + DCACHE_TLB_SOURCE_BITS + DCACHE_ARB_BITS;
+    localparam DCACHE_TAG_WIDTH     = DCACHE_TLB_TAG_WIDTH + DCACHE_ARB_BITS;
     localparam DCACHE_TAG_WIDTH_MMU = DCACHE_TAG_WIDTH;  // Alias for compatibility
 `else
     // When VM disabled, no expansion needed

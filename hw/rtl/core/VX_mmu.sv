@@ -10,6 +10,7 @@ module VX_mmu import VX_gpu_pkg::*; #(
     parameter NUM_REQS       = DCACHE_NUM_REQS,
     parameter DATA_SIZE      = DCACHE_WORD_SIZE,
     parameter TAG_WIDTH      = DCACHE_TAG_WIDTH_BASE,
+    parameter PTW_TAG_WIDTH  = 1,   // tag width needed by the PTW (>= TAG_WIDTH+TLB_SOURCE_BITS when PTW_SIZE is large)
     parameter MEM_ADDR_WIDTH = `MEM_ADDR_WIDTH,
     parameter ADDR_WIDTH     = MEM_ADDR_WIDTH - `CLOG2(DATA_SIZE),
     parameter FLAGS_WIDTH    = MEM_FLAGS_WIDTH,
@@ -69,6 +70,10 @@ module VX_mmu import VX_gpu_pkg::*; #(
     localparam DATA_WIDTH      = DATA_SIZE * 8;
     localparam TLB_SOURCE_BITS = `UP(`CLOG2(NUM_REQS));
     localparam TAG_WIDTH_TLB   = TAG_WIDTH + TLB_SOURCE_BITS;
+    // MERGE_TAG_WIDTH: tag width used inside the merge arbiter.
+    // Must be wide enough for both the TLB/bypass paths (TAG_WIDTH_TLB) and
+    // the PTW path (PTW_TAG_WIDTH), so that no slot-ID bits are truncated.
+    localparam MERGE_TAG_WIDTH = `MAX(TAG_WIDTH_TLB, PTW_TAG_WIDTH);
     localparam REQ_DATAW       = 1 + ADDR_WIDTH + DATA_WIDTH + DATA_SIZE + FLAGS_WIDTH + TAG_WIDTH;
     localparam RSP_DATAW       = DATA_WIDTH + TAG_WIDTH;
 
@@ -103,7 +108,7 @@ module VX_mmu import VX_gpu_pkg::*; #(
     // [0..NUM_REQS-1]=bypass, [NUM_REQS..2*NUM_REQS-1]=TLB, [2*NUM_REQS]=PTW
     VX_mem_bus_if #(
         .DATA_SIZE   (DATA_SIZE),
-        .TAG_WIDTH   (TAG_WIDTH_TLB),
+        .TAG_WIDTH   (MERGE_TAG_WIDTH),
         .FLAGS_WIDTH (FLAGS_WIDTH)
     ) merge_in_if[2 * NUM_REQS + 1]();
 
@@ -245,24 +250,41 @@ module VX_mmu import VX_gpu_pkg::*; #(
     // Merge Arbiter Inputs
     // =========================================================================
 
+    // Field-by-field assignment required when MERGE_TAG_WIDTH != TAG_WIDTH_TLB.
+    // Bulk struct assignment would zero-extend/truncate at the MSB of the packed
+    // representation (which is the rw field), corrupting all fields.
+    // For the req tag: cast to MERGE_TAG_WIDTH (zero-extends at MSB when wider).
+    // For the rsp tag: extract lower TAG_WIDTH_TLB bits (drops the zero padding).
     for (genvar i = 0; i < NUM_REQS; i++) begin : g_bypass_to_merge
-        assign merge_in_if[i].req_valid = bypass_dcache_if[i].req_valid;
-        assign merge_in_if[i].req_data  = bypass_dcache_if[i].req_data;
-        assign bypass_dcache_if[i].req_ready  = merge_in_if[i].req_ready;
+        assign merge_in_if[i].req_valid            = bypass_dcache_if[i].req_valid;
+        assign merge_in_if[i].req_data.rw          = bypass_dcache_if[i].req_data.rw;
+        assign merge_in_if[i].req_data.addr        = bypass_dcache_if[i].req_data.addr;
+        assign merge_in_if[i].req_data.data        = bypass_dcache_if[i].req_data.data;
+        assign merge_in_if[i].req_data.byteen      = bypass_dcache_if[i].req_data.byteen;
+        assign merge_in_if[i].req_data.flags       = bypass_dcache_if[i].req_data.flags;
+        assign merge_in_if[i].req_data.tag         = MERGE_TAG_WIDTH'(bypass_dcache_if[i].req_data.tag);
+        assign bypass_dcache_if[i].req_ready       = merge_in_if[i].req_ready;
 
-        assign bypass_dcache_if[i].rsp_valid  = merge_in_if[i].rsp_valid;
-        assign bypass_dcache_if[i].rsp_data   = merge_in_if[i].rsp_data;
-        assign merge_in_if[i].rsp_ready = bypass_dcache_if[i].rsp_ready;
+        assign bypass_dcache_if[i].rsp_valid       = merge_in_if[i].rsp_valid;
+        assign bypass_dcache_if[i].rsp_data.data   = merge_in_if[i].rsp_data.data;
+        assign bypass_dcache_if[i].rsp_data.tag    = TAG_WIDTH_TLB'(merge_in_if[i].rsp_data.tag);
+        assign merge_in_if[i].rsp_ready            = bypass_dcache_if[i].rsp_ready;
     end
 
     for (genvar i = 0; i < NUM_REQS; i++) begin : g_tlb_to_merge
-        assign merge_in_if[NUM_REQS + i].req_valid = tlb_out_if[i].req_valid;
-        assign merge_in_if[NUM_REQS + i].req_data  = tlb_out_if[i].req_data;
-        assign tlb_out_if[i].req_ready  = merge_in_if[NUM_REQS + i].req_ready;
+        assign merge_in_if[NUM_REQS + i].req_valid            = tlb_out_if[i].req_valid;
+        assign merge_in_if[NUM_REQS + i].req_data.rw          = tlb_out_if[i].req_data.rw;
+        assign merge_in_if[NUM_REQS + i].req_data.addr        = tlb_out_if[i].req_data.addr;
+        assign merge_in_if[NUM_REQS + i].req_data.data        = tlb_out_if[i].req_data.data;
+        assign merge_in_if[NUM_REQS + i].req_data.byteen      = tlb_out_if[i].req_data.byteen;
+        assign merge_in_if[NUM_REQS + i].req_data.flags       = tlb_out_if[i].req_data.flags;
+        assign merge_in_if[NUM_REQS + i].req_data.tag         = MERGE_TAG_WIDTH'(tlb_out_if[i].req_data.tag);
+        assign tlb_out_if[i].req_ready                        = merge_in_if[NUM_REQS + i].req_ready;
 
-        assign tlb_out_if[i].rsp_valid  = merge_in_if[NUM_REQS + i].rsp_valid;
-        assign tlb_out_if[i].rsp_data   = merge_in_if[NUM_REQS + i].rsp_data;
-        assign merge_in_if[NUM_REQS + i].rsp_ready = tlb_out_if[i].rsp_ready;
+        assign tlb_out_if[i].rsp_valid                        = merge_in_if[NUM_REQS + i].rsp_valid;
+        assign tlb_out_if[i].rsp_data.data                    = merge_in_if[NUM_REQS + i].rsp_data.data;
+        assign tlb_out_if[i].rsp_data.tag                     = TAG_WIDTH_TLB'(merge_in_if[NUM_REQS + i].rsp_data.tag);
+        assign merge_in_if[NUM_REQS + i].rsp_ready            = tlb_out_if[i].rsp_ready;
     end
 
     // PTW memory slot: socket-level PTW drives page table walks through here
@@ -281,8 +303,8 @@ module VX_mmu import VX_gpu_pkg::*; #(
         .NUM_INPUTS     (2 * NUM_REQS + 1),
         .NUM_OUTPUTS    (NUM_REQS),
         .DATA_SIZE      (DATA_SIZE),
-        .TAG_WIDTH      (TAG_WIDTH_TLB),
-        .TAG_SEL_IDX    (TAG_WIDTH_TLB),
+        .TAG_WIDTH      (MERGE_TAG_WIDTH),
+        .TAG_SEL_IDX    (MERGE_TAG_WIDTH),
         .ARBITER        ("R"),
         .MEM_ADDR_WIDTH (MEM_ADDR_WIDTH),
         .ADDR_WIDTH     (ADDR_WIDTH),

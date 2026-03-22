@@ -312,9 +312,10 @@ module VX_core import VX_gpu_pkg::*; #(
     // MMU integration: VX_mmu sits between VX_mem_unit and dcache
 `ifdef VM_ENABLE
     VX_mmu #(
-        .NUM_REQS  (DCACHE_NUM_REQS),
-        .DATA_SIZE (DCACHE_WORD_SIZE),
-        .TAG_WIDTH (DCACHE_TAG_WIDTH_BASE)
+        .NUM_REQS      (DCACHE_NUM_REQS),
+        .DATA_SIZE     (DCACHE_WORD_SIZE),
+        .TAG_WIDTH     (DCACHE_TAG_WIDTH_BASE),
+        .PTW_TAG_WIDTH (DCACHE_TLB_TAG_WIDTH)
     ) mmu (
         .clk              (clk),
         .reset            (reset),
