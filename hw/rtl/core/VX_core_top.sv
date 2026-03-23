@@ -66,6 +66,19 @@ module VX_core_top import VX_gpu_pkg::*; #(
 `endif
     // Status
     output wire                             busy
+
+`ifdef VM_ENABLE
+    // PTW memory interface — page table reads go directly to L3/main memory
+    , output wire                                                        ptw_mem_req_valid
+    , output wire [`L2_LINE_SIZE-1:0]                                    ptw_mem_req_byteen
+    , output wire [`MEM_ADDR_WIDTH-`CLOG2(`L2_LINE_SIZE)-1:0]           ptw_mem_req_addr
+    , output wire [L2_MEM_TAG_WIDTH-1:0]                                 ptw_mem_req_tag
+    , input  wire                                                        ptw_mem_req_ready
+    , input  wire                                                        ptw_mem_rsp_valid
+    , input  wire [`L2_LINE_SIZE*8-1:0]                                  ptw_mem_rsp_data
+    , input  wire [L2_MEM_TAG_WIDTH-1:0]                                 ptw_mem_rsp_tag
+    , output wire                                                        ptw_mem_rsp_ready
+`endif
 );
 
 `ifdef GBAR_ENABLE
@@ -188,18 +201,26 @@ module VX_core_top import VX_gpu_pkg::*; #(
             ptw_satp <= dcr_bus_if.write_data;
     end
 
-    // PTW memory interface: VX_mmu_ptw (master) → VX_core.dtlb_ptw_mem_if (slave)
-    // → VX_mmu merge arbiter → VX_core.dcache_bus_if
-    localparam CTR_PTW_MEM_TAG_WIDTH = `MAX(DCACHE_TAG_WIDTH_BASE + DCACHE_TLB_SOURCE_BITS, `CLOG2(`PTW_SIZE));
+    // PTW memory interface: VX_mmu_ptw (master) → L3/main memory (via external port)
     VX_mem_bus_if #(
-        .DATA_SIZE (DCACHE_WORD_SIZE),
-        .TAG_WIDTH (CTR_PTW_MEM_TAG_WIDTH)
+        .DATA_SIZE (`L2_LINE_SIZE),
+        .TAG_WIDTH (L2_MEM_TAG_WIDTH)
     ) ptw_mem_bus();
 
+    assign ptw_mem_req_valid  = ptw_mem_bus.req_valid;
+    assign ptw_mem_req_byteen = ptw_mem_bus.req_data.byteen;
+    assign ptw_mem_req_addr   = ptw_mem_bus.req_data.addr;
+    assign ptw_mem_req_tag    = ptw_mem_bus.req_data.tag;
+    assign ptw_mem_bus.req_ready        = ptw_mem_req_ready;
+    assign ptw_mem_bus.rsp_valid        = ptw_mem_rsp_valid;
+    assign ptw_mem_bus.rsp_data.data    = ptw_mem_rsp_data;
+    assign ptw_mem_bus.rsp_data.tag     = ptw_mem_rsp_tag;
+    assign ptw_mem_rsp_ready  = ptw_mem_bus.rsp_ready;
+
     VX_mmu_ptw #(
-        .DATA_SIZE      (DCACHE_WORD_SIZE),
-        .TAG_WIDTH      (CTR_PTW_MEM_TAG_WIDTH),
-        .ADDR_WIDTH     (DCACHE_ADDR_WIDTH),
+        .DATA_SIZE      (`L2_LINE_SIZE),
+        .TAG_WIDTH      (L2_MEM_TAG_WIDTH),
+        .ADDR_WIDTH     (`MEM_ADDR_WIDTH - `CLOG2(`L2_LINE_SIZE)),
         .PTW_SIZE       (8),
         .NUM_REQUESTORS (2)
     ) core_top_ptw (
@@ -275,7 +296,6 @@ module VX_core_top import VX_gpu_pkg::*; #(
         .itlb_ptw_rsp_vaddr (itlb_ptw_rsp_vaddr),
         .itlb_ptw_rsp_paddr (itlb_ptw_rsp_paddr),
         .itlb_ptw_rsp_flags (itlb_ptw_rsp_flags),
-        .dtlb_ptw_mem_if    (ptw_mem_bus),
     `endif
 
         .busy           (busy)

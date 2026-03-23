@@ -793,7 +793,7 @@ package VX_gpu_pkg;
     // MMU expansion bits for icache (single request port)
     localparam ICACHE_NUM_REQS        = 1;
     localparam ICACHE_TLB_SOURCE_BITS = `UP(`CLOG2(ICACHE_NUM_REQS));  // = 1
-    localparam ICACHE_ARB_BITS        = `CLOG2(`CDIV(2 * ICACHE_NUM_REQS + 1, ICACHE_NUM_REQS));  // = 2
+    localparam ICACHE_ARB_BITS        = `ARB_SEL_BITS(2 * ICACHE_NUM_REQS, ICACHE_NUM_REQS);  // = 1 (bypass + TLB paths only)
 
     // ICACHE_TAG_WIDTH = external icache interface width (expanded by MMU)
     localparam ICACHE_TAG_WIDTH       = ICACHE_TAG_WIDTH_BASE + ICACHE_TLB_SOURCE_BITS + ICACHE_ARB_BITS;
@@ -839,12 +839,12 @@ package VX_gpu_pkg;
 `ifdef VM_ENABLE
     // MMU expansion bits
     // - TLB serialization: UP(CLOG2(DCACHE_NUM_REQS)) bits for lane encoding
-    // - ARB bits: Merge arbiter selector (bypass + TLB + PTW paths)
+    // - ARB bits: Merge arbiter selector (bypass + TLB paths only; PTW now at device level)
     localparam DCACHE_TLB_SOURCE_BITS = `UP(`CLOG2(DCACHE_NUM_REQS));
-    localparam DCACHE_ARB_BITS        = `CLOG2(`CDIV(2 * DCACHE_NUM_REQS + 1, DCACHE_NUM_REQS));
+    localparam DCACHE_ARB_BITS        = `ARB_SEL_BITS(2 * DCACHE_NUM_REQS, DCACHE_NUM_REQS);
 
     // DCACHE_TLB_TAG_WIDTH = tag width at VX_mmu output before ARB bits.
-    // Must fit both the TLB lane-encoding bits and the PTW slot ID (CLOG2(PTW_SIZE)).
+    // Must fit both the TLB lane-encoding bits and the PTW slot ID (CLOG2(PTW_SIZE) for device-level PTW).
     localparam DCACHE_TLB_TAG_WIDTH = `MAX(DCACHE_TAG_WIDTH_BASE + DCACHE_TLB_SOURCE_BITS, `CLOG2(`PTW_SIZE));
     // DCACHE_TAG_WIDTH = external dcache interface width (expanded by MMU)
     // Used by VX_core_top, VX_socket, VX_dcache interfaces
@@ -904,6 +904,13 @@ package VX_gpu_pkg;
     // Input request size
     localparam L3_NUM_REQS	        = `NUM_CLUSTERS * `L2_MEM_PORTS;
 
+    // Total L3 requestors (add 1 for shared PTW when VM is enabled)
+`ifdef VM_ENABLE
+    localparam L3_TOTAL_REQS        = L3_NUM_REQS + 1;
+`else
+    localparam L3_TOTAL_REQS        = L3_NUM_REQS;
+`endif
+
     // Core request tag bits
     localparam L3_TAG_WIDTH	        = L2_MEM_TAG_WIDTH;
 
@@ -912,9 +919,9 @@ package VX_gpu_pkg;
 
     // Memory request tag bits
 `ifdef L3_ENABLE
-    localparam L3_MEM_TAG_WIDTH     = `CACHE_NC_MEM_TAG_WIDTH(`L3_MSHR_SIZE, `L3_NUM_BANKS, L3_NUM_REQS, `L3_MEM_PORTS, `L3_LINE_SIZE, L3_WORD_SIZE, L3_TAG_WIDTH, UUID_WIDTH);
+    localparam L3_MEM_TAG_WIDTH     = `CACHE_NC_MEM_TAG_WIDTH(`L3_MSHR_SIZE, `L3_NUM_BANKS, L3_TOTAL_REQS, `L3_MEM_PORTS, `L3_LINE_SIZE, L3_WORD_SIZE, L3_TAG_WIDTH, UUID_WIDTH);
 `else
-    localparam L3_MEM_TAG_WIDTH     = `CACHE_BYPASS_TAG_WIDTH(L3_NUM_REQS, `L3_MEM_PORTS, `L3_LINE_SIZE, L3_WORD_SIZE, L3_TAG_WIDTH);
+    localparam L3_MEM_TAG_WIDTH     = `CACHE_BYPASS_TAG_WIDTH(L3_TOTAL_REQS, `L3_MEM_PORTS, `L3_LINE_SIZE, L3_WORD_SIZE, L3_TAG_WIDTH);
 `endif
 
     ///////////////////////////////////////////////////////////////////////////

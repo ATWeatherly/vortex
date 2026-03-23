@@ -67,10 +67,6 @@ module VX_core import VX_gpu_pkg::*; #(
     input  wire [31:0]      itlb_ptw_rsp_paddr,
     input  wire [7:0]       itlb_ptw_rsp_flags,
 
-    // dTLB PTW memory passthrough: socket PTW drives page table reads here.
-    // TAG_WIDTH = DCACHE_TAG_WIDTH_BASE + DCACHE_TLB_SOURCE_BITS (TAG_WIDTH_TLB
-    // inside VX_mmu; the merge arbiter adds DCACHE_ARB_BITS on top).
-    VX_mem_bus_if.slave     dtlb_ptw_mem_if,
 `endif
 
     // Status
@@ -123,20 +119,6 @@ module VX_core import VX_gpu_pkg::*; #(
         .TAG_WIDTH (ICACHE_TAG_WIDTH)
     ) icache_mmu_out_if[1]();
 
-    // Tie-off for iTLB VX_mmu's ptw_mem_if slave port.
-    // The socket-level PTW does all its walks via the dTLB path (dtlb_ptw_mem_if).
-    // iTLB misses still reach the shared PTW via itlb_ptw_req/rsp ports, but
-    // the PTW's memory requests never flow through the iTLB VX_mmu.
-    localparam ICACHE_TLB_TAG_WIDTH = ICACHE_TAG_WIDTH_BASE + ICACHE_TLB_SOURCE_BITS;
-    /* verilator lint_off UNUSEDSIGNAL */
-    VX_mem_bus_if #(
-        .DATA_SIZE (ICACHE_WORD_SIZE),
-        .TAG_WIDTH (ICACHE_TLB_TAG_WIDTH)
-    ) itlb_ptw_mem_tie();
-    /* verilator lint_on UNUSEDSIGNAL */
-    assign itlb_ptw_mem_tie.req_valid = 1'b0;
-    assign itlb_ptw_mem_tie.req_data  = '0;
-    assign itlb_ptw_mem_tie.rsp_ready = 1'b1;
 `endif
 
 `ifdef PERF_ENABLE
@@ -314,8 +296,7 @@ module VX_core import VX_gpu_pkg::*; #(
     VX_mmu #(
         .NUM_REQS      (DCACHE_NUM_REQS),
         .DATA_SIZE     (DCACHE_WORD_SIZE),
-        .TAG_WIDTH     (DCACHE_TAG_WIDTH_BASE),
-        .PTW_TAG_WIDTH (DCACHE_TLB_TAG_WIDTH)
+        .TAG_WIDTH     (DCACHE_TAG_WIDTH_BASE)
     ) mmu (
         .clk              (clk),
         .reset            (reset),
@@ -330,7 +311,6 @@ module VX_core import VX_gpu_pkg::*; #(
         .ptw_rsp_vaddr    (dtlb_ptw_rsp_vaddr),
         .ptw_rsp_paddr    (dtlb_ptw_rsp_paddr),
         .ptw_rsp_flags    (dtlb_ptw_rsp_flags),
-        .ptw_mem_if       (dtlb_ptw_mem_if),
     `ifdef PERF_ENABLE
         .mmu_perf         (mmu_perf)
     `else
@@ -369,7 +349,6 @@ module VX_core import VX_gpu_pkg::*; #(
         .ptw_rsp_vaddr    (itlb_ptw_rsp_vaddr),
         .ptw_rsp_paddr    (itlb_ptw_rsp_paddr),
         .ptw_rsp_flags    (itlb_ptw_rsp_flags),
-        .ptw_mem_if       (itlb_ptw_mem_tie),
     `ifdef PERF_ENABLE
         .mmu_perf         (icache_mmu_perf)
     `else

@@ -49,8 +49,6 @@ module VX_socket import VX_gpu_pkg::*; #(
     input  wire [31:0]               ptw_fill_vaddr [`SOCKET_SIZE*2],
     input  wire [31:0]               ptw_fill_paddr [`SOCKET_SIZE*2],
     input  wire [7:0]                ptw_fill_flags [`SOCKET_SIZE*2],
-    // PTW memory port: device-level PTW drives reads through core 0's dcache path
-    VX_mem_bus_if.slave              ptw_mem_if,
 `endif
 
 `ifdef PERF_ENABLE
@@ -293,7 +291,6 @@ module VX_socket import VX_gpu_pkg::*; #(
             .itlb_ptw_rsp_vaddr (per_core_itlb_ptw_rsp_vaddr[core_id]),
             .itlb_ptw_rsp_paddr (per_core_itlb_ptw_rsp_paddr[core_id]),
             .itlb_ptw_rsp_flags (per_core_itlb_ptw_rsp_flags[core_id]),
-            .dtlb_ptw_mem_if    (per_core_dtlb_ptw_mem_if[core_id]),
         `endif
 
             .busy           (per_core_busy[core_id])
@@ -351,24 +348,6 @@ module VX_socket import VX_gpu_pkg::*; #(
         assign per_core_itlb_ptw_rsp_vaddr[i]                 = ptw_fill_vaddr[`SOCKET_SIZE + i];
         assign per_core_itlb_ptw_rsp_paddr[i]                 = ptw_fill_paddr[`SOCKET_SIZE + i];
         assign per_core_itlb_ptw_rsp_flags[i]                 = ptw_fill_flags[`SOCKET_SIZE + i];
-    end
-
-    // PTW memory interface: device-level PTW drives reads through core 0's dcache.
-    // Core 0's dtlb_ptw_mem_if slave is connected to the socket ptw_mem_if port.
-    // Cores 1..N-1 have their dTLB ptw_mem slot tied off (not used by PTW).
-    localparam PTW_MEM_TAG_WIDTH = `MAX(DCACHE_TAG_WIDTH_BASE + DCACHE_TLB_SOURCE_BITS, `CLOG2(`PTW_SIZE));
-
-    VX_mem_bus_if #(
-        .DATA_SIZE (DCACHE_WORD_SIZE),
-        .TAG_WIDTH (PTW_MEM_TAG_WIDTH)
-    ) per_core_dtlb_ptw_mem_if[`SOCKET_SIZE]();
-
-    `ASSIGN_VX_MEM_BUS_IF (per_core_dtlb_ptw_mem_if[0], ptw_mem_if);
-
-    for (genvar i = 1; i < `SOCKET_SIZE; i++) begin : g_ptw_mem_tie
-        assign per_core_dtlb_ptw_mem_if[i].req_valid = 1'b0;
-        assign per_core_dtlb_ptw_mem_if[i].req_data  = '0;
-        assign per_core_dtlb_ptw_mem_if[i].rsp_ready = 1'b1;
     end
 
 `endif // VM_ENABLE

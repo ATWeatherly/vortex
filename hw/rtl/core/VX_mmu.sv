@@ -10,7 +10,6 @@ module VX_mmu import VX_gpu_pkg::*; #(
     parameter NUM_REQS       = DCACHE_NUM_REQS,
     parameter DATA_SIZE      = DCACHE_WORD_SIZE,
     parameter TAG_WIDTH      = DCACHE_TAG_WIDTH_BASE,
-    parameter PTW_TAG_WIDTH  = 1,   // tag width needed by the PTW (>= TAG_WIDTH+TLB_SOURCE_BITS when PTW_SIZE is large)
     parameter MEM_ADDR_WIDTH = `MEM_ADDR_WIDTH,
     parameter ADDR_WIDTH     = MEM_ADDR_WIDTH - `CLOG2(DATA_SIZE),
     parameter FLAGS_WIDTH    = MEM_FLAGS_WIDTH,
@@ -34,10 +33,6 @@ module VX_mmu import VX_gpu_pkg::*; #(
     input  wire [31:0] ptw_rsp_vaddr,
     input  wire [31:0] ptw_rsp_paddr,
     input  wire [7:0]  ptw_rsp_flags,
-
-    // PTW memory passthrough: socket-level PTW drives page table reads through
-    // this slot in the merge arbiter, preserving DCACHE_ARB_BITS tag format.
-    VX_mem_bus_if.slave ptw_mem_if,
 
 `ifdef PERF_ENABLE
     output mmu_perf_t    mmu_perf
@@ -71,9 +66,8 @@ module VX_mmu import VX_gpu_pkg::*; #(
     localparam TLB_SOURCE_BITS = `UP(`CLOG2(NUM_REQS));
     localparam TAG_WIDTH_TLB   = TAG_WIDTH + TLB_SOURCE_BITS;
     // MERGE_TAG_WIDTH: tag width used inside the merge arbiter.
-    // Must be wide enough for both the TLB/bypass paths (TAG_WIDTH_TLB) and
-    // the PTW path (PTW_TAG_WIDTH), so that no slot-ID bits are truncated.
-    localparam MERGE_TAG_WIDTH = `MAX(TAG_WIDTH_TLB, PTW_TAG_WIDTH);
+    // Equals TAG_WIDTH_TLB since the only paths are bypass and TLB.
+    localparam MERGE_TAG_WIDTH = TAG_WIDTH_TLB;
     localparam REQ_DATAW       = 1 + ADDR_WIDTH + DATA_WIDTH + DATA_SIZE + FLAGS_WIDTH + TAG_WIDTH;
     localparam RSP_DATAW       = DATA_WIDTH + TAG_WIDTH;
 
@@ -105,12 +99,12 @@ module VX_mmu import VX_gpu_pkg::*; #(
     /* verilator lint_on UNUSEDSIGNAL */
 `endif
 
-    // [0..NUM_REQS-1]=bypass, [NUM_REQS..2*NUM_REQS-1]=TLB, [2*NUM_REQS]=PTW
+    // [0..NUM_REQS-1]=bypass, [NUM_REQS..2*NUM_REQS-1]=TLB
     VX_mem_bus_if #(
         .DATA_SIZE   (DATA_SIZE),
         .TAG_WIDTH   (MERGE_TAG_WIDTH),
         .FLAGS_WIDTH (FLAGS_WIDTH)
-    ) merge_in_if[2 * NUM_REQS + 1]();
+    ) merge_in_if[2 * NUM_REQS]();
 
     // =========================================================================
     // Elastic Buffers (TLB path only)
@@ -287,20 +281,12 @@ module VX_mmu import VX_gpu_pkg::*; #(
         assign merge_in_if[NUM_REQS + i].rsp_ready            = tlb_out_if[i].rsp_ready;
     end
 
-    // PTW memory slot: socket-level PTW drives page table walks through here
-    assign merge_in_if[2 * NUM_REQS].req_valid = ptw_mem_if.req_valid;
-    assign merge_in_if[2 * NUM_REQS].req_data  = ptw_mem_if.req_data;
-    assign ptw_mem_if.req_ready                = merge_in_if[2 * NUM_REQS].req_ready;
-    assign ptw_mem_if.rsp_valid                = merge_in_if[2 * NUM_REQS].rsp_valid;
-    assign ptw_mem_if.rsp_data                 = merge_in_if[2 * NUM_REQS].rsp_data;
-    assign merge_in_if[2 * NUM_REQS].rsp_ready = ptw_mem_if.rsp_ready;
-
     // =========================================================================
     // Merge Arbiter
     // =========================================================================
 
     VX_mem_arb #(
-        .NUM_INPUTS     (2 * NUM_REQS + 1),
+        .NUM_INPUTS     (2 * NUM_REQS),
         .NUM_OUTPUTS    (NUM_REQS),
         .DATA_SIZE      (DATA_SIZE),
         .TAG_WIDTH      (MERGE_TAG_WIDTH),

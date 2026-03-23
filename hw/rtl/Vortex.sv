@@ -72,6 +72,21 @@ module Vortex import VX_gpu_pkg::*; (
 
     `RESET_RELAY (l3_reset, reset);
 
+`ifdef VM_ENABLE
+    // Combined L3 core bus: per-cluster buses + shared PTW
+    // L3_TOTAL_REQS = L3_NUM_REQS + 1 defined in VX_gpu_pkg.sv
+
+    VX_mem_bus_if #(
+        .DATA_SIZE (`L2_LINE_SIZE),
+        .TAG_WIDTH (L2_MEM_TAG_WIDTH)
+    ) l3_core_bus_if[L3_TOTAL_REQS]();
+
+    for (genvar i = 0; i < L3_NUM_REQS; i++) begin : g_l3_cluster_buses
+        `ASSIGN_VX_MEM_BUS_IF (l3_core_bus_if[i], per_cluster_mem_bus_if[i]);
+    end
+    `ASSIGN_VX_MEM_BUS_IF (l3_core_bus_if[L3_NUM_REQS], ptw_mem_bus);
+`endif
+
     VX_cache_wrap #(
         .INSTANCE_ID    ("l3cache"),
         .CACHE_SIZE     (`L3_CACHE_SIZE),
@@ -79,7 +94,11 @@ module Vortex import VX_gpu_pkg::*; (
         .NUM_BANKS      (`L3_NUM_BANKS),
         .NUM_WAYS       (`L3_NUM_WAYS),
         .WORD_SIZE      (L3_WORD_SIZE),
+`ifdef VM_ENABLE
+        .NUM_REQS       (L3_TOTAL_REQS),
+`else
         .NUM_REQS       (L3_NUM_REQS),
+`endif
         .MEM_PORTS      (`L3_MEM_PORTS),
         .CRSQ_SIZE      (`L3_CRSQ_SIZE),
         .MSHR_SIZE      (`L3_MSHR_SIZE),
@@ -102,7 +121,11 @@ module Vortex import VX_gpu_pkg::*; (
         .cache_perf     (l3_perf),
     `endif
 
+`ifdef VM_ENABLE
+        .core_bus_if    (l3_core_bus_if),
+`else
         .core_bus_if    (per_cluster_mem_bus_if),
+`endif
         .mem_bus_if     (mem_bus_if)
     );
 
@@ -135,7 +158,6 @@ module Vortex import VX_gpu_pkg::*; (
     ///////////////////////////////////////////////////////////////////////////
 
     localparam TOTAL_PTW_REQS = `NUM_CLUSTERS * NUM_SOCKETS * `SOCKET_SIZE * 2;
-    localparam PTW_MEM_TAG_WIDTH_TOP = `MAX(DCACHE_TAG_WIDTH_BASE + DCACHE_TLB_SOURCE_BITS, `CLOG2(`PTW_SIZE));
 
     // Per-cluster PTW miss/fill wires
     wire [NUM_SOCKETS*`SOCKET_SIZE*2-1:0] per_cluster_ptw_miss_valid [`NUM_CLUSTERS];
@@ -172,24 +194,10 @@ module Vortex import VX_gpu_pkg::*; (
         end
     end
 
-    // PTW memory interface: cluster 0 / socket 0 / core 0's dcache path.
-    // Only cluster 0 carries PTW memory traffic; clusters 1..N-1 are tied off.
+    // PTW memory bus: device-level PTW reads page table entries via L3.
     VX_mem_bus_if #(
-        .DATA_SIZE (DCACHE_WORD_SIZE),
-        .TAG_WIDTH (PTW_MEM_TAG_WIDTH_TOP)
-    ) per_cluster_ptw_mem_if [`NUM_CLUSTERS] ();
-
-    `ASSIGN_VX_MEM_BUS_IF (per_cluster_ptw_mem_if[0], ptw_mem_bus);
-
-    for (genvar c = 1; c < `NUM_CLUSTERS; c++) begin : g_ptw_mem_tie
-        assign per_cluster_ptw_mem_if[c].req_valid = 1'b0;
-        assign per_cluster_ptw_mem_if[c].req_data  = '0;
-        assign per_cluster_ptw_mem_if[c].rsp_ready = 1'b1;
-    end
-
-    VX_mem_bus_if #(
-        .DATA_SIZE (DCACHE_WORD_SIZE),
-        .TAG_WIDTH (PTW_MEM_TAG_WIDTH_TOP)
+        .DATA_SIZE (`L2_LINE_SIZE),
+        .TAG_WIDTH (L2_MEM_TAG_WIDTH)
     ) ptw_mem_bus ();
 
     // SATP register: host writes via DCR bus before kernel launch
@@ -208,9 +216,9 @@ module Vortex import VX_gpu_pkg::*; (
 `endif
 
     VX_mmu_ptw #(
-        .DATA_SIZE      (DCACHE_WORD_SIZE),
-        .TAG_WIDTH      (PTW_MEM_TAG_WIDTH_TOP),
-        .ADDR_WIDTH     (DCACHE_ADDR_WIDTH),
+        .DATA_SIZE      (`L2_LINE_SIZE),
+        .TAG_WIDTH      (L2_MEM_TAG_WIDTH),
+        .ADDR_WIDTH     (`MEM_ADDR_WIDTH - `CLOG2(`L2_LINE_SIZE)),
         .PTW_SIZE       (`PTW_SIZE),
         .NUM_REQUESTORS (TOTAL_PTW_REQS)
     ) shared_ptw (
@@ -273,7 +281,6 @@ module Vortex import VX_gpu_pkg::*; (
             .ptw_fill_vaddr     (per_cluster_ptw_fill_vaddr[cluster_id]),
             .ptw_fill_paddr     (per_cluster_ptw_fill_paddr[cluster_id]),
             .ptw_fill_flags     (per_cluster_ptw_fill_flags[cluster_id]),
-            .ptw_mem_if         (per_cluster_ptw_mem_if[cluster_id]),
         `endif
 
         `ifdef PERF_ENABLE
