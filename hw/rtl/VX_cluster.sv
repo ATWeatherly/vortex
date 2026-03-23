@@ -34,21 +34,21 @@ module VX_cluster import VX_gpu_pkg::*; #(
     VX_mem_bus_if.master        mem_bus_if [`L2_MEM_PORTS],
 
     // Status
-    output wire                 busy,
+    output wire                 busy
 
 `ifdef VM_ENABLE
     // PTW miss requests from all sockets — routed up to device-level shared PTW
-    output wire [NUM_SOCKETS*`SOCKET_SIZE*2-1:0] ptw_miss_valid,
-    output wire [31:0]                            ptw_miss_vaddr [NUM_SOCKETS*`SOCKET_SIZE*2],
-    input  wire [NUM_SOCKETS*`SOCKET_SIZE*2-1:0] ptw_miss_ready,
+    , output wire [NUM_SOCKETS*`SOCKET_SIZE*2-1:0] ptw_miss_valid
+    , output wire [31:0]                            ptw_miss_vaddr [NUM_SOCKETS*`SOCKET_SIZE*2]
+    , input  wire [NUM_SOCKETS*`SOCKET_SIZE*2-1:0] ptw_miss_ready
     // PTW fill responses coming back down from device-level shared PTW
-    input  wire [NUM_SOCKETS*`SOCKET_SIZE*2-1:0] ptw_fill_valid,
-    output wire [NUM_SOCKETS*`SOCKET_SIZE*2-1:0] ptw_fill_ready,
-    input  wire [31:0]                            ptw_fill_vaddr [NUM_SOCKETS*`SOCKET_SIZE*2],
-    input  wire [31:0]                            ptw_fill_paddr [NUM_SOCKETS*`SOCKET_SIZE*2],
-    input  wire [7:0]                             ptw_fill_flags [NUM_SOCKETS*`SOCKET_SIZE*2],
+    , input  wire [NUM_SOCKETS*`SOCKET_SIZE*2-1:0] ptw_fill_valid
+    , output wire [NUM_SOCKETS*`SOCKET_SIZE*2-1:0] ptw_fill_ready
+    , input  wire [31:0]                            ptw_fill_vaddr [NUM_SOCKETS*`SOCKET_SIZE*2]
+    , input  wire [31:0]                            ptw_fill_paddr [NUM_SOCKETS*`SOCKET_SIZE*2]
+    , input  wire [7:0]                             ptw_fill_flags [NUM_SOCKETS*`SOCKET_SIZE*2]
     // PTW memory port: threaded from socket 0 up to device-level PTW
-    VX_mem_bus_if.slave                           ptw_mem_if
+    , VX_mem_bus_if.slave                           ptw_mem_if
 `endif
 
 `ifdef PERF_ENABLE
