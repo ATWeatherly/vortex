@@ -541,7 +541,7 @@ class vAddr_t
 
     ~vAddr_t()
     {
-      delete vpn;
+      delete[] vpn;
     }
 };
 #endif

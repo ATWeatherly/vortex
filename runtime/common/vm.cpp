@@ -8,6 +8,7 @@
 #include <VX_config.h>
 #include <cassert>
 #include <cmath>
+#include <cstring>
 #include <iostream>
 #include <unordered_map>
 
@@ -40,7 +41,7 @@ VMManager::~VMManager() {
 =========================================================*/
 
 // reserve IO space, startup space, and local mem area
-int VMManager::virtual_mem_reserve(uint64_t dev_addr, uint64_t size, int flags) {
+int VMManager::virtual_mem_reserve(uint64_t dev_addr, uint64_t size, int /*flags*/) {
   CHECK_ERR(virtual_mem_->reserve(dev_addr, size), {
     return err;
   });
@@ -436,17 +437,11 @@ void VMManager::write_pte(uint64_t addr, uint64_t value) {
 }
 
 uint64_t VMManager::read_pte(uint64_t addr) {
-  uint8_t *dest = new uint8_t[PTE_SIZE];
-#ifdef XLEN_32
-  uint64_t mask = 0x00000000FFFFFFFF;
-#else // 64bit
-  uint64_t mask = 0xFFFFFFFFFFFFFFFF;
-#endif
-
-  ram_->read((uint8_t *)dest, addr, PTE_SIZE);
-  uint64_t ret = (*(uint64_t *)((uint8_t *)dest)) & mask;
+  uint8_t dest[PTE_SIZE];
+  uint64_t ret = 0;
+  ram_->read(dest, addr, PTE_SIZE);
+  memcpy(&ret, dest, PTE_SIZE);
   DBGPRINT("  [RT:read_pte] reading PTE 0x%lx from RAM addr 0x%lx\n", ret, addr);
-
   return ret;
 }
 
