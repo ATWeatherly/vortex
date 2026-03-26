@@ -112,6 +112,8 @@ class SATP_t
 };
 
 
+#ifndef VORTEX_PAGE_FAULT_EXCEPTION_DEFINED
+#define VORTEX_PAGE_FAULT_EXCEPTION_DEFINED
 class Page_Fault_Exception : public std::runtime_error /* or logic_error */
 {
 public:
@@ -119,7 +121,8 @@ public:
     uint64_t addr;
     ACCESS_TYPE type;
 };
-#endif
+#endif // VORTEX_PAGE_FAULT_EXCEPTION_DEFINED
+#endif // VM_ENABLE
 
 class BadAddress : public std::runtime_error {
 public:
@@ -402,6 +405,8 @@ private:
 };
 
 #ifdef VM_ENABLE
+#ifndef VORTEX_VM_TYPES_DEFINED
+#define VORTEX_VM_TYPES_DEFINED
 class PTE_t
 {
 
@@ -544,6 +549,7 @@ class vAddr_t
       delete[] vpn;
     }
 };
-#endif
+#endif // VORTEX_VM_TYPES_DEFINED
+#endif // VM_ENABLE
 
 } // namespace vortex

@@ -6,6 +6,7 @@
 #include "vm.h"
 
 #include <VX_config.h>
+#include <VX_types.h>
 #include <cassert>
 #include <cmath>
 #include <cstring>
@@ -14,18 +15,18 @@
 
 using namespace vortex;
 
-VMManager::VMManager(Processor *processor, RAM *ram)
-    : processor_(processor),
-      ram_(ram),
+VMManager::VMManager(const VMDevice& dev)
+    : dev_(dev),
+      satp_(0),
       page_table_mem_(nullptr),
       virtual_mem_(nullptr) {
   const char* randomize_env = std::getenv("VORTEX_RANDOMIZE_VA");
   randomize_va_ = (randomize_env != nullptr && std::atoi(randomize_env) != 0);
-  
+
   const char* seed_env = std::getenv("VORTEX_VA_SEED");
   uint64_t seed = seed_env ? std::atoll(seed_env) : 0x12345678ULL;
   rng_.seed(seed);
-  
+
   if (randomize_va_) {
     std::cout << "[VM] Virtual address randomization ENABLED (seed=0x" << std::hex << seed << std::dec << ")" << std::endl;
   }
@@ -34,6 +35,52 @@ VMManager::VMManager(Processor *processor, RAM *ram)
 VMManager::~VMManager() {
   delete virtual_mem_;
   delete page_table_mem_;
+}
+
+/*=========================================================
+    SATP helpers
+=========================================================*/
+
+// Compute the raw SATP register value for the given page table base address.
+// Replicates the SATP_t(address, asid) constructor from sim/common/mem.h.
+int VMManager::set_satp_by_addr(uint64_t pt_base_addr) {
+  uint16_t asid = 0;
+  uint8_t  mode = VM_ADDR_MODE;
+  uint64_t ppn  = pt_base_addr >> MEM_PAGE_LOG2_SIZE;
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wshift-count-overflow"
+#ifdef XLEN_32
+  satp_ = (((uint64_t)mode << 31) | ((uint64_t)asid << 22) | ppn);
+#else
+  satp_ = (((uint64_t)mode << 60) | ((uint64_t)asid << 44) | ppn);
+#endif
+#pragma GCC diagnostic pop
+
+  // Write SATP to hardware via DCR bus.
+  CHECK_ERR(dev_.dcr_write(VX_DCR_BASE_SATP0, (uint32_t)(satp_ & 0xffffffff)), { return err; });
+  CHECK_ERR(dev_.dcr_write(VX_DCR_BASE_SATP1, (uint32_t)(satp_ >> 32)), { return err; });
+  return 0;
+}
+
+bool VMManager::is_satp_unset() const {
+  return satp_ == 0;
+}
+
+uint64_t VMManager::get_base_ppn() const {
+#ifdef XLEN_32
+  return satp_ & 0x3FFFFF;           // bits [21:0]
+#else
+  return satp_ & 0x0FFFFFFFFFFFULL;  // bits [43:0]
+#endif
+}
+
+uint8_t VMManager::get_mode() const {
+#ifdef XLEN_32
+  return (satp_ >> 31) & 0x1;
+#else
+  return (satp_ >> 60) & 0xF;
+#endif
 }
 
 /*=========================================================
@@ -67,9 +114,9 @@ int VMManager::init() {
     virtual_mem_size = max_va_end - ALLOC_BASE_ADDR;
   }
   #endif
-  
+
   virtual_mem_ = new MemoryAllocator(ALLOC_BASE_ADDR, virtual_mem_size, MEM_PAGE_SIZE, CACHE_BLOCK_SIZE);
-  
+
   uint64_t pt_reserve_size = (GLOBAL_MEM_SIZE - PAGE_TABLE_BASE_ADDR);
   #ifdef XLEN_32
   if (PAGE_TABLE_BASE_ADDR + pt_reserve_size > max_va_end) {
@@ -79,7 +126,7 @@ int VMManager::init() {
   CHECK_ERR(virtual_mem_reserve(PAGE_TABLE_BASE_ADDR, pt_reserve_size, VX_MEM_READ_WRITE), {
     return err;
   });
-  
+
   CHECK_ERR(virtual_mem_reserve(STARTUP_ADDR, 0x40000, VX_MEM_READ_WRITE), {
     return err;
   });
@@ -94,7 +141,7 @@ int VMManager::init() {
   else
     CHECK_ERR(alloc_page_table(&pt_addr), { return err; });
 
-  CHECK_ERR(processor_->set_satp_by_addr(pt_addr), { return err; });
+  CHECK_ERR(set_satp_by_addr(pt_addr), { return err; });
   return 0;
 }
 
@@ -104,7 +151,7 @@ int VMManager::init() {
 
 bool VMManager::need_trans(uint64_t dev_pAddr) {
   // Check if the satp is set and BARE mode
-  if (processor_->is_satp_unset() || get_mode() == BARE)
+  if (is_satp_unset() || get_mode() == BARE)
     return 0;
 
   // Skip reserved and IO regions
@@ -130,16 +177,16 @@ uint64_t VMManager::map_p2v(uint64_t ppn, uint32_t flags) {
   // If ppn to vpn mapping doesnt exist, create mapping
   DBGPRINT(" [RT:MAP_P2V] Not found. Allocate new page table or update a PTE.\n");
   uint64_t vpn;
-  
+
   if (randomize_va_) {
     // Randomized virtual address allocation
     const int MAX_ATTEMPTS = 1000;
     bool allocated = false;
-    
+
     for (int attempt = 0; attempt < MAX_ATTEMPTS; ++attempt) {
       uint64_t va_range_start = ALLOC_BASE_ADDR;
       uint64_t va_range_end = PAGE_TABLE_BASE_ADDR;
-      
+
       // For 32-bit mode (XLEN=32), constrain VAs to fit in 32-bit address space
       #ifdef XLEN_32
       uint64_t max_va = 0xFFFFFFFFULL;
@@ -147,14 +194,14 @@ uint64_t VMManager::map_p2v(uint64_t ppn, uint32_t flags) {
         va_range_end = max_va;
       }
       #endif
-      
+
       uint64_t va_range_size = va_range_end - va_range_start;
       uint64_t max_pages = va_range_size >> MEM_PAGE_LOG2_SIZE;
-      
+
       std::uniform_int_distribution<uint64_t> dist(0, max_pages - 1);
       uint64_t random_page_offset = dist(rng_);
       uint64_t candidate_va = va_range_start + (random_page_offset << MEM_PAGE_LOG2_SIZE);
-      
+
       // Check if this virtual address is already in use
       bool in_use = false;
       for (const auto& mapping : addr_mapping) {
@@ -163,7 +210,7 @@ uint64_t VMManager::map_p2v(uint64_t ppn, uint32_t flags) {
           break;
         }
       }
-      
+
       if (!in_use && virtual_mem_->reserve(candidate_va, MEM_PAGE_SIZE) == 0) {
         vpn = candidate_va >> MEM_PAGE_LOG2_SIZE;
         allocated = true;
@@ -171,7 +218,7 @@ uint64_t VMManager::map_p2v(uint64_t ppn, uint32_t flags) {
         break;
       }
     }
-    
+
     if (!allocated) {
       DBGPRINT(" [RT:MAP_P2V] Random allocation failed, falling back to sequential\n");
       virtual_mem_->allocate(MEM_PAGE_SIZE, &vpn);
@@ -181,7 +228,7 @@ uint64_t VMManager::map_p2v(uint64_t ppn, uint32_t flags) {
     virtual_mem_->allocate(MEM_PAGE_SIZE, &vpn);
     vpn >>= MEM_PAGE_LOG2_SIZE;
   }
-  
+
   CHECK_ERR(update_page_table(ppn, vpn, flags), );
   addr_mapping[ppn] = vpn;
   return vpn;
@@ -199,9 +246,9 @@ int VMManager::phy_to_virt_map(uint64_t size, uint64_t *dev_pAddr, uint32_t flag
   uint64_t init_pAddr = *dev_pAddr;
   uint64_t num_pages = size >> MEM_PAGE_LOG2_SIZE;
   uint64_t base_ppn = init_pAddr >> MEM_PAGE_LOG2_SIZE;
-  
+
   uint64_t base_vpn;
-  
+
   // Check if first page is already mapped
   if (addr_mapping.find(base_ppn) != addr_mapping.end()) {
     base_vpn = addr_mapping[base_ppn];
@@ -212,25 +259,25 @@ int VMManager::phy_to_virt_map(uint64_t size, uint64_t *dev_pAddr, uint32_t flag
       // For randomized allocation, try to find a random contiguous VA range
       const int MAX_ATTEMPTS = 1000;
       bool allocated = false;
-      
+
       for (int attempt = 0; attempt < MAX_ATTEMPTS && !allocated; ++attempt) {
         uint64_t va_range_start = ALLOC_BASE_ADDR;
         uint64_t va_range_end = PAGE_TABLE_BASE_ADDR;
-        
+
         #ifdef XLEN_32
         uint64_t max_va = 0xFFFFFFFFULL;
         if (va_range_end > max_va) {
           va_range_end = max_va;
         }
         #endif
-        
+
         uint64_t va_range_size = va_range_end - va_range_start;
         uint64_t max_pages = (va_range_size >> MEM_PAGE_LOG2_SIZE) - num_pages;
-        
+
         std::uniform_int_distribution<uint64_t> dist(0, max_pages - 1);
         uint64_t random_page_offset = dist(rng_);
         uint64_t candidate_va = va_range_start + (random_page_offset << MEM_PAGE_LOG2_SIZE);
-        
+
         bool range_available = true;
         for (uint64_t i = 0; i < num_pages && range_available; ++i) {
           uint64_t test_vpn = (candidate_va >> MEM_PAGE_LOG2_SIZE) + i;
@@ -241,14 +288,14 @@ int VMManager::phy_to_virt_map(uint64_t size, uint64_t *dev_pAddr, uint32_t flag
             }
           }
         }
-        
+
         if (range_available && virtual_mem_->reserve(candidate_va, size) == 0) {
           base_va = candidate_va;
           allocated = true;
           DBGPRINT(" [RT:PTV_MAP] Reserved random contiguous VA range: 0x%lx (size 0x%lx)\n", base_va, size);
         }
       }
-      
+
       if (!allocated) {
         // Fallback to sequential allocation
         base_va = 0;
@@ -260,23 +307,23 @@ int VMManager::phy_to_virt_map(uint64_t size, uint64_t *dev_pAddr, uint32_t flag
       CHECK_ERR(virtual_mem_->allocate(size, &base_va), );
       DBGPRINT(" [RT:PTV_MAP] Allocated sequential VA range: 0x%lx (size 0x%lx)\n", base_va, size);
     }
-    
+
     base_vpn = base_va >> MEM_PAGE_LOG2_SIZE;
   }
-  
+
   uint64_t init_vAddr = (base_vpn << MEM_PAGE_LOG2_SIZE) | (init_pAddr & ((1 << MEM_PAGE_LOG2_SIZE) - 1));
 
   for (uint64_t i = 0; i < num_pages; i++) {
     uint64_t ppn = base_ppn + i;
     uint64_t vpn = base_vpn + i;
-    
+
     if (addr_mapping.find(ppn) == addr_mapping.end()) {
       CHECK_ERR(update_page_table(ppn, vpn, flags), );
       addr_mapping[ppn] = vpn;
       DBGPRINT(" [RT:PTV_MAP] Mapped ppn 0x%lx to vpn 0x%lx\n", ppn, vpn);
     }
   }
-  
+
   DBGPRINT(" [RT:PTV_MAP] Mapped virtual addr: 0x%lx to physical addr: 0x%lx\n", init_vAddr, init_pAddr);
   assert(page_table_walk(init_vAddr) == init_pAddr && "ERROR: translated virtual Addresses are not the same with physical Address\n");
 
@@ -301,17 +348,12 @@ uint8_t VMManager::alloc_page_table(uint64_t *pt_addr) {
 int VMManager::init_page_table(uint64_t addr, uint64_t size) {
   uint64_t asize = aligned_size(size, CACHE_BLOCK_SIZE);
   DBGPRINT("  [RT:init_page_table] (addr=0x%lx, size=0x%lx)\n", addr, asize);
-  uint8_t *src = new uint8_t[asize];
+  uint8_t *src = new uint8_t[asize]();  // zero-initialized
   if (src == NULL)
     return 1;
-
-  for (uint64_t i = 0; i < asize; ++i) {
-    src[i] = 0;
-  }
-  ram_->enable_acl(false);
-  ram_->write((const uint8_t *)src, addr, asize);
-  ram_->enable_acl(true);
-  return 0;
+  int err = dev_.mem_write(addr, src, asize);
+  delete[] src;
+  return err;
 }
 
 int16_t VMManager::update_page_table(uint64_t ppn, uint64_t vpn, uint32_t flag) {
@@ -422,39 +464,29 @@ uint64_t VMManager::page_table_walk(uint64_t vAddr_bits) {
 }
 
 /*=========================================================
-    misc helpers: DONE?
+    misc helpers
 =========================================================*/
 
 void VMManager::write_pte(uint64_t addr, uint64_t value) {
   DBGPRINT("  [RT:Write_pte] writing pte 0x%lx to pAddr: 0x%lx\n", value, addr);
-  uint8_t *src = new uint8_t[PTE_SIZE];
+  uint8_t src[PTE_SIZE];
   for (uint64_t i = 0; i < PTE_SIZE; ++i) {
     src[i] = (value >> (i << 3)) & 0xff;
   }
-  ram_->enable_acl(false);
-  ram_->write((const uint8_t *)src, addr, PTE_SIZE);
-  ram_->enable_acl(true);
+  dev_.mem_write(addr, src, PTE_SIZE);
 }
 
 uint64_t VMManager::read_pte(uint64_t addr) {
   uint8_t dest[PTE_SIZE];
   uint64_t ret = 0;
-  ram_->read(dest, addr, PTE_SIZE);
+  dev_.mem_read(addr, dest, PTE_SIZE);
   memcpy(&ret, dest, PTE_SIZE);
   DBGPRINT("  [RT:read_pte] reading PTE 0x%lx from RAM addr 0x%lx\n", ret, addr);
   return ret;
 }
 
-uint64_t VMManager::get_base_ppn() {
-  return processor_->get_base_ppn();
-}
-
 uint64_t VMManager::get_pte_address(uint64_t base_ppn, uint64_t vpn) {
   return (base_ppn * PT_SIZE) + (vpn * PTE_SIZE);
-}
-
-uint8_t VMManager::get_mode() {
-  return processor_->get_satp_mode();
 }
 
 #endif // VM_ENABLE

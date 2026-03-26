@@ -55,7 +55,26 @@ public:
     processor_.attach_ram(&ram_);
 #ifdef VM_ENABLE
     std::cout << "*** VM ENABLED!! ***" << std::endl;
-    vm_mgr_ = std::make_unique<VMManager>(&processor_, &ram_);
+    {
+      VMDevice vm_dev;
+      auto* ram_ptr  = &ram_;
+      auto* proc_ptr = &processor_;
+      vm_dev.mem_write = [ram_ptr](uint64_t addr, const uint8_t* src, uint64_t size) -> int {
+        ram_ptr->enable_acl(false);
+        ram_ptr->write(src, addr, size);
+        ram_ptr->enable_acl(true);
+        return 0;
+      };
+      vm_dev.mem_read = [ram_ptr](uint64_t addr, uint8_t* dst, uint64_t size) -> int {
+        ram_ptr->read(dst, addr, size);
+        return 0;
+      };
+      vm_dev.dcr_write = [proc_ptr](uint32_t addr, uint32_t value) -> int {
+        proc_ptr->dcr_write(addr, value);
+        return 0;
+      };
+      vm_mgr_ = std::make_unique<VMManager>(vm_dev);
+    }
     CHECK_ERR(init_VM(), );
 #endif
   }
