@@ -197,10 +197,14 @@
 `define VX_CSR_MPM_PTW_WALKS_H          12'hBA4
 `define VX_CSR_MPM_PTW_LATENCY          12'hB25     // PTW total latency cycles
 `define VX_CSR_MPM_PTW_LATENCY_H        12'hBA5
-`define VX_CSR_MPM_PWC_HITS             12'hB26     // Page walk cache hits
+`define VX_CSR_MPM_PWC_HITS             12'hB26     // PWC1 hits (top-level entry cached)
 `define VX_CSR_MPM_PWC_HITS_H           12'hBA6
-`define VX_CSR_MPM_PWC_MISSES           12'hB27     // Page walk cache misses
+`define VX_CSR_MPM_PWC_MISSES           12'hB27     // PWC1 misses (full walk from root)
 `define VX_CSR_MPM_PWC_MISSES_H         12'hBA7
+`define VX_CSR_MPM_PWC2_HITS            12'hB28     // PWC2 double-hits (both levels cached, SV39 only)
+`define VX_CSR_MPM_PWC2_HITS_H          12'hBA8
+`define VX_CSR_MPM_PWC2_MISSES          12'hB29     // PWC2 misses (PWC1 hit but PWC2 missed)
+`define VX_CSR_MPM_PWC2_MISSES_H        12'hBA9
 
 // <Add your own counters: use addresses hB03..B1F, hB83..hB9F>
 

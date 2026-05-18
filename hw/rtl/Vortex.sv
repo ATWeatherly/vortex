@@ -162,22 +162,22 @@ module Vortex import VX_gpu_pkg::*; (
     // Per-cluster PTW miss/fill wires
     wire [NUM_SOCKETS*`SOCKET_SIZE*2-1:0] per_cluster_ptw_miss_valid [`NUM_CLUSTERS];
     wire [NUM_SOCKETS*`SOCKET_SIZE*2-1:0] per_cluster_ptw_miss_ready [`NUM_CLUSTERS];
-    wire [31:0] per_cluster_ptw_miss_vaddr [`NUM_CLUSTERS][NUM_SOCKETS*`SOCKET_SIZE*2];
+    wire [`XLEN-1:0] per_cluster_ptw_miss_vaddr [`NUM_CLUSTERS][NUM_SOCKETS*`SOCKET_SIZE*2];
     wire [NUM_SOCKETS*`SOCKET_SIZE*2-1:0] per_cluster_ptw_fill_valid [`NUM_CLUSTERS];
     wire [NUM_SOCKETS*`SOCKET_SIZE*2-1:0] per_cluster_ptw_fill_ready [`NUM_CLUSTERS];
-    wire [31:0] per_cluster_ptw_fill_vaddr [`NUM_CLUSTERS][NUM_SOCKETS*`SOCKET_SIZE*2];
-    wire [31:0] per_cluster_ptw_fill_paddr [`NUM_CLUSTERS][NUM_SOCKETS*`SOCKET_SIZE*2];
-    wire [7:0]  per_cluster_ptw_fill_flags [`NUM_CLUSTERS][NUM_SOCKETS*`SOCKET_SIZE*2];
+    wire [`XLEN-1:0] per_cluster_ptw_fill_vaddr [`NUM_CLUSTERS][NUM_SOCKETS*`SOCKET_SIZE*2];
+    wire [`XLEN-1:0] per_cluster_ptw_fill_paddr [`NUM_CLUSTERS][NUM_SOCKETS*`SOCKET_SIZE*2];
+    wire [7:0]       per_cluster_ptw_fill_flags [`NUM_CLUSTERS][NUM_SOCKETS*`SOCKET_SIZE*2];
 
     // Flatten per-cluster miss/fill into global PTW arrays
     wire [TOTAL_PTW_REQS-1:0] ptw_miss_valid_all;
     wire [TOTAL_PTW_REQS-1:0] ptw_miss_ready_all;
-    wire [31:0] ptw_miss_vaddr_all [TOTAL_PTW_REQS];
+    wire [`XLEN-1:0] ptw_miss_vaddr_all [TOTAL_PTW_REQS];
     wire [TOTAL_PTW_REQS-1:0] ptw_fill_valid_all;
     wire [TOTAL_PTW_REQS-1:0] ptw_fill_ready_all;
-    wire [31:0] ptw_fill_vaddr_all [TOTAL_PTW_REQS];
-    wire [31:0] ptw_fill_paddr_all [TOTAL_PTW_REQS];
-    wire [7:0]  ptw_fill_flags_all [TOTAL_PTW_REQS];
+    wire [`XLEN-1:0] ptw_fill_vaddr_all [TOTAL_PTW_REQS];
+    wire [`XLEN-1:0] ptw_fill_paddr_all [TOTAL_PTW_REQS];
+    wire [7:0]       ptw_fill_flags_all [TOTAL_PTW_REQS];
 
     localparam CLUSTER_PTW_REQS = NUM_SOCKETS * `SOCKET_SIZE * 2;
 
@@ -201,10 +201,16 @@ module Vortex import VX_gpu_pkg::*; (
     ) ptw_mem_bus ();
 
     // SATP register: host writes via DCR bus before kernel launch
-    reg [31:0] device_satp;
+    reg [`XLEN-1:0] device_satp;
     always @(posedge clk) begin
-        if (dcr_bus_if.write_valid && dcr_bus_if.write_addr == `VX_DCR_BASE_SATP0)
-            device_satp <= dcr_bus_if.write_data;
+        if (dcr_bus_if.write_valid) begin
+            if (dcr_bus_if.write_addr == `VX_DCR_BASE_SATP0)
+                device_satp[31:0] <= dcr_bus_if.write_data;
+`ifdef XLEN_64
+            if (dcr_bus_if.write_addr == `VX_DCR_BASE_SATP1)
+                device_satp[63:32] <= dcr_bus_if.write_data;
+`endif
+        end
     end
 
     `RESET_RELAY (ptw_reset, reset);
@@ -213,6 +219,8 @@ module Vortex import VX_gpu_pkg::*; (
     wire [PERF_CTR_BITS-1:0] device_ptw_latency;
     wire [PERF_CTR_BITS-1:0] device_pwc_hits;
     wire [PERF_CTR_BITS-1:0] device_pwc_misses;
+    wire [PERF_CTR_BITS-1:0] device_pwc2_hits;
+    wire [PERF_CTR_BITS-1:0] device_pwc2_misses;
 `endif
 
     VX_mmu_ptw #(
@@ -235,9 +243,11 @@ module Vortex import VX_gpu_pkg::*; (
         .fill_flags (ptw_fill_flags_all),
         .ptw_mem_if (ptw_mem_bus)
     `ifdef PERF_ENABLE
-        ,.perf_ptw_latency (device_ptw_latency)
-        ,.perf_pwc_hits    (device_pwc_hits)
-        ,.perf_pwc_misses  (device_pwc_misses)
+        ,.perf_ptw_latency  (device_ptw_latency)
+        ,.perf_pwc_hits     (device_pwc_hits)
+        ,.perf_pwc_misses   (device_pwc_misses)
+        ,.perf_pwc2_hits    (device_pwc2_hits)
+        ,.perf_pwc2_misses  (device_pwc2_misses)
     `else
         ,`UNUSED_PIN (perf_ptw_latency_placeholder)
     `endif
@@ -288,6 +298,8 @@ module Vortex import VX_gpu_pkg::*; (
             .ptw_latency_in     (device_ptw_latency),
             .pwc_hits_in        (device_pwc_hits),
             .pwc_misses_in      (device_pwc_misses),
+            .pwc2_hits_in       (device_pwc2_hits),
+            .pwc2_misses_in     (device_pwc2_misses),
         `endif
         `endif
 

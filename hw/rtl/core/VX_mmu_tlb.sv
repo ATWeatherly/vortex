@@ -19,15 +19,15 @@ module VX_mmu_tlb import VX_gpu_pkg::*; #(
     VX_mem_bus_if.slave  tlb_in_if [NUM_REQS],
     VX_mem_bus_if.master tlb_out_if [NUM_REQS],
 
-    output wire          miss_valid,
-    input  wire          miss_ready,
-    output wire [31:0]   miss_vaddr,
+    output wire            miss_valid,
+    input  wire            miss_ready,
+    output wire [`XLEN-1:0] miss_vaddr,
 
-    input  wire          fill_valid,
-    output wire          fill_ready,
-    input  wire [31:0]   fill_vaddr,
-    input  wire [31:0]   fill_paddr,
-    input  wire [7:0]    fill_flags,
+    input  wire            fill_valid,
+    output wire            fill_ready,
+    input  wire [`XLEN-1:0] fill_vaddr,
+    input  wire [`XLEN-1:0] fill_paddr,
+    input  wire [7:0]       fill_flags,
 
 `ifdef PERF_ENABLE
     output mmu_perf_t    mmu_perf
@@ -98,9 +98,20 @@ module VX_mmu_tlb import VX_gpu_pkg::*; #(
     localparam TLB_SIZE       = 128;
     localparam TLB_INDEX_BITS = 7;
     localparam PAGE_OFFSET_BITS = 12 - `CLOG2(DATA_SIZE);
-    localparam VPN_WIDTH = 20;
-    localparam PPN_WIDTH = VPN_WIDTH;
-    localparam SUPERPAGE_OFFSET_BITS = 22 - `CLOG2(DATA_SIZE);
+`ifdef XLEN_32
+    // SV32: VPN = 20 bits (vpn[1]:vpn[0] = 10+10), 4MB superpage
+    localparam VPN_WIDTH            = 20;
+    localparam PPN_WIDTH            = `MEM_ADDR_WIDTH - 12; // 20 bits
+    localparam VPN_LEVEL_BITS       = 10;
+    localparam SUPERPAGE_OFFSET_BITS = 22 - `CLOG2(DATA_SIZE); // 4MB page offset
+`else
+    // SV39: VPN = 27 bits (vpn[2]:vpn[1]:vpn[0] = 9+9+9), 2MB/1GB superpages
+    localparam VPN_WIDTH            = 27;
+    localparam PPN_WIDTH            = `MEM_ADDR_WIDTH - 12; // 36 bits for MEM_ADDR_WIDTH=48
+    localparam VPN_LEVEL_BITS       = 9;
+    localparam SUPERPAGE_OFFSET_BITS = 21 - `CLOG2(DATA_SIZE); // 2MB page offset
+    localparam GIGAPAGE_OFFSET_BITS  = 30 - `CLOG2(DATA_SIZE); // 1GB page offset
+`endif
 
     typedef struct packed {
         logic                 valid;
@@ -124,7 +135,7 @@ module VX_mmu_tlb import VX_gpu_pkg::*; #(
 
     reg [REQ_DATAW_IN-1:0]   miss_buffer;
     reg [SOURCE_BITS-1:0]    miss_sel;
-    reg [31:0]               miss_fill_paddr;
+    reg [`XLEN-1:0]          miss_fill_paddr;
     reg miss_sent;
     reg [TLB_INDEX_BITS-1:0] victim_index;
 
@@ -135,7 +146,8 @@ module VX_mmu_tlb import VX_gpu_pkg::*; #(
     wire [REQ_DATAW_IN-1:0] lookup_data = use_miss_buffer ? miss_buffer : ser_req_data;
     wire [SOURCE_BITS-1:0]  lookup_sel  = use_miss_buffer ? miss_sel : ser_req_sel;
     wire [ADDR_WIDTH-1:0] lookup_addr = lookup_data[ADDR_LSB_IN +: ADDR_WIDTH];
-    wire [VPN_WIDTH-1:0] lookup_vpn = lookup_addr[ADDR_WIDTH-1:PAGE_OFFSET_BITS];
+    // Extract VPN_WIDTH bits starting at PAGE_OFFSET_BITS (equivalent to byte addr bits [VPN_WIDTH+11:12])
+    wire [VPN_WIDTH-1:0] lookup_vpn = lookup_addr[VPN_WIDTH + PAGE_OFFSET_BITS - 1 : PAGE_OFFSET_BITS];
     wire [TAG_WIDTH_IN-1:0] lookup_tag = lookup_data[TAG_WIDTH_IN-1:0];
     wire [TAG_WIDTH_OUT-1:0] lookup_tag_encoded;
 
@@ -155,14 +167,26 @@ module VX_mmu_tlb import VX_gpu_pkg::*; #(
     };
 
     // CAM Lookup
+`ifdef XLEN_32
+    // SV32: level 0=4KB, level 1=4MB superpage, level 2=BARE bypass
     function automatic [VPN_WIDTH-1:0] vpn_mask(input [1:0] level);
         case (level)
-            2'd0:    vpn_mask = 20'hFFFFF;
-            2'd1:    vpn_mask = 20'hFFC00;
-            2'd2:    vpn_mask = 20'h00000;
-            default: vpn_mask = 20'hFFFFF;
+            2'd0:    return 20'hFFFFF;  // 4KB: all 20 VPN bits
+            2'd1:    return 20'hFFC00;  // 4MB: only vpn[1] (top 10 bits)
+            default: return 20'h00000;  // BARE / unused
         endcase
     endfunction
+`else
+    // SV39: level 0=4KB, level 1=2MB, level 2=1GB
+    function automatic [VPN_WIDTH-1:0] vpn_mask(input [1:0] level);
+        case (level)
+            2'd0:    return 27'h7FFFFFF;  // 4KB: all 27 VPN bits
+            2'd1:    return 27'h7FFFE00;  // 2MB: vpn[2]:vpn[1] (top 18 bits)
+            2'd2:    return 27'h7FC0000;  // 1GB: vpn[2] only (top 9 bits)
+            default: return 27'h0000000;
+        endcase
+    endfunction
+`endif
 
     wire [TLB_SIZE-1:0] cam_hit;
     for (genvar i = 0; i < TLB_SIZE; i++) begin : g_cam
@@ -215,15 +239,26 @@ module VX_mmu_tlb import VX_gpu_pkg::*; #(
 
     reg [ADDR_WIDTH-1:0] cam_translated_addr;
     always_comb begin
+`ifdef XLEN_32
+        // SV32: level 0=4KB, level 1=4MB superpage
         case (hit_level)
             2'd0:    cam_translated_addr = {hit_ppn, lookup_addr[PAGE_OFFSET_BITS-1:0]};
-            2'd1:    cam_translated_addr = {hit_ppn[VPN_WIDTH-1:10], lookup_addr[SUPERPAGE_OFFSET_BITS-1:0]};
-            2'd2:    cam_translated_addr = lookup_addr;
-            default: cam_translated_addr = {hit_ppn, lookup_addr[PAGE_OFFSET_BITS-1:0]};
+            2'd1:    cam_translated_addr = {hit_ppn[PPN_WIDTH-1:VPN_LEVEL_BITS], lookup_addr[SUPERPAGE_OFFSET_BITS-1:0]};
+            default: cam_translated_addr = lookup_addr;
         endcase
+`else
+        // SV39: level 0=4KB, level 1=2MB, level 2=1GB
+        case (hit_level)
+            2'd0:    cam_translated_addr = {hit_ppn, lookup_addr[PAGE_OFFSET_BITS-1:0]};
+            2'd1:    cam_translated_addr = {hit_ppn[PPN_WIDTH-1:VPN_LEVEL_BITS], lookup_addr[SUPERPAGE_OFFSET_BITS-1:0]};
+            2'd2:    cam_translated_addr = {hit_ppn[PPN_WIDTH-1:2*VPN_LEVEL_BITS], lookup_addr[GIGAPAGE_OFFSET_BITS-1:0]};
+            default: cam_translated_addr = lookup_addr;
+        endcase
+`endif
     end
 
-    wire [ADDR_WIDTH-1:0] replay_paddr = {miss_fill_paddr[31:12], lookup_addr[PAGE_OFFSET_BITS-1:0]};
+    // PPN is in fill_paddr[MEM_ADDR_WIDTH-1:12]; combine with sub-page offset from request
+    wire [ADDR_WIDTH-1:0] replay_paddr = {miss_fill_paddr[`MEM_ADDR_WIDTH-1:12], lookup_addr[PAGE_OFFSET_BITS-1:0]};
     wire [ADDR_WIDTH-1:0] translated_addr = use_miss_buffer ? replay_paddr : cam_translated_addr;
 
     // State Machine
@@ -278,8 +313,8 @@ module VX_mmu_tlb import VX_gpu_pkg::*; #(
                         tlb_entries[victim_index].valid      <= 1'b1;
                         tlb_entries[victim_index].mru        <= 1'b1;
                         tlb_entries[victim_index].page_level <= 2'd0;
-                        tlb_entries[victim_index].vpn        <= fill_vaddr[31:12];
-                        tlb_entries[victim_index].ppn        <= fill_paddr[31:12];
+                        tlb_entries[victim_index].vpn        <= fill_vaddr[VPN_WIDTH+11:12];
+                        tlb_entries[victim_index].ppn        <= fill_paddr[`MEM_ADDR_WIDTH-1:12];
                         tlb_entries[victim_index].flags      <= fill_flags;
 
                         if (all_mru) begin
@@ -453,10 +488,12 @@ module VX_mmu_tlb import VX_gpu_pkg::*; #(
     // =========================================================================
 
     wire [ADDR_WIDTH-1:0] miss_buffer_addr = miss_buffer[ADDR_LSB_IN +: ADDR_WIDTH];
-    wire [VPN_WIDTH-1:0] miss_buffer_vpn = miss_buffer_addr[ADDR_WIDTH-1:PAGE_OFFSET_BITS];
+    // Extract VPN from the buffered miss address (same width arithmetic as lookup_vpn above)
+    wire [VPN_WIDTH-1:0] miss_buffer_vpn = miss_buffer_addr[VPN_WIDTH + PAGE_OFFSET_BITS - 1 : PAGE_OFFSET_BITS];
 
     assign miss_valid = (state == TLB_PTW_WAIT) && !miss_sent;
-    assign miss_vaddr = {miss_buffer_vpn, 12'b0};
+    // Reconstruct full virtual address: zero-extend VPN into XLEN, page-align
+    assign miss_vaddr = `XLEN'({miss_buffer_vpn, {12{1'b0}}});
     assign fill_ready = (state == TLB_PTW_WAIT) && miss_sent;
 
     // =========================================================================
@@ -500,6 +537,8 @@ module VX_mmu_tlb import VX_gpu_pkg::*; #(
     assign mmu_perf.ptw_latency   = '0; // overridden in VX_core with ptw_latency_in from socket PTW
     assign mmu_perf.pwc_hits      = '0; // overridden in VX_core with pwc_hits_in from socket PTW
     assign mmu_perf.pwc_misses    = '0; // overridden in VX_core with pwc_misses_in from socket PTW
+    assign mmu_perf.pwc2_hits     = '0; // overridden in VX_core with pwc2_hits_in from socket PTW
+    assign mmu_perf.pwc2_misses   = '0; // overridden in VX_core with pwc2_misses_in from socket PTW
 `else
     assign mmu_perf_placeholder = 1'b0;
 `endif

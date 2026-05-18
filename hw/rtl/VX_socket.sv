@@ -41,13 +41,13 @@ module VX_socket import VX_gpu_pkg::*; #(
 `ifdef VM_ENABLE
     // PTW miss requests from all TLBs — routed up to device-level shared PTW
     output wire [`SOCKET_SIZE*2-1:0] ptw_miss_valid,
-    output wire [31:0]               ptw_miss_vaddr [`SOCKET_SIZE*2],
+    output wire [`XLEN-1:0]          ptw_miss_vaddr [`SOCKET_SIZE*2],
     input  wire [`SOCKET_SIZE*2-1:0] ptw_miss_ready,
     // PTW fill responses coming back down from device-level shared PTW
     input  wire [`SOCKET_SIZE*2-1:0] ptw_fill_valid,
     output wire [`SOCKET_SIZE*2-1:0] ptw_fill_ready,
-    input  wire [31:0]               ptw_fill_vaddr [`SOCKET_SIZE*2],
-    input  wire [31:0]               ptw_fill_paddr [`SOCKET_SIZE*2],
+    input  wire [`XLEN-1:0]          ptw_fill_vaddr [`SOCKET_SIZE*2],
+    input  wire [`XLEN-1:0]          ptw_fill_paddr [`SOCKET_SIZE*2],
     input  wire [7:0]                ptw_fill_flags [`SOCKET_SIZE*2],
 `endif
 
@@ -57,6 +57,8 @@ module VX_socket import VX_gpu_pkg::*; #(
     input wire [PERF_CTR_BITS-1:0]  ptw_latency_in,
     input wire [PERF_CTR_BITS-1:0]  pwc_hits_in,
     input wire [PERF_CTR_BITS-1:0]  pwc_misses_in,
+    input wire [PERF_CTR_BITS-1:0]  pwc2_hits_in,
+    input wire [PERF_CTR_BITS-1:0]  pwc2_misses_in,
 `endif
 `endif
 
@@ -258,9 +260,11 @@ module VX_socket import VX_gpu_pkg::*; #(
         `ifdef PERF_ENABLE
             .sysmem_perf    (sysmem_perf_tmp),
         `ifdef VM_ENABLE
-            .ptw_latency_in (ptw_latency_in),
-            .pwc_hits_in    (pwc_hits_in),
-            .pwc_misses_in  (pwc_misses_in),
+            .ptw_latency_in  (ptw_latency_in),
+            .pwc_hits_in     (pwc_hits_in),
+            .pwc_misses_in   (pwc_misses_in),
+            .pwc2_hits_in    (pwc2_hits_in),
+            .pwc2_misses_in  (pwc2_misses_in),
         `endif
         `endif
 
@@ -308,23 +312,23 @@ module VX_socket import VX_gpu_pkg::*; #(
     ///////////////////////////////////////////////////////////////////////////
 
     // One bit/value per core, for dTLB
-    wire [`SOCKET_SIZE-1:0] per_core_dtlb_ptw_req_valid;
-    wire [`SOCKET_SIZE-1:0] per_core_dtlb_ptw_req_ready;
-    wire [31:0]              per_core_dtlb_ptw_req_vaddr [`SOCKET_SIZE];
-    wire [`SOCKET_SIZE-1:0] per_core_dtlb_ptw_rsp_valid;
-    wire [`SOCKET_SIZE-1:0] per_core_dtlb_ptw_rsp_ready;
-    wire [31:0]              per_core_dtlb_ptw_rsp_vaddr [`SOCKET_SIZE];
-    wire [31:0]              per_core_dtlb_ptw_rsp_paddr [`SOCKET_SIZE];
+    wire [`SOCKET_SIZE-1:0]  per_core_dtlb_ptw_req_valid;
+    wire [`SOCKET_SIZE-1:0]  per_core_dtlb_ptw_req_ready;
+    wire [`XLEN-1:0]         per_core_dtlb_ptw_req_vaddr [`SOCKET_SIZE];
+    wire [`SOCKET_SIZE-1:0]  per_core_dtlb_ptw_rsp_valid;
+    wire [`SOCKET_SIZE-1:0]  per_core_dtlb_ptw_rsp_ready;
+    wire [`XLEN-1:0]         per_core_dtlb_ptw_rsp_vaddr [`SOCKET_SIZE];
+    wire [`XLEN-1:0]         per_core_dtlb_ptw_rsp_paddr [`SOCKET_SIZE];
     wire [7:0]               per_core_dtlb_ptw_rsp_flags [`SOCKET_SIZE];
 
     // One bit/value per core, for iTLB
-    wire [`SOCKET_SIZE-1:0] per_core_itlb_ptw_req_valid;
-    wire [`SOCKET_SIZE-1:0] per_core_itlb_ptw_req_ready;
-    wire [31:0]              per_core_itlb_ptw_req_vaddr [`SOCKET_SIZE];
-    wire [`SOCKET_SIZE-1:0] per_core_itlb_ptw_rsp_valid;
-    wire [`SOCKET_SIZE-1:0] per_core_itlb_ptw_rsp_ready;
-    wire [31:0]              per_core_itlb_ptw_rsp_vaddr [`SOCKET_SIZE];
-    wire [31:0]              per_core_itlb_ptw_rsp_paddr [`SOCKET_SIZE];
+    wire [`SOCKET_SIZE-1:0]  per_core_itlb_ptw_req_valid;
+    wire [`SOCKET_SIZE-1:0]  per_core_itlb_ptw_req_ready;
+    wire [`XLEN-1:0]         per_core_itlb_ptw_req_vaddr [`SOCKET_SIZE];
+    wire [`SOCKET_SIZE-1:0]  per_core_itlb_ptw_rsp_valid;
+    wire [`SOCKET_SIZE-1:0]  per_core_itlb_ptw_rsp_ready;
+    wire [`XLEN-1:0]         per_core_itlb_ptw_rsp_vaddr [`SOCKET_SIZE];
+    wire [`XLEN-1:0]         per_core_itlb_ptw_rsp_paddr [`SOCKET_SIZE];
     wire [7:0]               per_core_itlb_ptw_rsp_flags [`SOCKET_SIZE];
 
     // Connect per-core dTLB/iTLB miss/fill wires to socket-level PTW ports.

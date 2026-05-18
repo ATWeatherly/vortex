@@ -1,16 +1,16 @@
 // Copyright 2024
 // PWC: Page Walk Cache (HPCA14 Design 3)
-// Caches non-leaf (L1) PTEs to eliminate the first memory fetch on a PTW walk.
-// Direct-mapped, physical-address indexed (AMD-style per HPCA14 §4.3).
+// Generic direct-mapped cache for non-leaf PTW intermediate entries.
+// Key = (parent_ppn [tag], child_vpn [index]); Value = child node PPN.
 //
-// For SV32 there is exactly one non-leaf level (L1). The key is the L1 PTE
-// physical address: {satp_ppn, 12'b0} + {vpn1, 2'b0}.  Since vpn1 is the
-// only varying part within a given page table root, vpn1 is the index and
-// satp_ppn is the tag.  This gives 1024 entries × (1+20+20) bits ≈ 5 KB,
-// consistent with the paper's 8 KB target.
+// SV32: one instance caches the L1→L0 pointer (vpn[1] index, satp_ppn tag).
+//   1024 entries × (1+20+20) bits ≈ 5 KB.
+// SV39: two instances — one for L2→L1 (vpn[2] index, satp_ppn tag) and one
+//   for L1→L0 (vpn[1] index, L2_ppn tag). Each 512 entries × (1+36+36) bits.
+//   A double hit reduces a 3-fetch walk to 1 fetch.
 //
 // Lookup is combinatorial (zero-cycle hit path).
-// Fill is registered (one cycle after L1 memory response).
+// Fill is registered (one cycle after the corresponding memory response).
 // The cache is fully invalidated on reset; no explicit flush port is needed
 // because SATP is constant for the lifetime of a kernel execution.
 

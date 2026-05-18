@@ -39,13 +39,13 @@ module VX_cluster import VX_gpu_pkg::*; #(
 `ifdef VM_ENABLE
     // PTW miss requests from all sockets — routed up to device-level shared PTW
     , output wire [NUM_SOCKETS*`SOCKET_SIZE*2-1:0] ptw_miss_valid
-    , output wire [31:0]                            ptw_miss_vaddr [NUM_SOCKETS*`SOCKET_SIZE*2]
+    , output wire [`XLEN-1:0]                       ptw_miss_vaddr [NUM_SOCKETS*`SOCKET_SIZE*2]
     , input  wire [NUM_SOCKETS*`SOCKET_SIZE*2-1:0] ptw_miss_ready
     // PTW fill responses coming back down from device-level shared PTW
     , input  wire [NUM_SOCKETS*`SOCKET_SIZE*2-1:0] ptw_fill_valid
     , output wire [NUM_SOCKETS*`SOCKET_SIZE*2-1:0] ptw_fill_ready
-    , input  wire [31:0]                            ptw_fill_vaddr [NUM_SOCKETS*`SOCKET_SIZE*2]
-    , input  wire [31:0]                            ptw_fill_paddr [NUM_SOCKETS*`SOCKET_SIZE*2]
+    , input  wire [`XLEN-1:0]                       ptw_fill_vaddr [NUM_SOCKETS*`SOCKET_SIZE*2]
+    , input  wire [`XLEN-1:0]                       ptw_fill_paddr [NUM_SOCKETS*`SOCKET_SIZE*2]
     , input  wire [7:0]                             ptw_fill_flags [NUM_SOCKETS*`SOCKET_SIZE*2]
 `endif
 
@@ -55,6 +55,8 @@ module VX_cluster import VX_gpu_pkg::*; #(
     , input wire [PERF_CTR_BITS-1:0]  ptw_latency_in
     , input wire [PERF_CTR_BITS-1:0]  pwc_hits_in
     , input wire [PERF_CTR_BITS-1:0]  pwc_misses_in
+    , input wire [PERF_CTR_BITS-1:0]  pwc2_hits_in
+    , input wire [PERF_CTR_BITS-1:0]  pwc2_misses_in
 `endif
 `endif
 );
@@ -146,12 +148,12 @@ module VX_cluster import VX_gpu_pkg::*; #(
 
     wire [SOCKET_PTW_REQS-1:0]  per_socket_ptw_miss_valid [NUM_SOCKETS];
     wire [SOCKET_PTW_REQS-1:0]  per_socket_ptw_miss_ready [NUM_SOCKETS];
-    wire [31:0]                      per_socket_ptw_miss_vaddr [NUM_SOCKETS][SOCKET_PTW_REQS];
+    wire [`XLEN-1:0]             per_socket_ptw_miss_vaddr [NUM_SOCKETS][SOCKET_PTW_REQS];
     wire [SOCKET_PTW_REQS-1:0]  per_socket_ptw_fill_valid [NUM_SOCKETS];
     wire [SOCKET_PTW_REQS-1:0]  per_socket_ptw_fill_ready [NUM_SOCKETS];
-    wire [31:0]                      per_socket_ptw_fill_vaddr [NUM_SOCKETS][SOCKET_PTW_REQS];
-    wire [31:0]                      per_socket_ptw_fill_paddr [NUM_SOCKETS][SOCKET_PTW_REQS];
-    wire [7:0]                       per_socket_ptw_fill_flags [NUM_SOCKETS][SOCKET_PTW_REQS];
+    wire [`XLEN-1:0]             per_socket_ptw_fill_vaddr [NUM_SOCKETS][SOCKET_PTW_REQS];
+    wire [`XLEN-1:0]             per_socket_ptw_fill_paddr [NUM_SOCKETS][SOCKET_PTW_REQS];
+    wire [7:0]                   per_socket_ptw_fill_flags [NUM_SOCKETS][SOCKET_PTW_REQS];
 
 `endif // VM_ENABLE
 
@@ -198,9 +200,11 @@ module VX_cluster import VX_gpu_pkg::*; #(
 
         `ifdef PERF_ENABLE
         `ifdef VM_ENABLE
-            .ptw_latency_in (ptw_latency_in),
-            .pwc_hits_in    (pwc_hits_in),
-            .pwc_misses_in  (pwc_misses_in),
+            .ptw_latency_in  (ptw_latency_in),
+            .pwc_hits_in     (pwc_hits_in),
+            .pwc_misses_in   (pwc_misses_in),
+            .pwc2_hits_in    (pwc2_hits_in),
+            .pwc2_misses_in  (pwc2_misses_in),
         `endif
         `endif
 

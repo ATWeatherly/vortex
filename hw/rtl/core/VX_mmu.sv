@@ -18,21 +18,21 @@ module VX_mmu import VX_gpu_pkg::*; #(
     input wire clk,
     input wire reset,
 
-    input wire [31:0] satp,
+    input wire [`XLEN-1:0] satp,
 
     VX_mem_bus_if.slave  lsu_mem_if [NUM_REQS],
     VX_mem_bus_if.master dcache_mem_if [NUM_REQS],
 
     // PTW miss/fill interface (shared PTW lives at socket level)
-    output wire        ptw_req_valid,
-    input  wire        ptw_req_ready,
-    output wire [31:0] ptw_req_vaddr,
+    output wire          ptw_req_valid,
+    input  wire          ptw_req_ready,
+    output wire [`XLEN-1:0] ptw_req_vaddr,
 
-    input  wire        ptw_rsp_valid,
-    output wire        ptw_rsp_ready,
-    input  wire [31:0] ptw_rsp_vaddr,
-    input  wire [31:0] ptw_rsp_paddr,
-    input  wire [7:0]  ptw_rsp_flags,
+    input  wire          ptw_rsp_valid,
+    output wire          ptw_rsp_ready,
+    input  wire [`XLEN-1:0] ptw_rsp_vaddr,
+    input  wire [`XLEN-1:0] ptw_rsp_paddr,
+    input  wire [7:0]    ptw_rsp_flags,
 
 `ifdef PERF_ENABLE
     output mmu_perf_t    mmu_perf
@@ -45,13 +45,17 @@ module VX_mmu import VX_gpu_pkg::*; #(
     // Bypass Control
     // =========================================================================
 
-    localparam [31:0] IO_REGION_END   = 32'h00010000;
-    localparam [31:0] STARTUP_ADDR    = 32'h80000000;
-    localparam [31:0] STARTUP_END     = 32'h80040000;
-    localparam [31:0] PT_BASE_ADDR    = 32'hF0000000;
+    localparam [`XLEN-1:0] IO_REGION_END = `XLEN'h00010000;
+    localparam [`XLEN-1:0] STARTUP_ADDR  = `XLEN'h80000000;
+    localparam [`XLEN-1:0] STARTUP_END   = `XLEN'h80040000;
+    localparam [`XLEN-1:0] PT_BASE_ADDR  = `XLEN'hF0000000;
 
-    function automatic logic needs_translation(input logic [31:0] full_addr);
-        if (!satp[31]) return 1'b0;  // BARE mode
+    function automatic logic needs_translation(input logic [`XLEN-1:0] full_addr);
+`ifdef XLEN_32
+        if (!satp[31]) return 1'b0;            // SV32 BARE: mode bit = satp[31]
+`else
+        if (satp[63:60] == 4'b0) return 1'b0;  // SV39 BARE: mode field = satp[63:60]
+`endif
         if (full_addr < IO_REGION_END) return 1'b0;
         if (full_addr >= STARTUP_ADDR && full_addr <= STARTUP_END) return 1'b0;
         if (full_addr >= PT_BASE_ADDR) return 1'b0;
@@ -119,7 +123,7 @@ module VX_mmu import VX_gpu_pkg::*; #(
 
     for (genvar i = 0; i < NUM_REQS; i++) begin : g_elastic_buffers
 
-        wire [31:0] full_addr_ebuf = {lsu_mem_if[i].req_data.addr, {`CLOG2(DATA_SIZE){1'b0}}};
+        wire [`XLEN-1:0] full_addr_ebuf = `XLEN'({lsu_mem_if[i].req_data.addr, {`CLOG2(DATA_SIZE){1'b0}}});
         assign lane_needs_trans_ebuf[i] = needs_translation(full_addr_ebuf);
 
         wire [REQ_DATAW-1:0] req_data_in_packed;
@@ -225,7 +229,7 @@ module VX_mmu import VX_gpu_pkg::*; #(
     wire [NUM_REQS-1:0] lane_bypass;
 
     for (genvar i = 0; i < NUM_REQS; i++) begin : g_bypass_path
-        wire [31:0] full_addr = {lsu_mem_if[i].req_data.addr, {`CLOG2(DATA_SIZE){1'b0}}};
+        wire [`XLEN-1:0] full_addr = `XLEN'({lsu_mem_if[i].req_data.addr, {`CLOG2(DATA_SIZE){1'b0}}});
 
         assign lane_needs_trans[i] = needs_translation(full_addr);
         assign lane_bypass[i] = ~lane_needs_trans[i];
@@ -373,6 +377,8 @@ module VX_mmu import VX_gpu_pkg::*; #(
     assign mmu_perf.ptw_latency   = '0; // overridden in VX_core with ptw_latency_in from socket PTW
     assign mmu_perf.pwc_hits      = '0; // overridden in VX_core with pwc_hits_in from socket PTW
     assign mmu_perf.pwc_misses    = '0; // overridden in VX_core with pwc_misses_in from socket PTW
+    assign mmu_perf.pwc2_hits     = '0; // overridden in VX_core with pwc2_hits_in from socket PTW
+    assign mmu_perf.pwc2_misses   = '0; // overridden in VX_core with pwc2_misses_in from socket PTW
 `else
     assign mmu_perf_placeholder = 1'b0;
 `endif

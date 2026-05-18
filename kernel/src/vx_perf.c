@@ -32,7 +32,7 @@ extern "C" {
 
 void vx_perf_dump() {
     int core_id = vx_core_id();
-    // 96 uint32_t = 48 uint64_t counters per core (offsets 0-39 used; VM counters at B20-B27)
+    // 96 uint32_t = 48 uint64_t counters per core (offsets 0-41 used; VM counters at B20-B29)
     uint32_t * const csr_mem = (uint32_t*)(IO_MPM_ADDR + 96 * sizeof(uint32_t) * core_id);
     DUMP_CSRS(0);
     //DUMP_CSRS(1); reserved for exitcode
@@ -76,6 +76,8 @@ void vx_perf_dump() {
     DUMP_CSRS(37);  // VX_CSR_MPM_PTW_LATENCY
     DUMP_CSRS(38);  // VX_CSR_MPM_PWC_HITS
     DUMP_CSRS(39);  // VX_CSR_MPM_PWC_MISSES
+    DUMP_CSRS(40);  // VX_CSR_MPM_PWC2_HITS
+    DUMP_CSRS(41);  // VX_CSR_MPM_PWC2_MISSES
 #endif
 }
 

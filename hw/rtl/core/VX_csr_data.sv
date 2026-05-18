@@ -210,9 +210,9 @@ import VX_fpu_pkg::*;
 
             default: begin
                 read_addr_valid_w = 0;
-                // Range covers 32 base counters + 6 VM counters (B20-B25: TLB hits/misses, PTW latency per MMU)
-                if ((read_addr >= `VX_CSR_MPM_USER   && read_addr < (`VX_CSR_MPM_USER + 38))
-                 || (read_addr >= `VX_CSR_MPM_USER_H && read_addr < (`VX_CSR_MPM_USER_H + 38))) begin
+                // Range covers 32 base counters + 10 VM counters (B20-B29: TLB, PTW, PWC1, PWC2)
+                if ((read_addr >= `VX_CSR_MPM_USER   && read_addr < (`VX_CSR_MPM_USER + 39))
+                 || (read_addr >= `VX_CSR_MPM_USER_H && read_addr < (`VX_CSR_MPM_USER_H + 39))) begin
                     read_addr_valid_w = 1;
                 `ifdef PERF_ENABLE
                     case (base_dcrs.mpm_class)
@@ -291,6 +291,8 @@ import VX_fpu_pkg::*;
                         `CSR_READ_64(`VX_CSR_MPM_PTW_LATENCY, read_data_ro_w, mmu_perf.ptw_latency);
                         `CSR_READ_64(`VX_CSR_MPM_PWC_HITS, read_data_ro_w, mmu_perf.pwc_hits);
                         `CSR_READ_64(`VX_CSR_MPM_PWC_MISSES, read_data_ro_w, mmu_perf.pwc_misses);
+                        `CSR_READ_64(`VX_CSR_MPM_PWC2_HITS, read_data_ro_w, mmu_perf.pwc2_hits);
+                        `CSR_READ_64(`VX_CSR_MPM_PWC2_MISSES, read_data_ro_w, mmu_perf.pwc2_misses);
                     `endif
                         default:;
                         endcase

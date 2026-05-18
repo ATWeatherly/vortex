@@ -1,7 +1,7 @@
 // Copyright 2024
-// PTW: SV32 multi-threaded shared page table walker (HPCA14 Design 3)
-// Supports PTW_SIZE concurrent walks from NUM_REQUESTORS TLBs.
-// Single central FSM updates all slot state; slots share one memory port.
+// PTW: Generic N-level shared page table walker (HPCA14 Design 3)
+// Supports PTW_SIZE concurrent walks. Handles 2-level (SV32) and 3-level (SV39).
+// Single central FSM; slot level counter drives generic walk without mode-specific states.
 
 `include "VX_define.vh"
 /* verilator lint_off UNUSEDSIGNAL */
@@ -18,19 +18,19 @@ module VX_mmu_ptw import VX_gpu_pkg::*; #(
     input wire clk,
     input wire reset,
 
-    input wire [31:0] satp,
+    input wire [`XLEN-1:0] satp,
 
     // Miss request inputs (one per requestor TLB)
-    input  wire [NUM_REQUESTORS-1:0]        miss_valid,
-    output wire [NUM_REQUESTORS-1:0]        miss_ready,
-    input  wire [31:0]                      miss_vaddr [NUM_REQUESTORS],
+    input  wire [NUM_REQUESTORS-1:0]  miss_valid,
+    output wire [NUM_REQUESTORS-1:0]  miss_ready,
+    input  wire [`XLEN-1:0]           miss_vaddr [NUM_REQUESTORS],
 
     // Fill response outputs (one per requestor TLB)
-    output wire [NUM_REQUESTORS-1:0]        fill_valid,
-    input  wire [NUM_REQUESTORS-1:0]        fill_ready,
-    output wire [31:0]                      fill_vaddr [NUM_REQUESTORS],
-    output wire [31:0]                      fill_paddr [NUM_REQUESTORS],
-    output wire [7:0]                       fill_flags [NUM_REQUESTORS],
+    output wire [NUM_REQUESTORS-1:0]  fill_valid,
+    input  wire [NUM_REQUESTORS-1:0]  fill_ready,
+    output wire [`XLEN-1:0]           fill_vaddr [NUM_REQUESTORS],
+    output wire [`XLEN-1:0]           fill_paddr [NUM_REQUESTORS],
+    output wire [7:0]                 fill_flags [NUM_REQUESTORS],
 
     // Shared memory port for page table reads
     VX_mem_bus_if.master ptw_mem_if,
@@ -38,49 +38,57 @@ module VX_mmu_ptw import VX_gpu_pkg::*; #(
 `ifdef PERF_ENABLE
     output wire [PERF_CTR_BITS-1:0] perf_ptw_latency,
     output wire [PERF_CTR_BITS-1:0] perf_pwc_hits,
-    output wire [PERF_CTR_BITS-1:0] perf_pwc_misses
+    output wire [PERF_CTR_BITS-1:0] perf_pwc_misses,
+    output wire [PERF_CTR_BITS-1:0] perf_pwc2_hits,
+    output wire [PERF_CTR_BITS-1:0] perf_pwc2_misses
 `else
     output wire perf_ptw_latency_placeholder
 `endif
 );
 
-    localparam DATA_WIDTH       = DATA_SIZE * 8;
-    localparam SLOT_BITS        = `CLOG2(PTW_SIZE);
-    localparam REQ_BITS         = `UP(`CLOG2(NUM_REQUESTORS));
+    localparam DATA_WIDTH     = DATA_SIZE * 8;
+    localparam SLOT_BITS      = `CLOG2(PTW_SIZE);
+    localparam REQ_BITS       = `UP(`CLOG2(NUM_REQUESTORS));
+    localparam ADDR_SHIFT     = `CLOG2(DATA_SIZE);
 
-    // SV32 constants
-    localparam VPN_WIDTH        = 20;
-    localparam PPN_WIDTH        = VPN_WIDTH;
-    localparam PAGE_OFFSET_BITS = 12;
-    localparam VPN_LEVEL_BITS   = 10;
-    localparam PTE_SHIFT        = 2;  // log2(4 bytes per PTE)
-    localparam ADDR_SHIFT       = `CLOG2(DATA_SIZE);
-    localparam NUM_WORDS        = DATA_SIZE / 4;
-    localparam SEL_BITS         = `CLOG2(NUM_WORDS);
+    // Address-mode constants derived from VX_config.vh defines
+    localparam PPN_WIDTH      = `MEM_ADDR_WIDTH - `MEM_PAGE_LOG2_SIZE; // 20 (SV32) or 36 (SV39)
+    localparam PT_LEVELS      = `PT_LEVEL;                              // 2 (SV32) or 3 (SV39)
+    localparam LEVEL_BITS     = `CLOG2(PT_LEVELS + 1);
+    localparam VPN_LEVEL_BITS = (PT_LEVELS == 3) ? 9 : 10;             // 9 (SV39) or 10 (SV32)
+    localparam PTE_SHIFT      = `CLOG2(`PTE_SIZE);                     // 2 (SV32) or 3 (SV39)
+    localparam PTE_DATA_BITS  = `PTE_SIZE * 8;                         // 32 (SV32) or 64 (SV39)
+    localparam PAGE_OFFSET    = `MEM_PAGE_LOG2_SIZE;                   // 12
+    localparam NUM_PTES       = DATA_SIZE / `PTE_SIZE;                 // PTEs per cache line
+    localparam SEL_BITS       = `CLOG2(NUM_PTES);
+    localparam PTE_ADDR_PAD   = `MEM_ADDR_WIDTH - VPN_LEVEL_BITS - PTE_SHIFT; // zero-pad in PTE addr
+
+    // PWC caches the top-level (level PT_LEVELS-1) PTE, keyed by vpn[PT_LEVELS-1]
+    localparam PWC_VPN_BITS   = VPN_LEVEL_BITS;
+    localparam PWC_ENTRIES    = 1 << PWC_VPN_BITS;
 
     // =========================================================================
-    // Per-slot state registers
+    // Per-slot state
     // =========================================================================
 
-    typedef enum logic [2:0] {
-        PTW_IDLE    = 3'd0,
-        PTW_L1_REQ  = 3'd1,
-        PTW_L1_RESP = 3'd2,
-        PTW_L0_REQ  = 3'd3,
-        PTW_L0_RESP = 3'd4,
-        PTW_FILL    = 3'd5
+    typedef enum logic [1:0] {
+        PTW_IDLE     = 2'd0,
+        PTW_MEM_REQ  = 2'd1,
+        PTW_MEM_RESP = 2'd2,
+        PTW_FILL     = 2'd3
     } ptw_state_t;
 
-    ptw_state_t         slot_state      [PTW_SIZE];
-    reg [31:0]          slot_vaddr      [PTW_SIZE];
-    reg [PPN_WIDTH-1:0] slot_l1_ppn     [PTW_SIZE];
-    reg [PPN_WIDTH-1:0] slot_ppn        [PTW_SIZE];
-    reg [7:0]           slot_flags      [PTW_SIZE];
-    reg [31:0]          slot_pte_addr_r [PTW_SIZE];
-    reg [REQ_BITS-1:0]  slot_src        [PTW_SIZE];  // which requestor owns this slot
+    ptw_state_t               slot_state      [PTW_SIZE];
+    reg [`XLEN-1:0]           slot_vaddr      [PTW_SIZE];
+    reg [PPN_WIDTH-1:0]       slot_cur_ppn    [PTW_SIZE]; // base PPN for current level
+    reg [LEVEL_BITS-1:0]      slot_level      [PTW_SIZE]; // current level (PT_LEVELS-1 → 0)
+    reg [PPN_WIDTH-1:0]       slot_ppn        [PTW_SIZE]; // leaf PPN captured at level 0
+    reg [7:0]                 slot_flags      [PTW_SIZE];
+    reg [`MEM_ADDR_WIDTH-1:0] slot_pte_addr_r [PTW_SIZE]; // byte addr of pending PTE fetch
+    reg [REQ_BITS-1:0]        slot_src        [PTW_SIZE]; // which requestor owns this slot
 
     // =========================================================================
-    // Miss arbitration: rotating priority among requestors, assign to free slot
+    // Miss arbitration: rotating priority, assign to lowest free slot
     // =========================================================================
 
     wire [PTW_SIZE-1:0] slot_idle;
@@ -89,7 +97,6 @@ module VX_mmu_ptw import VX_gpu_pkg::*; #(
     end
     wire any_slot_free = |slot_idle;
 
-    // Priority-encode lowest free slot (last writer wins = highest index wins)
     reg [SLOT_BITS-1:0] free_slot;
     always_comb begin
         free_slot = '0;
@@ -98,7 +105,6 @@ module VX_mmu_ptw import VX_gpu_pkg::*; #(
         end
     end
 
-    // Rotating priority miss selection
     reg [REQ_BITS-1:0] miss_rr_base;
     reg [REQ_BITS-1:0] selected_req;
     reg                miss_grant;
@@ -121,13 +127,12 @@ module VX_mmu_ptw import VX_gpu_pkg::*; #(
     end
 
     // =========================================================================
-    // Memory request arbitration: rotating priority among slots wanting mem
+    // Memory request arbitration: rotating priority among slots in MEM_REQ
     // =========================================================================
 
     wire [PTW_SIZE-1:0] slot_wants_mem;
     for (genvar s = 0; s < PTW_SIZE; s++) begin : g_wants_mem
-        assign slot_wants_mem[s] = (slot_state[s] == PTW_L1_REQ) ||
-                                   (slot_state[s] == PTW_L0_REQ);
+        assign slot_wants_mem[s] = (slot_state[s] == PTW_MEM_REQ);
     end
 
     reg [SLOT_BITS-1:0] mem_rr_base;
@@ -152,78 +157,125 @@ module VX_mmu_ptw import VX_gpu_pkg::*; #(
     wire [SLOT_BITS-1:0] rsp_slot = ptw_mem_if.rsp_data.tag[SLOT_BITS-1:0];
 
     // =========================================================================
-    // PTE address for the current memory arbiter winner (used by both the
-    // memory interface and the central FSM to save into slot_pte_addr_r)
+    // PTE address: {cur_ppn, 12'b0} + {vpn[level], PTE_SHIFT zeros}
+    // vpn[l] = vaddr[l*VPN_LEVEL_BITS + PAGE_OFFSET +: VPN_LEVEL_BITS]
     // =========================================================================
 
-    wire [31:0] req_pte_addr =
-        (slot_state[mem_req_slot] == PTW_L1_REQ) ?
-            ({satp[PPN_WIDTH-1:0], {PAGE_OFFSET_BITS{1'b0}}} +
-             {{(32-VPN_LEVEL_BITS-PTE_SHIFT){1'b0}},
-              slot_vaddr[mem_req_slot][31:22], {PTE_SHIFT{1'b0}}})
-        :
-            ({slot_l1_ppn[mem_req_slot], {PAGE_OFFSET_BITS{1'b0}}} +
-             {{(32-VPN_LEVEL_BITS-PTE_SHIFT){1'b0}},
-              slot_vaddr[mem_req_slot][21:12], {PTE_SHIFT{1'b0}}});
+    wire [VPN_LEVEL_BITS-1:0] req_vpn =
+        slot_vaddr[mem_req_slot][slot_level[mem_req_slot] * VPN_LEVEL_BITS + PAGE_OFFSET +: VPN_LEVEL_BITS];
+
+    wire [`MEM_ADDR_WIDTH-1:0] req_pte_addr =
+        {slot_cur_ppn[mem_req_slot], {PAGE_OFFSET{1'b0}}} +
+        {{PTE_ADDR_PAD{1'b0}}, req_vpn, {PTE_SHIFT{1'b0}}};
 
     // =========================================================================
-    // Response PTE decode: computed once for rsp_slot only
+    // PTE decode: extract PTE_DATA_BITS word from the cache-line response
+    // word_sel picks which PTE within the line using byte-address bits
     // =========================================================================
 
-    wire [31:0] rsp_pte_data;
-    if (NUM_WORDS > 1) begin : g_pte_sel
-        wire [SEL_BITS-1:0] word_sel = slot_pte_addr_r[rsp_slot][SEL_BITS+1:2];
-        assign rsp_pte_data = ptw_mem_if.rsp_data.data[word_sel * 32 +: 32];
+    wire [PTE_DATA_BITS-1:0] rsp_pte_data;
+    if (NUM_PTES > 1) begin : g_pte_sel
+        // bits [PTE_SHIFT+SEL_BITS-1 : PTE_SHIFT] = PTE index within cache line
+        wire [SEL_BITS-1:0] word_sel =
+            slot_pte_addr_r[rsp_slot][PTE_SHIFT + SEL_BITS - 1 : PTE_SHIFT];
+        assign rsp_pte_data = ptw_mem_if.rsp_data.data[word_sel * PTE_DATA_BITS +: PTE_DATA_BITS];
     end else begin : g_pte_direct
-        assign rsp_pte_data = ptw_mem_if.rsp_data.data[31:0];
+        assign rsp_pte_data = ptw_mem_if.rsp_data.data[PTE_DATA_BITS-1:0];
     end
 
-    wire [PPN_WIDTH-1:0] rsp_pte_ppn   = rsp_pte_data[29:10];
+    // PPN lives at bits [10 +: PPN_WIDTH] of the PTE (RISC-V PTE layout)
+    wire [PPN_WIDTH-1:0] rsp_pte_ppn   = rsp_pte_data[10 +: PPN_WIDTH];
     wire [7:0]           rsp_pte_flags = rsp_pte_data[7:0];
 
     // =========================================================================
     // Page Walk Cache (HPCA14 Design 3)
-    //
-    // Lookup fires combinatorially whenever miss_grant is asserted, using the
-    // selected miss's vpn1 and the current satp.ppn as key.  On a hit the slot
-    // skips L1_REQ/L1_RESP entirely and enters L0_REQ with l1_ppn pre-loaded.
-    // The cache is filled on every L1_RESP (the only memory fetch we want to
-    // eliminate on future walks to the same vpn1).
+    // Caches the PPN returned by the top-level (level = PT_LEVELS-1) fetch.
+    // Key = (satp_ppn, vpn[PT_LEVELS-1]); Value = next-level base PPN.
+    // PWC hit -> slot starts at level PT_LEVELS-2, skipping one memory fetch.
     // =========================================================================
 
-    wire                      pwc_hit;
-    wire [PPN_WIDTH-1:0]      pwc_l1_ppn;
+    wire                   pwc_hit;
+    wire [PPN_WIDTH-1:0]   pwc_cached_ppn;
 
-    wire [VPN_LEVEL_BITS-1:0] pwc_lookup_vpn1     = miss_vaddr[selected_req][31:22];
-    wire [PPN_WIDTH-1:0]      pwc_lookup_satp_ppn = satp[PPN_WIDTH-1:0];
+    // top-level VPN: vpn[PT_LEVELS-1]
+    localparam TOP_VPN_LSB = (PT_LEVELS - 1) * VPN_LEVEL_BITS + PAGE_OFFSET;
+    // middle-level VPN: vpn[PT_LEVELS-2] (meaningful only when PT_LEVELS==3, i.e. SV39 vpn[1])
+    localparam MID_VPN_LSB = (PT_LEVELS - 2) * VPN_LEVEL_BITS + PAGE_OFFSET;
+    wire [PWC_VPN_BITS-1:0] pwc_lookup_vpn =
+        miss_vaddr[selected_req][TOP_VPN_LSB +: VPN_LEVEL_BITS];
+    wire [PPN_WIDTH-1:0]    pwc_lookup_satp_ppn = satp[PPN_WIDTH-1:0];
 
-    wire                      pwc_fill_valid    = mem_rsp_fire && (slot_state[rsp_slot] == PTW_L1_RESP);
-    wire [VPN_LEVEL_BITS-1:0] pwc_fill_vpn1     = slot_vaddr[rsp_slot][31:22];
-    wire [PPN_WIDTH-1:0]      pwc_fill_satp_ppn = satp[PPN_WIDTH-1:0];
+    wire pwc_fill_valid =
+        mem_rsp_fire &&
+        (slot_state[rsp_slot] == PTW_MEM_RESP) &&
+        (slot_level[rsp_slot] == LEVEL_BITS'(PT_LEVELS - 1));
+    wire [PWC_VPN_BITS-1:0] pwc_fill_vpn =
+        slot_vaddr[rsp_slot][TOP_VPN_LSB +: VPN_LEVEL_BITS];
+    wire [PPN_WIDTH-1:0]    pwc_fill_satp_ppn = satp[PPN_WIDTH-1:0];
 
     VX_mmu_pwc #(
         .PPN_WIDTH   (PPN_WIDTH),
-        .VPN_BITS    (VPN_LEVEL_BITS),
-        .NUM_ENTRIES (1 << VPN_LEVEL_BITS)
+        .VPN_BITS    (PWC_VPN_BITS),
+        .NUM_ENTRIES (PWC_ENTRIES)
     ) pwc (
         .clk             (clk),
         .reset           (reset),
         .lookup_satp_ppn (pwc_lookup_satp_ppn),
-        .lookup_vpn1     (pwc_lookup_vpn1),
+        .lookup_vpn1     (pwc_lookup_vpn),
         .hit             (pwc_hit),
-        .l1_ppn          (pwc_l1_ppn),
+        .l1_ppn          (pwc_cached_ppn),
         .fill_valid      (pwc_fill_valid),
         .fill_satp_ppn   (pwc_fill_satp_ppn),
-        .fill_vpn1       (pwc_fill_vpn1),
+        .fill_vpn1       (pwc_fill_vpn),
         .fill_l1_ppn     (rsp_pte_ppn)
     );
 
     // =========================================================================
+    // Page Walk Cache 2 (SV39 only)
+    // Caches the PPN from the level-1 fetch: key = (l2_ppn, vpn[1]).
+    // Only consulted when PWC1 also hits so l2_ppn is available combinatorially.
+    // A double hit reduces a 3-fetch SV39 walk to a single fetch.
+    // =========================================================================
+
+    wire               pwc2_hit;
+    wire [PPN_WIDTH-1:0] pwc2_cached_ppn;
+
+    if (PT_LEVELS == 3) begin : g_pwc2
+        wire [VPN_LEVEL_BITS-1:0] pwc2_lookup_vpn =
+            miss_vaddr[selected_req][MID_VPN_LSB +: VPN_LEVEL_BITS];
+        wire [PPN_WIDTH-1:0]      pwc2_lookup_tag = pwc_cached_ppn; // l2_ppn from PWC1
+
+        wire pwc2_fill_valid =
+            mem_rsp_fire &&
+            (slot_state[rsp_slot] == PTW_MEM_RESP) &&
+            (slot_level[rsp_slot] == LEVEL_BITS'(1));
+        wire [VPN_LEVEL_BITS-1:0] pwc2_fill_vpn =
+            slot_vaddr[rsp_slot][MID_VPN_LSB +: VPN_LEVEL_BITS];
+        wire [PPN_WIDTH-1:0]      pwc2_fill_tag = slot_cur_ppn[rsp_slot]; // l2_ppn of this slot
+
+        VX_mmu_pwc #(
+            .PPN_WIDTH   (PPN_WIDTH),
+            .VPN_BITS    (VPN_LEVEL_BITS),
+            .NUM_ENTRIES (1 << VPN_LEVEL_BITS)
+        ) pwc2_inst (
+            .clk             (clk),
+            .reset           (reset),
+            .lookup_satp_ppn (pwc2_lookup_tag),
+            .lookup_vpn1     (pwc2_lookup_vpn),
+            .hit             (pwc2_hit),
+            .l1_ppn          (pwc2_cached_ppn),
+            .fill_valid      (pwc2_fill_valid),
+            .fill_satp_ppn   (pwc2_fill_tag),
+            .fill_vpn1       (pwc2_fill_vpn),
+            .fill_l1_ppn     (rsp_pte_ppn)
+        );
+    end else begin : g_pwc2_disabled
+        assign pwc2_hit        = 1'b0;
+        assign pwc2_cached_ppn = '0;
+    end
+
+    // =========================================================================
     // Central state machine
-    //
-    // Each of the four sections below writes to a disjoint set of slots,
-    // partitioned by state: IDLE, L1/L0_REQ, L1/L0_RESP, FILL. No slot can
-    // be in two of those groups simultaneously, so there are no write conflicts.
     // =========================================================================
 
     always_ff @(posedge clk) begin
@@ -231,7 +283,8 @@ module VX_mmu_ptw import VX_gpu_pkg::*; #(
             for (int s = 0; s < PTW_SIZE; s++) begin
                 slot_state[s]      <= PTW_IDLE;
                 slot_vaddr[s]      <= '0;
-                slot_l1_ppn[s]     <= '0;
+                slot_cur_ppn[s]    <= '0;
+                slot_level[s]      <= '0;
                 slot_ppn[s]        <= '0;
                 slot_flags[s]      <= '0;
                 slot_pte_addr_r[s] <= '0;
@@ -241,32 +294,40 @@ module VX_mmu_ptw import VX_gpu_pkg::*; #(
             mem_rr_base  <= '0;
         end else begin
 
-            // IDLE → L0_REQ (PWC hit) or L1_REQ (PWC miss): new miss accepted
+            // IDLE → MEM_REQ: new miss accepted, choose starting level
             if (miss_grant) begin
                 slot_vaddr[free_slot] <= miss_vaddr[selected_req];
                 slot_src[free_slot]   <= selected_req;
-                if (pwc_hit) begin
-                    slot_state[free_slot]  <= PTW_L0_REQ;
-                    slot_l1_ppn[free_slot] <= pwc_l1_ppn;
+                slot_state[free_slot] <= PTW_MEM_REQ;
+                if (pwc_hit && pwc2_hit) begin
+                    // Double hit: skip both intermediate levels (SV39 only)
+                    slot_level[free_slot]   <= LEVEL_BITS'(PT_LEVELS - 3);
+                    slot_cur_ppn[free_slot] <= pwc2_cached_ppn;
+                end else if (pwc_hit) begin
+                    // PWC1 hit: skip top-level fetch
+                    slot_level[free_slot]   <= LEVEL_BITS'(PT_LEVELS - 2);
+                    slot_cur_ppn[free_slot] <= pwc_cached_ppn;
                 end else begin
-                    slot_state[free_slot] <= PTW_L1_REQ;
+                    // Full walk from root
+                    slot_level[free_slot]   <= LEVEL_BITS'(PT_LEVELS - 1);
+                    slot_cur_ppn[free_slot] <= satp[PPN_WIDTH-1:0];
                 end
                 miss_rr_base <= REQ_BITS'((int'(selected_req) + 1) % NUM_REQUESTORS);
             end
 
-            // L1_REQ/L0_REQ → L1_RESP/L0_RESP: memory request fired
+            // MEM_REQ → MEM_RESP: memory request fired, save PTE byte address
             if (mem_req_fire) begin
-                slot_state[mem_req_slot]      <= (slot_state[mem_req_slot] == PTW_L1_REQ)
-                                                  ? PTW_L1_RESP : PTW_L0_RESP;
+                slot_state[mem_req_slot]      <= PTW_MEM_RESP;
                 slot_pte_addr_r[mem_req_slot] <= req_pte_addr;
                 mem_rr_base <= SLOT_BITS'((int'(mem_req_slot) + 1) % PTW_SIZE);
             end
 
-            // L1_RESP → L0_REQ  or  L0_RESP → FILL: memory response received
+            // MEM_RESP: non-leaf → descend; leaf → FILL
             if (mem_rsp_fire) begin
-                if (slot_state[rsp_slot] == PTW_L1_RESP) begin
-                    slot_state[rsp_slot]  <= PTW_L0_REQ;
-                    slot_l1_ppn[rsp_slot] <= rsp_pte_ppn;
+                if (slot_level[rsp_slot] > 0) begin
+                    slot_state[rsp_slot]   <= PTW_MEM_REQ;
+                    slot_cur_ppn[rsp_slot] <= rsp_pte_ppn;
+                    slot_level[rsp_slot]   <= LEVEL_BITS'(int'(slot_level[rsp_slot]) - 1);
                 end else begin
                     slot_state[rsp_slot] <= PTW_FILL;
                     slot_ppn[rsp_slot]   <= rsp_pte_ppn;
@@ -297,8 +358,8 @@ module VX_mmu_ptw import VX_gpu_pkg::*; #(
                                         (slot_src[s] == REQ_BITS'(r));
         end
 
-        reg [31:0] fill_vaddr_w, fill_paddr_w;
-        reg [7:0]  fill_flags_w;
+        reg [`XLEN-1:0] fill_vaddr_w, fill_paddr_w;
+        reg [7:0]       fill_flags_w;
 
         always_comb begin
             fill_vaddr_w = '0;
@@ -307,7 +368,7 @@ module VX_mmu_ptw import VX_gpu_pkg::*; #(
             for (int s = 0; s < PTW_SIZE; s++) begin
                 if (slot_fill_for_r[s]) begin
                     fill_vaddr_w = slot_vaddr[s];
-                    fill_paddr_w = {slot_ppn[s], slot_vaddr[s][PAGE_OFFSET_BITS-1:0]};
+                    fill_paddr_w = `XLEN'({slot_ppn[s], slot_vaddr[s][PAGE_OFFSET-1:0]});
                     fill_flags_w = slot_flags[s];
                 end
             end
@@ -325,17 +386,16 @@ module VX_mmu_ptw import VX_gpu_pkg::*; #(
 
     wire [PTW_SIZE-1:0] slot_awaiting_rsp;
     for (genvar s = 0; s < PTW_SIZE; s++) begin : g_rsp_ready
-        assign slot_awaiting_rsp[s] = (slot_state[s] == PTW_L1_RESP) ||
-                                      (slot_state[s] == PTW_L0_RESP);
+        assign slot_awaiting_rsp[s] = (slot_state[s] == PTW_MEM_RESP);
     end
 
     assign ptw_mem_if.req_valid       = mem_req_grant;
     assign ptw_mem_if.req_data.rw     = 1'b0;
-    assign ptw_mem_if.req_data.addr   = req_pte_addr[31:ADDR_SHIFT];
+    assign ptw_mem_if.req_data.addr   = req_pte_addr[`MEM_ADDR_WIDTH-1:ADDR_SHIFT];
     assign ptw_mem_if.req_data.data   = '0;
     assign ptw_mem_if.req_data.byteen = {DATA_SIZE{1'b1}};
     assign ptw_mem_if.req_data.flags  = '0;
-    assign ptw_mem_if.req_data.tag    = TAG_WIDTH'(mem_req_slot);  // slot id for response routing
+    assign ptw_mem_if.req_data.tag    = TAG_WIDTH'(mem_req_slot);
     assign ptw_mem_if.rsp_ready       = |slot_awaiting_rsp;
 
     // =========================================================================
@@ -351,11 +411,15 @@ module VX_mmu_ptw import VX_gpu_pkg::*; #(
     reg [PERF_CTR_BITS-1:0] perf_ptw_latency_r;
     reg [PERF_CTR_BITS-1:0] perf_pwc_hits_r;
     reg [PERF_CTR_BITS-1:0] perf_pwc_misses_r;
+    reg [PERF_CTR_BITS-1:0] perf_pwc2_hits_r;
+    reg [PERF_CTR_BITS-1:0] perf_pwc2_misses_r;
     always_ff @(posedge clk) begin
         if (reset) begin
-            perf_ptw_latency_r <= '0;
-            perf_pwc_hits_r    <= '0;
-            perf_pwc_misses_r  <= '0;
+            perf_ptw_latency_r  <= '0;
+            perf_pwc_hits_r     <= '0;
+            perf_pwc_misses_r   <= '0;
+            perf_pwc2_hits_r    <= '0;
+            perf_pwc2_misses_r  <= '0;
         end else begin
             if (|slot_active)
                 perf_ptw_latency_r <= perf_ptw_latency_r + PERF_CTR_BITS'(1);
@@ -363,11 +427,17 @@ module VX_mmu_ptw import VX_gpu_pkg::*; #(
                 perf_pwc_hits_r <= perf_pwc_hits_r + PERF_CTR_BITS'(1);
             if (miss_grant && !pwc_hit)
                 perf_pwc_misses_r <= perf_pwc_misses_r + PERF_CTR_BITS'(1);
+            if (miss_grant && pwc_hit && pwc2_hit)
+                perf_pwc2_hits_r <= perf_pwc2_hits_r + PERF_CTR_BITS'(1);
+            if (miss_grant && pwc_hit && !pwc2_hit)
+                perf_pwc2_misses_r <= perf_pwc2_misses_r + PERF_CTR_BITS'(1);
         end
     end
-    assign perf_ptw_latency = perf_ptw_latency_r;
-    assign perf_pwc_hits    = perf_pwc_hits_r;
-    assign perf_pwc_misses  = perf_pwc_misses_r;
+    assign perf_ptw_latency  = perf_ptw_latency_r;
+    assign perf_pwc_hits     = perf_pwc_hits_r;
+    assign perf_pwc_misses   = perf_pwc_misses_r;
+    assign perf_pwc2_hits    = perf_pwc2_hits_r;
+    assign perf_pwc2_misses  = perf_pwc2_misses_r;
 `else
     assign perf_ptw_latency_placeholder = 1'b0;
 `endif

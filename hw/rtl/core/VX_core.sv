@@ -33,6 +33,8 @@ module VX_core import VX_gpu_pkg::*; #(
     input wire [PERF_CTR_BITS-1:0] ptw_latency_in,
     input wire [PERF_CTR_BITS-1:0] pwc_hits_in,
     input wire [PERF_CTR_BITS-1:0] pwc_misses_in,
+    input wire [PERF_CTR_BITS-1:0] pwc2_hits_in,
+    input wire [PERF_CTR_BITS-1:0] pwc2_misses_in,
 `endif
 `endif
 
@@ -48,24 +50,24 @@ module VX_core import VX_gpu_pkg::*; #(
 
 `ifdef VM_ENABLE
     // dTLB PTW miss/fill (routed to shared PTW at socket level)
-    output wire             dtlb_ptw_req_valid,
-    input  wire             dtlb_ptw_req_ready,
-    output wire [31:0]      dtlb_ptw_req_vaddr,
-    input  wire             dtlb_ptw_rsp_valid,
-    output wire             dtlb_ptw_rsp_ready,
-    input  wire [31:0]      dtlb_ptw_rsp_vaddr,
-    input  wire [31:0]      dtlb_ptw_rsp_paddr,
-    input  wire [7:0]       dtlb_ptw_rsp_flags,
+    output wire               dtlb_ptw_req_valid,
+    input  wire               dtlb_ptw_req_ready,
+    output wire [`XLEN-1:0]   dtlb_ptw_req_vaddr,
+    input  wire               dtlb_ptw_rsp_valid,
+    output wire               dtlb_ptw_rsp_ready,
+    input  wire [`XLEN-1:0]   dtlb_ptw_rsp_vaddr,
+    input  wire [`XLEN-1:0]   dtlb_ptw_rsp_paddr,
+    input  wire [7:0]         dtlb_ptw_rsp_flags,
 
     // iTLB PTW miss/fill (routed to shared PTW at socket level)
-    output wire             itlb_ptw_req_valid,
-    input  wire             itlb_ptw_req_ready,
-    output wire [31:0]      itlb_ptw_req_vaddr,
-    input  wire             itlb_ptw_rsp_valid,
-    output wire             itlb_ptw_rsp_ready,
-    input  wire [31:0]      itlb_ptw_rsp_vaddr,
-    input  wire [31:0]      itlb_ptw_rsp_paddr,
-    input  wire [7:0]       itlb_ptw_rsp_flags,
+    output wire               itlb_ptw_req_valid,
+    input  wire               itlb_ptw_req_ready,
+    output wire [`XLEN-1:0]   itlb_ptw_req_vaddr,
+    input  wire               itlb_ptw_rsp_valid,
+    output wire               itlb_ptw_rsp_ready,
+    input  wire [`XLEN-1:0]   itlb_ptw_rsp_vaddr,
+    input  wire [`XLEN-1:0]   itlb_ptw_rsp_paddr,
+    input  wire [7:0]         itlb_ptw_rsp_flags,
 
 `endif
 
@@ -136,9 +138,11 @@ module VX_core import VX_gpu_pkg::*; #(
     mmu_perf_t mmu_perf_csr;  // mmu_perf with socket PTW counters merged in
     always_comb begin
         mmu_perf_csr             = mmu_perf;
-        mmu_perf_csr.ptw_latency = ptw_latency_in;
-        mmu_perf_csr.pwc_hits    = pwc_hits_in;
-        mmu_perf_csr.pwc_misses  = pwc_misses_in;
+        mmu_perf_csr.ptw_latency  = ptw_latency_in;
+        mmu_perf_csr.pwc_hits     = pwc_hits_in;
+        mmu_perf_csr.pwc_misses   = pwc_misses_in;
+        mmu_perf_csr.pwc2_hits    = pwc2_hits_in;
+        mmu_perf_csr.pwc2_misses  = pwc2_misses_in;
     end
     /* verilator lint_off UNUSEDSIGNAL */
     mmu_perf_t icache_mmu_perf;  // iTLB perf counters (for future use)

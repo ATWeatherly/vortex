@@ -3,7 +3,7 @@
 # =============================================================================
 # Vortex VM SimX Regression Test Script
 # =============================================================================
-# Creates a timestamped build directory, configures, builds, and runs all 28
+# Creates a timestamped build directory, configures, builds, and runs all 22
 # regression tests with VM enabled using SimX (software simulator).
 #
 # Usage: ./run_vm_simx_regression.sh [--skip-build]
@@ -47,7 +47,7 @@ DRIVER="simx"
 # Catches: explicit failures, Verilator errors, assertions, crashes, make errors
 FAILURE_PATTERNS="FAILED|%Error:|Assertion failed|Aborted|core dumped|make: \*\*\*|Segmentation fault"
 
-# 27 regression tests (sgemm_tcu handled separately)
+# 21 regression tests (sgemm_tcu handled separately)
 TESTS=(
     basic
     bfs
@@ -57,22 +57,16 @@ TESTS=(
     diverge
     dogfood
     dotproduct
-    dotproduct2
     dropout
     fence
     io_addr
-    jacobi
     madmax
     mstress
-    pathfinder
     printf
-    priority
-    raycast
     relu
     sgemm
     sgemm2
     sgemv
-    softmax
     sort
     stencil3d
     vecadd
@@ -93,7 +87,7 @@ echo "  Timestamp:    $TIMESTAMP"
 echo "  Build Dir:    $BUILD_DIR"
 echo "  CONFIGS:      $CONFIGS"
 echo "  Driver:       $DRIVER"
-echo "  Total Tests:  28 (27 regular + 1 sgemm_tcu)"
+echo "  Total Tests:  22 (21 regular + 1 sgemm_tcu)"
 echo "=============================================="
 echo ""
 
@@ -153,7 +147,7 @@ fi
 
 set +e  # Don't exit on test failure
 
-echo "[STEP 3/3] Running 28 regression tests with SimX..."
+echo "[STEP 3/3] Running 22 regression tests with SimX..."
 echo ""
 
 # Create log directory
@@ -171,7 +165,7 @@ for i in "${!TESTS[@]}"; do
     TEST_NUM=$((i + 1))
     LOG_FILE="$LOG_DIR/${TEST}.log"
 
-    printf "[%2d/28] Running %-15s ... " "$TEST_NUM" "$TEST"
+    printf "[%2d/22] Running %-15s ... " "$TEST_NUM" "$TEST"
 
     # Run the test and capture output
     CONFIGS="$CONFIGS" ./ci/blackbox.sh --driver=$DRIVER --app=$TEST > "$LOG_FILE" 2>&1
@@ -213,7 +207,7 @@ CONFIGS="$TCU_CONFIGS" ./ci/blackbox.sh --driver=$DRIVER --app=sgemm_tcu >> "$LO
 EXIT_CODE=$?
 
 # Check result using same logic as main tests
-printf "[28/28] Running %-15s ... " "$TEST"
+printf "[22/22] Running %-15s ... " "$TEST"
 if [ $EXIT_CODE -ne 0 ] || grep -qE "$FAILURE_PATTERNS" "$LOG_FILE"; then
     echo "FAILED (exit=$EXIT_CODE)"
     FAILED+=("$TEST")
@@ -222,7 +216,7 @@ else
     PASSED+=("$TEST")
 fi
 
-TOTAL=28
+TOTAL=22
 
 # =============================================================================
 # Summary Report

@@ -759,8 +759,10 @@ package VX_gpu_pkg;
         logic [PERF_CTR_BITS-1:0] tlb_evictions;  // TLB evictions on fill
         logic [PERF_CTR_BITS-1:0] ptw_walks;      // PTW walks completed
         logic [PERF_CTR_BITS-1:0] ptw_latency;    // Total cycles spent in PTW
-        logic [PERF_CTR_BITS-1:0] pwc_hits;       // Page walk cache hits
-        logic [PERF_CTR_BITS-1:0] pwc_misses;     // Page walk cache misses (full 2-level walk)
+        logic [PERF_CTR_BITS-1:0] pwc_hits;        // PWC1 hits (top-level entry cached)
+        logic [PERF_CTR_BITS-1:0] pwc_misses;      // PWC1 misses (full walk from root)
+        logic [PERF_CTR_BITS-1:0] pwc2_hits;       // PWC2 double-hits (both levels cached, SV39 only)
+        logic [PERF_CTR_BITS-1:0] pwc2_misses;     // PWC2 misses (PWC1 hit but PWC2 missed)
     } mmu_perf_t;
 `endif
 
