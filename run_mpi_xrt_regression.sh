@@ -63,7 +63,7 @@ fi
 # Configuration
 # =============================================================================
 
-export PATH=/home/thomas-weatherly/tools/vortex-tools/verilator/bin:$PATH
+export PATH=/home/tools/verilator/bin:$PATH
 
 TESTS=(
     mpi_vecadd
@@ -109,7 +109,7 @@ export FPGA_BIN_DIR
 
 if [ $SKIP_BUILD -eq 0 ]; then
     echo "[STEP 1/3] Configuring..."
-    if ! ../configure --xlen=32 --tooldir=/home/thomas-weatherly/tools/vortex-tools; then
+    if ! ../configure --xlen=32 --tooldir=/home/tools; then
         echo "ERROR: Configuration failed!"
         exit 1
     fi

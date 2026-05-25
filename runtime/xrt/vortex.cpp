@@ -134,7 +134,7 @@ public:
   int init() {
     int device_index = DEFAULT_DEVICE_INDEX;
     const char *device_index_s = getenv("XRT_DEVICE_INDEX");
-    if (device_index_s == nullptr)
+    if (device_index_s == nullptr || device_index_s[0] == '\0')
       device_index_s = getenv("OMPI_COMM_WORLD_RANK");
     if (device_index_s != nullptr) {
       device_index = atoi(device_index_s);
