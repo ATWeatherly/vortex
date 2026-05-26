@@ -116,7 +116,7 @@ if [ $SKIP_BUILD -eq 0 ]; then
 
     echo ""
     echo "[STEP 2/3] Building XRT runtime..."
-    if ! make -s -C runtime/xrt; then
+    if ! make -s -C runtime/xrt TARGET=hw; then
         echo "ERROR: XRT runtime build failed!"
         exit 1
     fi
@@ -142,6 +142,10 @@ fi
 # =============================================================================
 
 set +e
+
+# Empty string lets vortex.cpp fall through to OMPI_COMM_WORLD_RANK for
+# per-rank device selection; "0" would keep both ranks on U50 #0.
+export XRT_DEVICE_INDEX=""
 
 echo "[STEP 3/3] Running $TOTAL MPI tests on real FPGA (NP=$NP)..."
 echo ""

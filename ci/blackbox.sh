@@ -112,6 +112,7 @@ build_driver() {
     [ $SCOPE -eq 1 ] && cmd_opts=$(add_option "$cmd_opts" "SCOPE=1")
     [ $TEMPBUILD -eq 1 ] && cmd_opts=$(add_option "$cmd_opts" "DESTDIR=\"$TEMPDIR\"")
     [ -n "$CONFIGS" ] && cmd_opts=$(add_option "$cmd_opts" "CONFIGS=\"$CONFIGS\"")
+    [ -n "$TARGET" ] && cmd_opts=$(add_option "$cmd_opts" "TARGET=$TARGET")
     cmd_opts=$(add_option "$cmd_opts" "make -C $DRIVER_PATH > /dev/null")
     echo "Running: $cmd_opts"
     eval "$cmd_opts"
