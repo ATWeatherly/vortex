@@ -333,15 +333,17 @@ public:
       return err;
     });
   #ifndef BANK_INTERLEAVE
-    uint32_t bank_id;
-    CHECK_ERR(this->get_bank_info(addr, &bank_id, nullptr), {
-      global_mem_.release(addr);
-      return err;
-    });
-    CHECK_ERR(get_buffer(bank_id, nullptr), {
-      global_mem_.release(addr);
-      return err;
-    });
+    // Register BOs for every bank spanned by this allocation so reference
+    // counts stay correct even when an allocation crosses a bank boundary.
+    uint32_t first_bank = (uint32_t)(addr >> lg2_bank_size_);
+    uint32_t last_bank  = (uint32_t)((addr + asize - 1) >> lg2_bank_size_);
+    for (uint32_t b = first_bank; b <= last_bank; ++b) {
+      CHECK_ERR(get_buffer(b, nullptr), {
+        global_mem_.release(addr);
+        return err;
+      });
+    }
+    alloc_size_map_[addr] = asize;
   #endif
     CHECK_ERR(this->mem_access(addr, size, flags), {
       global_mem_.release(addr);
@@ -352,19 +354,20 @@ public:
   }
 
   int mem_reserve(uint64_t dev_addr, uint64_t size, int flags) {
+    uint64_t asize = aligned_size(size, RAM_PAGE_SIZE);
     CHECK_ERR(global_mem_.reserve(dev_addr, size), {
       return err;
     });
   #ifndef BANK_INTERLEAVE
-    uint32_t bank_id;
-    CHECK_ERR(this->get_bank_info(dev_addr, &bank_id, nullptr), {
-      global_mem_.release(dev_addr);
-      return err;
-    });
-    CHECK_ERR(get_buffer(bank_id, nullptr), {
-      global_mem_.release(dev_addr);
-      return err;
-    });
+    uint32_t first_bank = (uint32_t)(dev_addr >> lg2_bank_size_);
+    uint32_t last_bank  = (uint32_t)((dev_addr + asize - 1) >> lg2_bank_size_);
+    for (uint32_t b = first_bank; b <= last_bank; ++b) {
+      CHECK_ERR(get_buffer(b, nullptr), {
+        global_mem_.release(dev_addr);
+        return err;
+      });
+    }
+    alloc_size_map_[dev_addr] = asize;
   #endif
     CHECK_ERR(this->mem_access(dev_addr, size, flags), {
       global_mem_.release(dev_addr);
@@ -387,24 +390,32 @@ public:
       xrtBuffers_.clear();
     }
   #else
-    uint32_t bank_id;
-    CHECK_ERR(this->get_bank_info(dev_addr, &bank_id, nullptr), {
-      return err;
-    });
-    auto it = xrtBuffers_.find(bank_id);
-    if (it != xrtBuffers_.end()) {
+    auto sz_it = alloc_size_map_.find(dev_addr);
+    if (sz_it == alloc_size_map_.end()) {
+      fprintf(stderr, "[VXDRV] Error: invalid device memory address: 0x%lx\n",
+              dev_addr);
+      return -1;
+    }
+    uint64_t asize = sz_it->second;
+    alloc_size_map_.erase(sz_it);
+
+    uint32_t first_bank = (uint32_t)(dev_addr >> lg2_bank_size_);
+    uint32_t last_bank  = (uint32_t)((dev_addr + asize - 1) >> lg2_bank_size_);
+    for (uint32_t b = first_bank; b <= last_bank; ++b) {
+      auto it = xrtBuffers_.find(b);
+      if (it == xrtBuffers_.end()) {
+        fprintf(stderr, "[VXDRV] Error: missing BO for bank %u (addr=0x%lx)\n",
+                b, dev_addr);
+        return -1;
+      }
       auto count = --it->second.count;
       if (0 == count) {
-        printf("freeing bank%d...\n", bank_id);
+        printf("freeing bank%u...\n", b);
       #ifndef CPP_API
         xrtBOFree(it->second.xrtBuffer);
       #endif
         xrtBuffers_.erase(it);
       }
-    } else {
-      fprintf(stderr, "[VXDRV] Error: invalid device memory address: 0x%lx\n",
-              dev_addr);
-      return -1;
     }
   #endif
     return 0;
@@ -523,13 +534,10 @@ public:
     if (dev_addr + asize > global_mem_size_)
       return -1;
 
+#ifdef BANK_INTERLEAVE
     for (uint64_t end = dev_addr + asize; dev_addr < end;
          dev_addr += CACHE_BLOCK_SIZE, host_ptr += CACHE_BLOCK_SIZE) {
-    #ifdef BANK_INTERLEAVE
       asize = CACHE_BLOCK_SIZE;
-    #else
-      end = 0;
-    #endif
       uint32_t bo_index;
       uint64_t bo_offset;
       xrt_buffer_t xrtBuffer;
@@ -551,8 +559,37 @@ public:
         dump_xrt_error(xrtDevice_, err);
         return err;
       });
-#endif
+    #endif
     }
+#else
+    for (uint64_t done = 0; done < size; ) {
+      uint32_t bo_index;
+      uint64_t bo_offset;
+      xrt_buffer_t xrtBuffer;
+      CHECK_ERR(this->get_bank_info(dev_addr + done, &bo_index, &bo_offset), {
+        return err;
+      });
+      CHECK_ERR(this->get_buffer(bo_index, &xrtBuffer), {
+        return err;
+      });
+      uint64_t bank_remain = (1ull << lg2_bank_size_) - bo_offset;
+      uint64_t chunk = (size - done < bank_remain) ? (size - done) : bank_remain;
+    #ifdef CPP_API
+      xrtBuffer.write(host_ptr + done, chunk, bo_offset);
+      xrtBuffer.sync(XCL_BO_SYNC_BO_TO_DEVICE, chunk, bo_offset);
+    #else
+      CHECK_ERR(xrtBOWrite(xrtBuffer, host_ptr + done, chunk, bo_offset), {
+        dump_xrt_error(xrtDevice_, err);
+        return err;
+      });
+      CHECK_ERR(xrtBOSync(xrtBuffer, XCL_BO_SYNC_BO_TO_DEVICE, chunk, bo_offset), {
+        dump_xrt_error(xrtDevice_, err);
+        return err;
+      });
+    #endif
+      done += chunk;
+    }
+#endif
     return 0;
   }
 
@@ -569,13 +606,10 @@ public:
     if (dev_addr + asize > global_mem_size_)
       return -1;
 
+#ifdef BANK_INTERLEAVE
     for (uint64_t end = dev_addr + asize; dev_addr < end;
          dev_addr += CACHE_BLOCK_SIZE, host_ptr += CACHE_BLOCK_SIZE) {
-    #ifdef BANK_INTERLEAVE
       asize = CACHE_BLOCK_SIZE;
-    #else
-      end = 0;
-    #endif
       uint32_t bo_index;
       uint64_t bo_offset;
       xrt_buffer_t xrtBuffer;
@@ -599,6 +633,35 @@ public:
       });
     #endif
     }
+#else
+    for (uint64_t done = 0; done < size; ) {
+      uint32_t bo_index;
+      uint64_t bo_offset;
+      xrt_buffer_t xrtBuffer;
+      CHECK_ERR(this->get_bank_info(dev_addr + done, &bo_index, &bo_offset), {
+        return err;
+      });
+      CHECK_ERR(this->get_buffer(bo_index, &xrtBuffer), {
+        return err;
+      });
+      uint64_t bank_remain = (1ull << lg2_bank_size_) - bo_offset;
+      uint64_t chunk = (size - done < bank_remain) ? (size - done) : bank_remain;
+    #ifdef CPP_API
+      xrtBuffer.sync(XCL_BO_SYNC_BO_FROM_DEVICE, chunk, bo_offset);
+      xrtBuffer.read(host_ptr + done, chunk, bo_offset);
+    #else
+      CHECK_ERR(xrtBOSync(xrtBuffer, XCL_BO_SYNC_BO_FROM_DEVICE, chunk, bo_offset), {
+        dump_xrt_error(xrtDevice_, err);
+        return err;
+      });
+      CHECK_ERR(xrtBORead(xrtBuffer, host_ptr + done, chunk, bo_offset), {
+        dump_xrt_error(xrtDevice_, err);
+        return err;
+      });
+    #endif
+      done += chunk;
+    }
+#endif
     return 0;
   }
 
@@ -701,6 +764,10 @@ private:
   uint32_t lg2_num_banks_;
   uint32_t lg2_bank_size_;
 
+#ifndef BANK_INTERLEAVE
+  std::unordered_map<uint64_t, uint64_t> alloc_size_map_;
+#endif
+
 #ifdef BANK_INTERLEAVE
 
   std::vector<xrt_buffer_t> xrtBuffers_;
@@ -768,11 +835,26 @@ private:
       printf("allocating bank%d...\n", bank_id);
       uint64_t bank_size = 1ull << lg2_bank_size_;
     #ifdef CPP_API
-      xrt::bo xrtBuffer(xrtDevice_, bank_size, xrt::bo::flags::normal, bank_id);
+      // Try the matching XRT memory group; fall back to group 0 for merged
+      // memory interfaces (e.g. U50 PLATFORM_MERGED_MEMORY_INTERFACE) where
+      // all HBM banks are exposed through a single group.  BOs are allocated
+      // sequentially in group 0, so bank N lands at physical N*bank_size.
+      auto xrtBuffer = [&]() -> xrt::bo {
+        try {
+          return xrt::bo(xrtDevice_, bank_size, xrt::bo::flags::normal, bank_id);
+        } catch (...) {
+          return xrt::bo(xrtDevice_, bank_size, xrt::bo::flags::normal, 0);
+        }
+      }();
     #else
-      CHECK_HANDLE(xrtBuffer, xrtBOAlloc(xrtDevice_, bank_size, XRT_BO_FLAGS_NONE, bank_id), {
+      xrt_buffer_t xrtBuffer = xrtBOAlloc(xrtDevice_, bank_size, XRT_BO_FLAGS_NONE, bank_id);
+      if (xrtBuffer == nullptr) {
+        xrtBuffer = xrtBOAlloc(xrtDevice_, bank_size, XRT_BO_FLAGS_NONE, 0);
+      }
+      if (xrtBuffer == nullptr) {
+        printf("[VXDRV] Error: xrtBOAlloc failed for bank %d\n", bank_id);
         return -1;
-      });
+      }
     #endif
       xrtBuffers_.insert({bank_id, {xrtBuffer, 1}});
       if (pBuf) {
