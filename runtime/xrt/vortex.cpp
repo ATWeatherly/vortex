@@ -692,32 +692,15 @@ public:
   }
 
   int ready_wait(uint64_t timeout) {
-    // Busy-spin polling the AP_DONE status. Short kernels finish in
-    // microseconds, so any nanosleep here dominates the wall time.
-    struct timespec start_ts;
-    clock_gettime(CLOCK_MONOTONIC, &start_ts);
-    uint64_t start_ns = (uint64_t)start_ts.tv_sec * 1000000000ULL
-                      + (uint64_t)start_ts.tv_nsec;
-
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout);
     for (;;) {
       uint32_t status = 0;
-      CHECK_ERR(this->read_register(MMIO_CTL_ADDR, &status), {
-        return err;
-      });
+      CHECK_ERR(this->read_register(MMIO_CTL_ADDR, &status), { return err; });
       if ((status & CTL_AP_DONE) == CTL_AP_DONE)
-        break;
-
-      struct timespec now_ts;
-      clock_gettime(CLOCK_MONOTONIC, &now_ts);
-      uint64_t now_ns = (uint64_t)now_ts.tv_sec * 1000000000ULL
-                      + (uint64_t)now_ts.tv_nsec;
-      uint64_t elapsed_ms = (now_ns - start_ns) / 1000000ULL;
-      if (elapsed_ms >= timeout) {
+        return 0;
+      if (std::chrono::steady_clock::now() >= deadline)
         return -1;
-      }
-    };
-
-    return 0;
+    }
   }
 
   int dcr_write(uint32_t addr, uint32_t value) {
