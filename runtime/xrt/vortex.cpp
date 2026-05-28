@@ -692,31 +692,26 @@ public:
   }
 
   int ready_wait(uint64_t timeout) {
-    struct timespec sleep_time;
-  #ifndef NDEBUG
-    sleep_time.tv_sec = 1;
-    sleep_time.tv_nsec = 0;
-  #else
-    sleep_time.tv_sec = 0;
-    sleep_time.tv_nsec = 1000000;
-  #endif
-
-    // to milliseconds
-    uint64_t sleep_time_ms = (sleep_time.tv_sec * 1000) + (sleep_time.tv_nsec / 1000000);
+    // Busy-spin polling the AP_DONE status. Short kernels finish in
+    // microseconds, so any nanosleep here dominates the wall time.
+    struct timespec start_ts;
+    clock_gettime(CLOCK_MONOTONIC, &start_ts);
 
     for (;;) {
       uint32_t status = 0;
       CHECK_ERR(this->read_register(MMIO_CTL_ADDR, &status), {
         return err;
       });
-      bool is_done = (status & CTL_AP_DONE) == CTL_AP_DONE;
-      if (is_done)
+      if ((status & CTL_AP_DONE) == CTL_AP_DONE)
         break;
-      if (0 == timeout) {
+
+      struct timespec now_ts;
+      clock_gettime(CLOCK_MONOTONIC, &now_ts);
+      uint64_t elapsed_ms = (now_ts.tv_sec - start_ts.tv_sec) * 1000ULL
+                          + (now_ts.tv_nsec - start_ts.tv_nsec) / 1000000ULL;
+      if (elapsed_ms >= timeout) {
         return -1;
       }
-      nanosleep(&sleep_time, nullptr);
-      timeout -= sleep_time_ms;
     };
 
     return 0;
