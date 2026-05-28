@@ -696,6 +696,8 @@ public:
     // microseconds, so any nanosleep here dominates the wall time.
     struct timespec start_ts;
     clock_gettime(CLOCK_MONOTONIC, &start_ts);
+    uint64_t start_ns = (uint64_t)start_ts.tv_sec * 1000000000ULL
+                      + (uint64_t)start_ts.tv_nsec;
 
     for (;;) {
       uint32_t status = 0;
@@ -707,8 +709,9 @@ public:
 
       struct timespec now_ts;
       clock_gettime(CLOCK_MONOTONIC, &now_ts);
-      uint64_t elapsed_ms = (now_ts.tv_sec - start_ts.tv_sec) * 1000ULL
-                          + (now_ts.tv_nsec - start_ts.tv_nsec) / 1000000ULL;
+      uint64_t now_ns = (uint64_t)now_ts.tv_sec * 1000000000ULL
+                      + (uint64_t)now_ts.tv_nsec;
+      uint64_t elapsed_ms = (now_ns - start_ns) / 1000000ULL;
       if (elapsed_ms >= timeout) {
         return -1;
       }
