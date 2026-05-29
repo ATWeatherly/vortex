@@ -75,6 +75,13 @@ int main(int argc, char **argv) {
 #endif
 	processor.dcr_write(VX_DCR_BASE_MPM_CLASS, 0);
 
+	// setup SATP (page table base address) - test value for verification
+	const uint64_t satp_value = 0x80001000ULL;  // Test SATP value
+	processor.dcr_write(VX_DCR_BASE_SATP0, satp_value & 0xffffffff);
+#if (XLEN == 64)
+	processor.dcr_write(VX_DCR_BASE_SATP1, satp_value >> 32);
+#endif
+
 	// load program
 	{
 		std::string program_ext(fileExtension(program));

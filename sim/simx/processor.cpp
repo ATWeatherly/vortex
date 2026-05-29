@@ -260,8 +260,6 @@ int16_t Processor::set_satp_by_addr(uint64_t base_addr) {
   satp_ = new SATP_t (base_addr,asid);
   if (satp_ == NULL)
     return 1;
-  uint64_t satp = satp_->get_satp();
-  impl_->set_satp(satp);
   return 0;
 }
 bool Processor::is_satp_unset() {
