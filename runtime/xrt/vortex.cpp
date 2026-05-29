@@ -694,6 +694,11 @@ public:
 
   int ready_wait(uint64_t timeout) {
     auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout);
+    // Adaptive backoff: pure spin for the first ~1k iterations (covers
+    // microsecond-scale kernels), then yield, then short sleeps. This
+    // caps MMIO read rate so we don't saturate PCIe or race with XRT
+    // internal status polling.
+    uint32_t iters = 0;
     for (;;) {
       uint32_t status = 0;
       CHECK_ERR(this->read_register(MMIO_CTL_ADDR, &status), { return err; });
@@ -701,7 +706,15 @@ public:
         return 0;
       if (std::chrono::steady_clock::now() >= deadline)
         return -1;
-      sched_yield();
+      ++iters;
+      if (iters < 1024) {
+        // tight spin
+      } else if (iters < 16384) {
+        sched_yield();
+      } else {
+        struct timespec ts = {0, 10000}; // 10us
+        nanosleep(&ts, nullptr);
+      }
     }
   }
 
