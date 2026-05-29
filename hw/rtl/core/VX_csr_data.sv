@@ -43,6 +43,9 @@ import VX_fpu_pkg::*;
 `ifdef PERF_ENABLE
     input sysmem_perf_t                 sysmem_perf,
     input pipeline_perf_t               pipeline_perf,
+`ifdef VM_ENABLE
+    input mmu_perf_t                    mmu_perf,
+`endif
 `endif
 
     VX_commit_csr_if.slave              commit_csr_if,
@@ -67,16 +70,18 @@ import VX_fpu_pkg::*;
     input wire [NW_WIDTH-1:0]           write_wid,
     input wire [`VX_CSR_ADDR_BITS-1:0]  write_addr,
     input wire [`XLEN-1:0]              write_data
+`ifdef VM_ENABLE
+    ,output wire [`XLEN-1:0]            satp_value
+`endif
 );
 
     `UNUSED_VAR (reset)
     `UNUSED_VAR (write_wid)
     `UNUSED_VAR (write_data)
 
-    // CSRs Write /////////////////////////////////////////////////////////////
+    // CSRs Write ////////////////////////////////////////////////////////////////
 
     reg [`XLEN-1:0] mscratch;
-
 `ifdef EXT_F_ENABLE
     reg [`NUM_WARPS-1:0][INST_FRM_BITS+`FP_FLAGS_BITS-1:0] fcsr, fcsr_n;
     wire [`NUM_FPU_BLOCKS-1:0]              fpu_write_enable;
@@ -131,7 +136,6 @@ import VX_fpu_pkg::*;
                 `VX_CSR_FRM,
                 `VX_CSR_FCSR,
             `endif
-                `VX_CSR_SATP,
                 `VX_CSR_MSTATUS,
                 `VX_CSR_MNSTATUS,
                 `VX_CSR_MEDELEG,
@@ -140,8 +144,9 @@ import VX_fpu_pkg::*;
                 `VX_CSR_MTVEC,
                 `VX_CSR_MEPC,
                 `VX_CSR_PMPCFG0,
-                `VX_CSR_PMPADDR0: begin
-                    // do nothing!
+                `VX_CSR_PMPADDR0,
+                `VX_CSR_SATP: begin
+                    // do nothing! SATP is read-only from core's perspective (controlled by host via DCR)
                 end
                 `VX_CSR_MSCRATCH: begin
                     mscratch <= write_data;
@@ -191,7 +196,8 @@ import VX_fpu_pkg::*;
 
             `CSR_READ_64(`VX_CSR_MINSTRET, read_data_ro_w, commit_csr_if.instret);
 
-            `VX_CSR_SATP,
+            `VX_CSR_SATP: read_data_rw_w = base_dcrs.satp;
+            
             `VX_CSR_MSTATUS,
             `VX_CSR_MNSTATUS,
             `VX_CSR_MEDELEG,
@@ -204,8 +210,9 @@ import VX_fpu_pkg::*;
 
             default: begin
                 read_addr_valid_w = 0;
-                if ((read_addr >= `VX_CSR_MPM_USER   && read_addr < (`VX_CSR_MPM_USER + 32))
-                 || (read_addr >= `VX_CSR_MPM_USER_H && read_addr < (`VX_CSR_MPM_USER_H + 32))) begin
+                // Range covers 32 base counters + 10 VM counters (B20-B29: TLB, PTW, PWC1, PWC2)
+                if ((read_addr >= `VX_CSR_MPM_USER   && read_addr < (`VX_CSR_MPM_USER + 39))
+                 || (read_addr >= `VX_CSR_MPM_USER_H && read_addr < (`VX_CSR_MPM_USER_H + 39))) begin
                     read_addr_valid_w = 1;
                 `ifdef PERF_ENABLE
                     case (base_dcrs.mpm_class)
@@ -274,6 +281,19 @@ import VX_fpu_pkg::*;
                         `CSR_READ_64(`VX_CSR_MPM_MEM_LT, read_data_ro_w, sysmem_perf.mem.latency);
                         // PERF: coalescer
                         `CSR_READ_64(`VX_CSR_MPM_COALESCER_MISS, read_data_ro_w, sysmem_perf.coalescer.misses);
+                    `ifdef VM_ENABLE
+                        // PERF: TLB
+                        `CSR_READ_64(`VX_CSR_MPM_TLB_READS, read_data_ro_w, mmu_perf.tlb_reads);
+                        `CSR_READ_64(`VX_CSR_MPM_TLB_HITS, read_data_ro_w, mmu_perf.tlb_hits);
+                        `CSR_READ_64(`VX_CSR_MPM_TLB_MISSES, read_data_ro_w, mmu_perf.tlb_misses);
+                        `CSR_READ_64(`VX_CSR_MPM_TLB_EVICTS, read_data_ro_w, mmu_perf.tlb_evictions);
+                        `CSR_READ_64(`VX_CSR_MPM_PTW_WALKS, read_data_ro_w, mmu_perf.ptw_walks);
+                        `CSR_READ_64(`VX_CSR_MPM_PTW_LATENCY, read_data_ro_w, mmu_perf.ptw_latency);
+                        `CSR_READ_64(`VX_CSR_MPM_PWC_HITS, read_data_ro_w, mmu_perf.pwc_hits);
+                        `CSR_READ_64(`VX_CSR_MPM_PWC_MISSES, read_data_ro_w, mmu_perf.pwc_misses);
+                        `CSR_READ_64(`VX_CSR_MPM_PWC2_HITS, read_data_ro_w, mmu_perf.pwc2_hits);
+                        `CSR_READ_64(`VX_CSR_MPM_PWC2_MISSES, read_data_ro_w, mmu_perf.pwc2_misses);
+                    `endif
                         default:;
                         endcase
                     end
@@ -288,6 +308,10 @@ import VX_fpu_pkg::*;
     assign read_data_ro = read_data_ro_w;
     assign read_data_rw = read_data_rw_w;
 
+`ifdef VM_ENABLE
+    assign satp_value = base_dcrs.satp;
+`endif
+
     `UNUSED_VAR (base_dcrs)
 
     `RUNTIME_ASSERT(~read_enable || read_addr_valid_w, ("%t: *** invalid CSR read address: 0x%0h (#%0d)", $time, read_addr, read_uuid))
@@ -298,3 +322,4 @@ import VX_fpu_pkg::*;
 `endif
 
 endmodule
+

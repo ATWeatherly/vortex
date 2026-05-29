@@ -29,6 +29,13 @@ module VX_core import VX_gpu_pkg::*; #(
 
 `ifdef PERF_ENABLE
     input sysmem_perf_t     sysmem_perf,
+`ifdef VM_ENABLE
+    input wire [PERF_CTR_BITS-1:0] ptw_latency_in,
+    input wire [PERF_CTR_BITS-1:0] pwc_hits_in,
+    input wire [PERF_CTR_BITS-1:0] pwc_misses_in,
+    input wire [PERF_CTR_BITS-1:0] pwc2_hits_in,
+    input wire [PERF_CTR_BITS-1:0] pwc2_misses_in,
+`endif
 `endif
 
     VX_dcr_bus_if.slave     dcr_bus_if,
@@ -39,6 +46,29 @@ module VX_core import VX_gpu_pkg::*; #(
 
 `ifdef GBAR_ENABLE
     VX_gbar_bus_if.master   gbar_bus_if,
+`endif
+
+`ifdef VM_ENABLE
+    // dTLB PTW miss/fill (routed to shared PTW at socket level)
+    output wire               dtlb_ptw_req_valid,
+    input  wire               dtlb_ptw_req_ready,
+    output wire [`XLEN-1:0]   dtlb_ptw_req_vaddr,
+    input  wire               dtlb_ptw_rsp_valid,
+    output wire               dtlb_ptw_rsp_ready,
+    input  wire [`XLEN-1:0]   dtlb_ptw_rsp_vaddr,
+    input  wire [`XLEN-1:0]   dtlb_ptw_rsp_paddr,
+    input  wire [7:0]         dtlb_ptw_rsp_flags,
+
+    // iTLB PTW miss/fill (routed to shared PTW at socket level)
+    output wire               itlb_ptw_req_valid,
+    input  wire               itlb_ptw_req_ready,
+    output wire [`XLEN-1:0]   itlb_ptw_req_vaddr,
+    input  wire               itlb_ptw_rsp_valid,
+    output wire               itlb_ptw_rsp_ready,
+    input  wire [`XLEN-1:0]   itlb_ptw_rsp_vaddr,
+    input  wire [`XLEN-1:0]   itlb_ptw_rsp_paddr,
+    input  wire [7:0]         itlb_ptw_rsp_flags,
+
 `endif
 
     // Status
@@ -65,6 +95,34 @@ module VX_core import VX_gpu_pkg::*; #(
         .TAG_WIDTH (LSU_TAG_WIDTH)
     ) lsu_mem_if[`NUM_LSU_BLOCKS]();
 
+`ifdef VM_ENABLE
+    wire [`XLEN-1:0] satp_value;
+`endif
+
+    // Intermediate interface between VX_mem_unit and VX_mmu/dcache
+    // Uses base tag width (VX_mmu expands to DCACHE_TAG_WIDTH for dcache output)
+    VX_mem_bus_if #(
+        .DATA_SIZE (DCACHE_WORD_SIZE),
+        .TAG_WIDTH (DCACHE_TAG_WIDTH_BASE)
+    ) mem_unit_dcache_if [DCACHE_NUM_REQS]();
+
+`ifdef VM_ENABLE
+    // Intermediate interface between VX_fetch and VX_mmu for icache
+    // Uses base tag width (VX_mmu expands to ICACHE_TAG_WIDTH for icache output)
+    // Declared as array[1] because VX_mmu expects array interfaces
+    VX_mem_bus_if #(
+        .DATA_SIZE (ICACHE_WORD_SIZE),
+        .TAG_WIDTH (ICACHE_TAG_WIDTH_BASE)
+    ) fetch_icache_if[1]();
+
+    // Output interface from icache MMU (expanded tag width)
+    VX_mem_bus_if #(
+        .DATA_SIZE (ICACHE_WORD_SIZE),
+        .TAG_WIDTH (ICACHE_TAG_WIDTH)
+    ) icache_mmu_out_if[1]();
+
+`endif
+
 `ifdef PERF_ENABLE
     lmem_perf_t lmem_perf;
     coalescer_perf_t coalescer_perf;
@@ -75,6 +133,21 @@ module VX_core import VX_gpu_pkg::*; #(
         sysmem_perf_tmp.lmem = lmem_perf;
         sysmem_perf_tmp.coalescer = coalescer_perf;
     end
+`ifdef VM_ENABLE
+    mmu_perf_t mmu_perf;
+    mmu_perf_t mmu_perf_csr;  // mmu_perf with socket PTW counters merged in
+    always_comb begin
+        mmu_perf_csr             = mmu_perf;
+        mmu_perf_csr.ptw_latency  = ptw_latency_in;
+        mmu_perf_csr.pwc_hits     = pwc_hits_in;
+        mmu_perf_csr.pwc_misses   = pwc_misses_in;
+        mmu_perf_csr.pwc2_hits    = pwc2_hits_in;
+        mmu_perf_csr.pwc2_misses  = pwc2_misses_in;
+    end
+    /* verilator lint_off UNUSEDSIGNAL */
+    mmu_perf_t icache_mmu_perf;  // iTLB perf counters (for future use)
+    /* verilator lint_on UNUSEDSIGNAL */
+`endif
 `endif
 
     base_dcrs_t base_dcrs;
@@ -123,7 +196,11 @@ module VX_core import VX_gpu_pkg::*; #(
         `SCOPE_IO_BIND  (0)
         .clk            (clk),
         .reset          (reset),
+    `ifdef VM_ENABLE
+        .icache_bus_if  (fetch_icache_if[0]),  // Connect to array element
+    `else
         .icache_bus_if  (icache_bus_if),
+    `endif
         .schedule_if    (schedule_if),
         .fetch_if       (fetch_if)
     );
@@ -168,6 +245,9 @@ module VX_core import VX_gpu_pkg::*; #(
     `ifdef PERF_ENABLE
         .sysmem_perf    (sysmem_perf_tmp),
         .pipeline_perf  (pipeline_perf),
+    `ifdef VM_ENABLE
+        .mmu_perf       (mmu_perf_csr),
+    `endif
     `endif
 
         .base_dcrs      (base_dcrs),
@@ -182,6 +262,10 @@ module VX_core import VX_gpu_pkg::*; #(
 
         .warp_ctl_if    (warp_ctl_if),
         .branch_ctl_if  (branch_ctl_if)
+
+    `ifdef VM_ENABLE
+        ,.satp_value    (satp_value)
+    `endif
     );
 
     VX_commit #(
@@ -208,8 +292,77 @@ module VX_core import VX_gpu_pkg::*; #(
         .coalescer_perf(coalescer_perf),
     `endif
         .lsu_mem_if    (lsu_mem_if),
-        .dcache_bus_if (dcache_bus_if)
+        .dcache_bus_if (mem_unit_dcache_if)
     );
+
+    // MMU integration: VX_mmu sits between VX_mem_unit and dcache
+`ifdef VM_ENABLE
+    VX_mmu #(
+        .NUM_REQS      (DCACHE_NUM_REQS),
+        .DATA_SIZE     (DCACHE_WORD_SIZE),
+        .TAG_WIDTH     (DCACHE_TAG_WIDTH_BASE)
+    ) mmu (
+        .clk              (clk),
+        .reset            (reset),
+        .satp             (satp_value),
+        .lsu_mem_if       (mem_unit_dcache_if),
+        .dcache_mem_if    (dcache_bus_if),
+        .ptw_req_valid    (dtlb_ptw_req_valid),
+        .ptw_req_ready    (dtlb_ptw_req_ready),
+        .ptw_req_vaddr    (dtlb_ptw_req_vaddr),
+        .ptw_rsp_valid    (dtlb_ptw_rsp_valid),
+        .ptw_rsp_ready    (dtlb_ptw_rsp_ready),
+        .ptw_rsp_vaddr    (dtlb_ptw_rsp_vaddr),
+        .ptw_rsp_paddr    (dtlb_ptw_rsp_paddr),
+        .ptw_rsp_flags    (dtlb_ptw_rsp_flags),
+    `ifdef PERF_ENABLE
+        .mmu_perf         (mmu_perf)
+    `else
+        `UNUSED_PIN (mmu_perf_placeholder)
+    `endif
+    );
+`else
+    // Direct connection when VM disabled
+    for (genvar i = 0; i < DCACHE_NUM_REQS; ++i) begin : g_dcache_bypass
+        `ASSIGN_VX_MEM_BUS_IF(dcache_bus_if[i], mem_unit_dcache_if[i]);
+    end
+`endif
+
+    // =========================================================================
+    // Instruction MMU (iTLB)
+    // =========================================================================
+    // Bypass behavior is address-dependent via needs_translation() function.
+    // Code at STARTUP_ADDR and page table regions bypass translation.
+
+`ifdef VM_ENABLE
+    VX_mmu #(
+        .NUM_REQS  (1),
+        .DATA_SIZE (ICACHE_WORD_SIZE),
+        .TAG_WIDTH (ICACHE_TAG_WIDTH_BASE)
+    ) icache_mmu (
+        .clk              (clk),
+        .reset            (reset),
+        .satp             (satp_value),
+        .lsu_mem_if       (fetch_icache_if),      // Array[1] input
+        .dcache_mem_if    (icache_mmu_out_if),    // Array[1] output
+        .ptw_req_valid    (itlb_ptw_req_valid),
+        .ptw_req_ready    (itlb_ptw_req_ready),
+        .ptw_req_vaddr    (itlb_ptw_req_vaddr),
+        .ptw_rsp_valid    (itlb_ptw_rsp_valid),
+        .ptw_rsp_ready    (itlb_ptw_rsp_ready),
+        .ptw_rsp_vaddr    (itlb_ptw_rsp_vaddr),
+        .ptw_rsp_paddr    (itlb_ptw_rsp_paddr),
+        .ptw_rsp_flags    (itlb_ptw_rsp_flags),
+    `ifdef PERF_ENABLE
+        .mmu_perf         (icache_mmu_perf)
+    `else
+        `UNUSED_PIN (mmu_perf_placeholder)
+    `endif
+    );
+
+    // Connect icache MMU output to icache_bus_if port
+    `ASSIGN_VX_MEM_BUS_IF(icache_bus_if, icache_mmu_out_if[0]);
+`endif
 
 `ifdef PERF_ENABLE
 

@@ -37,6 +37,31 @@ module VX_socket import VX_gpu_pkg::*; #(
     // Barrier
     VX_gbar_bus_if.master   gbar_bus_if,
 `endif
+
+`ifdef VM_ENABLE
+    // PTW miss requests from all TLBs — routed up to device-level shared PTW
+    output wire [`SOCKET_SIZE*2-1:0] ptw_miss_valid,
+    output wire [`XLEN-1:0]          ptw_miss_vaddr [`SOCKET_SIZE*2],
+    input  wire [`SOCKET_SIZE*2-1:0] ptw_miss_ready,
+    // PTW fill responses coming back down from device-level shared PTW
+    input  wire [`SOCKET_SIZE*2-1:0] ptw_fill_valid,
+    output wire [`SOCKET_SIZE*2-1:0] ptw_fill_ready,
+    input  wire [`XLEN-1:0]          ptw_fill_vaddr [`SOCKET_SIZE*2],
+    input  wire [`XLEN-1:0]          ptw_fill_paddr [`SOCKET_SIZE*2],
+    input  wire [7:0]                ptw_fill_flags [`SOCKET_SIZE*2],
+`endif
+
+`ifdef PERF_ENABLE
+`ifdef VM_ENABLE
+    // PTW perf counters from device-level PTW, passed down to all cores
+    input wire [PERF_CTR_BITS-1:0]  ptw_latency_in,
+    input wire [PERF_CTR_BITS-1:0]  pwc_hits_in,
+    input wire [PERF_CTR_BITS-1:0]  pwc_misses_in,
+    input wire [PERF_CTR_BITS-1:0]  pwc2_hits_in,
+    input wire [PERF_CTR_BITS-1:0]  pwc2_misses_in,
+`endif
+`endif
+
     // Status
     output wire             busy
 );
@@ -234,6 +259,13 @@ module VX_socket import VX_gpu_pkg::*; #(
 
         `ifdef PERF_ENABLE
             .sysmem_perf    (sysmem_perf_tmp),
+        `ifdef VM_ENABLE
+            .ptw_latency_in  (ptw_latency_in),
+            .pwc_hits_in     (pwc_hits_in),
+            .pwc_misses_in   (pwc_misses_in),
+            .pwc2_hits_in    (pwc2_hits_in),
+            .pwc2_misses_in  (pwc2_misses_in),
+        `endif
         `endif
 
             .dcr_bus_if     (core_dcr_bus_if),
@@ -246,10 +278,82 @@ module VX_socket import VX_gpu_pkg::*; #(
             .gbar_bus_if    (per_core_gbar_bus_if[core_id]),
         `endif
 
+        `ifdef VM_ENABLE
+            .dtlb_ptw_req_valid (per_core_dtlb_ptw_req_valid[core_id]),
+            .dtlb_ptw_req_ready (per_core_dtlb_ptw_req_ready[core_id]),
+            .dtlb_ptw_req_vaddr (per_core_dtlb_ptw_req_vaddr[core_id]),
+            .dtlb_ptw_rsp_valid (per_core_dtlb_ptw_rsp_valid[core_id]),
+            .dtlb_ptw_rsp_ready (per_core_dtlb_ptw_rsp_ready[core_id]),
+            .dtlb_ptw_rsp_vaddr (per_core_dtlb_ptw_rsp_vaddr[core_id]),
+            .dtlb_ptw_rsp_paddr (per_core_dtlb_ptw_rsp_paddr[core_id]),
+            .dtlb_ptw_rsp_flags (per_core_dtlb_ptw_rsp_flags[core_id]),
+            .itlb_ptw_req_valid (per_core_itlb_ptw_req_valid[core_id]),
+            .itlb_ptw_req_ready (per_core_itlb_ptw_req_ready[core_id]),
+            .itlb_ptw_req_vaddr (per_core_itlb_ptw_req_vaddr[core_id]),
+            .itlb_ptw_rsp_valid (per_core_itlb_ptw_rsp_valid[core_id]),
+            .itlb_ptw_rsp_ready (per_core_itlb_ptw_rsp_ready[core_id]),
+            .itlb_ptw_rsp_vaddr (per_core_itlb_ptw_rsp_vaddr[core_id]),
+            .itlb_ptw_rsp_paddr (per_core_itlb_ptw_rsp_paddr[core_id]),
+            .itlb_ptw_rsp_flags (per_core_itlb_ptw_rsp_flags[core_id]),
+        `endif
+
             .busy           (per_core_busy[core_id])
         );
     end
 
     `BUFFER_EX(busy, (| per_core_busy), 1'b1, 1, (`SOCKET_SIZE > 1));
+
+`ifdef VM_ENABLE
+
+    ///////////////////////////////////////////////////////////////////////////
+    // Per-core PTW miss/fill signals — pass-through to device-level shared PTW.
+    // Layout: [0..SOCKET_SIZE-1] = dTLB (one per core)
+    //         [SOCKET_SIZE..2*SOCKET_SIZE-1] = iTLB (one per core)
+    ///////////////////////////////////////////////////////////////////////////
+
+    // One bit/value per core, for dTLB
+    wire [`SOCKET_SIZE-1:0]  per_core_dtlb_ptw_req_valid;
+    wire [`SOCKET_SIZE-1:0]  per_core_dtlb_ptw_req_ready;
+    wire [`XLEN-1:0]         per_core_dtlb_ptw_req_vaddr [`SOCKET_SIZE];
+    wire [`SOCKET_SIZE-1:0]  per_core_dtlb_ptw_rsp_valid;
+    wire [`SOCKET_SIZE-1:0]  per_core_dtlb_ptw_rsp_ready;
+    wire [`XLEN-1:0]         per_core_dtlb_ptw_rsp_vaddr [`SOCKET_SIZE];
+    wire [`XLEN-1:0]         per_core_dtlb_ptw_rsp_paddr [`SOCKET_SIZE];
+    wire [7:0]               per_core_dtlb_ptw_rsp_flags [`SOCKET_SIZE];
+
+    // One bit/value per core, for iTLB
+    wire [`SOCKET_SIZE-1:0]  per_core_itlb_ptw_req_valid;
+    wire [`SOCKET_SIZE-1:0]  per_core_itlb_ptw_req_ready;
+    wire [`XLEN-1:0]         per_core_itlb_ptw_req_vaddr [`SOCKET_SIZE];
+    wire [`SOCKET_SIZE-1:0]  per_core_itlb_ptw_rsp_valid;
+    wire [`SOCKET_SIZE-1:0]  per_core_itlb_ptw_rsp_ready;
+    wire [`XLEN-1:0]         per_core_itlb_ptw_rsp_vaddr [`SOCKET_SIZE];
+    wire [`XLEN-1:0]         per_core_itlb_ptw_rsp_paddr [`SOCKET_SIZE];
+    wire [7:0]               per_core_itlb_ptw_rsp_flags [`SOCKET_SIZE];
+
+    // Connect per-core dTLB/iTLB miss/fill wires to socket-level PTW ports.
+    // PTW requestor index: dTLB of core i → i, iTLB of core i → SOCKET_SIZE+i
+    for (genvar i = 0; i < `SOCKET_SIZE; i++) begin : g_ptw_wire
+        // dTLB slot i
+        assign ptw_miss_valid[i]                   = per_core_dtlb_ptw_req_valid[i];
+        assign per_core_dtlb_ptw_req_ready[i]      = ptw_miss_ready[i];
+        assign ptw_miss_vaddr[i]                   = per_core_dtlb_ptw_req_vaddr[i];
+        assign per_core_dtlb_ptw_rsp_valid[i]      = ptw_fill_valid[i];
+        assign ptw_fill_ready[i]                   = per_core_dtlb_ptw_rsp_ready[i];
+        assign per_core_dtlb_ptw_rsp_vaddr[i]      = ptw_fill_vaddr[i];
+        assign per_core_dtlb_ptw_rsp_paddr[i]      = ptw_fill_paddr[i];
+        assign per_core_dtlb_ptw_rsp_flags[i]      = ptw_fill_flags[i];
+        // iTLB slot SOCKET_SIZE+i
+        assign ptw_miss_valid[`SOCKET_SIZE + i]               = per_core_itlb_ptw_req_valid[i];
+        assign per_core_itlb_ptw_req_ready[i]                 = ptw_miss_ready[`SOCKET_SIZE + i];
+        assign ptw_miss_vaddr[`SOCKET_SIZE + i]               = per_core_itlb_ptw_req_vaddr[i];
+        assign per_core_itlb_ptw_rsp_valid[i]                 = ptw_fill_valid[`SOCKET_SIZE + i];
+        assign ptw_fill_ready[`SOCKET_SIZE + i]               = per_core_itlb_ptw_rsp_ready[i];
+        assign per_core_itlb_ptw_rsp_vaddr[i]                 = ptw_fill_vaddr[`SOCKET_SIZE + i];
+        assign per_core_itlb_ptw_rsp_paddr[i]                 = ptw_fill_paddr[`SOCKET_SIZE + i];
+        assign per_core_itlb_ptw_rsp_flags[i]                 = ptw_fill_flags[`SOCKET_SIZE + i];
+    end
+
+`endif // VM_ENABLE
 
 endmodule

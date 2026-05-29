@@ -23,6 +23,9 @@ module VX_sfu_unit import VX_gpu_pkg::*; #(
 `ifdef PERF_ENABLE
     input sysmem_perf_t     sysmem_perf,
     input pipeline_perf_t   pipeline_perf,
+`ifdef VM_ENABLE
+    input mmu_perf_t        mmu_perf,
+`endif
 `endif
 
     input base_dcrs_t       base_dcrs,
@@ -40,6 +43,9 @@ module VX_sfu_unit import VX_gpu_pkg::*; #(
     // Outputs
     VX_commit_if.master     commit_if [`ISSUE_WIDTH],
     VX_warp_ctl_if.master   warp_ctl_if
+`ifdef VM_ENABLE
+    ,output wire [`XLEN-1:0] satp_value
+`endif
 );
     `UNUSED_SPARAM (INSTANCE_ID)
     localparam BLOCK_SIZE   = 1;
@@ -125,6 +131,9 @@ module VX_sfu_unit import VX_gpu_pkg::*; #(
     `ifdef PERF_ENABLE
         .sysmem_perf    (sysmem_perf),
         .pipeline_perf  (pipeline_perf),
+    `ifdef VM_ENABLE
+        .mmu_perf       (mmu_perf),
+    `endif
     `endif
 
     `ifdef EXT_F_ENABLE
@@ -134,6 +143,10 @@ module VX_sfu_unit import VX_gpu_pkg::*; #(
         .sched_csr_if   (sched_csr_if),
         .commit_csr_if  (commit_csr_if),
         .result_if      (pe_result_if[PE_IDX_CSRS])
+
+    `ifdef VM_ENABLE
+        ,.satp_value    (satp_value)
+    `endif
     );
 
     VX_gather_unit #(

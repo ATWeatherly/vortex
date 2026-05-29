@@ -72,6 +72,21 @@ module Vortex import VX_gpu_pkg::*; (
 
     `RESET_RELAY (l3_reset, reset);
 
+`ifdef VM_ENABLE
+    // Combined L3 core bus: per-cluster buses + shared PTW
+    // L3_TOTAL_REQS = L3_NUM_REQS + 1 defined in VX_gpu_pkg.sv
+
+    VX_mem_bus_if #(
+        .DATA_SIZE (`L2_LINE_SIZE),
+        .TAG_WIDTH (L2_MEM_TAG_WIDTH)
+    ) l3_core_bus_if[L3_TOTAL_REQS]();
+
+    for (genvar i = 0; i < L3_NUM_REQS; i++) begin : g_l3_cluster_buses
+        `ASSIGN_VX_MEM_BUS_IF (l3_core_bus_if[i], per_cluster_mem_bus_if[i]);
+    end
+    `ASSIGN_VX_MEM_BUS_IF (l3_core_bus_if[L3_NUM_REQS], ptw_mem_bus);
+`endif
+
     VX_cache_wrap #(
         .INSTANCE_ID    ("l3cache"),
         .CACHE_SIZE     (`L3_CACHE_SIZE),
@@ -79,7 +94,11 @@ module Vortex import VX_gpu_pkg::*; (
         .NUM_BANKS      (`L3_NUM_BANKS),
         .NUM_WAYS       (`L3_NUM_WAYS),
         .WORD_SIZE      (L3_WORD_SIZE),
+`ifdef VM_ENABLE
+        .NUM_REQS       (L3_TOTAL_REQS),
+`else
         .NUM_REQS       (L3_NUM_REQS),
+`endif
         .MEM_PORTS      (`L3_MEM_PORTS),
         .CRSQ_SIZE      (`L3_CRSQ_SIZE),
         .MSHR_SIZE      (`L3_MSHR_SIZE),
@@ -102,7 +121,11 @@ module Vortex import VX_gpu_pkg::*; (
         .cache_perf     (l3_perf),
     `endif
 
+`ifdef VM_ENABLE
+        .core_bus_if    (l3_core_bus_if),
+`else
         .core_bus_if    (per_cluster_mem_bus_if),
+`endif
         .mem_bus_if     (mem_bus_if)
     );
 
@@ -126,6 +149,111 @@ module Vortex import VX_gpu_pkg::*; (
     assign dcr_bus_if.write_valid = dcr_wr_valid;
     assign dcr_bus_if.write_addr  = dcr_wr_addr;
     assign dcr_bus_if.write_data  = dcr_wr_data;
+
+`ifdef VM_ENABLE
+    ///////////////////////////////////////////////////////////////////////////
+    // Device-level shared PTW (HPCA14 Design 3, Phase 3)
+    // One PTW for the entire device, shared across all clusters/sockets/cores.
+    // Memory accesses route through cluster 0 → socket 0 → core 0's dcache path.
+    ///////////////////////////////////////////////////////////////////////////
+
+    localparam TOTAL_PTW_REQS = `NUM_CLUSTERS * NUM_SOCKETS * `SOCKET_SIZE * 2;
+
+    // Per-cluster PTW miss/fill wires
+    wire [NUM_SOCKETS*`SOCKET_SIZE*2-1:0] per_cluster_ptw_miss_valid [`NUM_CLUSTERS];
+    wire [NUM_SOCKETS*`SOCKET_SIZE*2-1:0] per_cluster_ptw_miss_ready [`NUM_CLUSTERS];
+    wire [`XLEN-1:0] per_cluster_ptw_miss_vaddr [`NUM_CLUSTERS][NUM_SOCKETS*`SOCKET_SIZE*2];
+    wire [NUM_SOCKETS*`SOCKET_SIZE*2-1:0] per_cluster_ptw_fill_valid [`NUM_CLUSTERS];
+    wire [NUM_SOCKETS*`SOCKET_SIZE*2-1:0] per_cluster_ptw_fill_ready [`NUM_CLUSTERS];
+    wire [`XLEN-1:0] per_cluster_ptw_fill_vaddr [`NUM_CLUSTERS][NUM_SOCKETS*`SOCKET_SIZE*2];
+    wire [`XLEN-1:0] per_cluster_ptw_fill_paddr [`NUM_CLUSTERS][NUM_SOCKETS*`SOCKET_SIZE*2];
+    wire [7:0]       per_cluster_ptw_fill_flags [`NUM_CLUSTERS][NUM_SOCKETS*`SOCKET_SIZE*2];
+
+    // Flatten per-cluster miss/fill into global PTW arrays
+    wire [TOTAL_PTW_REQS-1:0] ptw_miss_valid_all;
+    wire [TOTAL_PTW_REQS-1:0] ptw_miss_ready_all;
+    wire [`XLEN-1:0] ptw_miss_vaddr_all [TOTAL_PTW_REQS];
+    wire [TOTAL_PTW_REQS-1:0] ptw_fill_valid_all;
+    wire [TOTAL_PTW_REQS-1:0] ptw_fill_ready_all;
+    wire [`XLEN-1:0] ptw_fill_vaddr_all [TOTAL_PTW_REQS];
+    wire [`XLEN-1:0] ptw_fill_paddr_all [TOTAL_PTW_REQS];
+    wire [7:0]       ptw_fill_flags_all [TOTAL_PTW_REQS];
+
+    localparam CLUSTER_PTW_REQS = NUM_SOCKETS * `SOCKET_SIZE * 2;
+
+    for (genvar c = 0; c < `NUM_CLUSTERS; c++) begin : g_ptw_flatten
+        for (genvar r = 0; r < CLUSTER_PTW_REQS; r++) begin : g_req
+            assign ptw_miss_valid_all[c * CLUSTER_PTW_REQS + r]          = per_cluster_ptw_miss_valid[c][r];
+            assign per_cluster_ptw_miss_ready[c][r]                       = ptw_miss_ready_all[c * CLUSTER_PTW_REQS + r];
+            assign ptw_miss_vaddr_all[c * CLUSTER_PTW_REQS + r]           = per_cluster_ptw_miss_vaddr[c][r];
+            assign per_cluster_ptw_fill_valid[c][r]                       = ptw_fill_valid_all[c * CLUSTER_PTW_REQS + r];
+            assign ptw_fill_ready_all[c * CLUSTER_PTW_REQS + r]           = per_cluster_ptw_fill_ready[c][r];
+            assign per_cluster_ptw_fill_vaddr[c][r]                       = ptw_fill_vaddr_all[c * CLUSTER_PTW_REQS + r];
+            assign per_cluster_ptw_fill_paddr[c][r]                       = ptw_fill_paddr_all[c * CLUSTER_PTW_REQS + r];
+            assign per_cluster_ptw_fill_flags[c][r]                       = ptw_fill_flags_all[c * CLUSTER_PTW_REQS + r];
+        end
+    end
+
+    // PTW memory bus: device-level PTW reads page table entries via L3.
+    VX_mem_bus_if #(
+        .DATA_SIZE (`L2_LINE_SIZE),
+        .TAG_WIDTH (L2_MEM_TAG_WIDTH)
+    ) ptw_mem_bus ();
+
+    // SATP register: host writes via DCR bus before kernel launch
+    reg [`XLEN-1:0] device_satp;
+    always @(posedge clk) begin
+        if (dcr_bus_if.write_valid) begin
+            if (dcr_bus_if.write_addr == `VX_DCR_BASE_SATP0)
+                device_satp[31:0] <= dcr_bus_if.write_data;
+`ifdef XLEN_64
+            if (dcr_bus_if.write_addr == `VX_DCR_BASE_SATP1)
+                device_satp[63:32] <= dcr_bus_if.write_data;
+`endif
+        end
+    end
+
+    `RESET_RELAY (ptw_reset, reset);
+
+`ifdef PERF_ENABLE
+    wire [PERF_CTR_BITS-1:0] device_ptw_latency;
+    wire [PERF_CTR_BITS-1:0] device_pwc_hits;
+    wire [PERF_CTR_BITS-1:0] device_pwc_misses;
+    wire [PERF_CTR_BITS-1:0] device_pwc2_hits;
+    wire [PERF_CTR_BITS-1:0] device_pwc2_misses;
+`endif
+
+    VX_mmu_ptw #(
+        .DATA_SIZE      (`L2_LINE_SIZE),
+        .TAG_WIDTH      (L2_MEM_TAG_WIDTH),
+        .ADDR_WIDTH     (`MEM_ADDR_WIDTH - `CLOG2(`L2_LINE_SIZE)),
+        .PTW_SIZE       (`PTW_SIZE),
+        .NUM_REQUESTORS (TOTAL_PTW_REQS)
+    ) shared_ptw (
+        .clk        (clk),
+        .reset      (ptw_reset),
+        .satp       (device_satp),
+        .miss_valid (ptw_miss_valid_all),
+        .miss_ready (ptw_miss_ready_all),
+        .miss_vaddr (ptw_miss_vaddr_all),
+        .fill_valid (ptw_fill_valid_all),
+        .fill_ready (ptw_fill_ready_all),
+        .fill_vaddr (ptw_fill_vaddr_all),
+        .fill_paddr (ptw_fill_paddr_all),
+        .fill_flags (ptw_fill_flags_all),
+        .ptw_mem_if (ptw_mem_bus)
+    `ifdef PERF_ENABLE
+        ,.perf_ptw_latency  (device_ptw_latency)
+        ,.perf_pwc_hits     (device_pwc_hits)
+        ,.perf_pwc_misses   (device_pwc_misses)
+        ,.perf_pwc2_hits    (device_pwc2_hits)
+        ,.perf_pwc2_misses  (device_pwc2_misses)
+    `else
+        ,`UNUSED_PIN (perf_ptw_latency_placeholder)
+    `endif
+    );
+
+`endif // VM_ENABLE
 
     wire [`NUM_CLUSTERS-1:0] per_cluster_busy;
 
@@ -153,6 +281,27 @@ module Vortex import VX_gpu_pkg::*; (
             .dcr_bus_if         (cluster_dcr_bus_if),
 
             .mem_bus_if         (per_cluster_mem_bus_if[cluster_id * `L2_MEM_PORTS +: `L2_MEM_PORTS]),
+
+        `ifdef VM_ENABLE
+            .ptw_miss_valid     (per_cluster_ptw_miss_valid[cluster_id]),
+            .ptw_miss_vaddr     (per_cluster_ptw_miss_vaddr[cluster_id]),
+            .ptw_miss_ready     (per_cluster_ptw_miss_ready[cluster_id]),
+            .ptw_fill_valid     (per_cluster_ptw_fill_valid[cluster_id]),
+            .ptw_fill_ready     (per_cluster_ptw_fill_ready[cluster_id]),
+            .ptw_fill_vaddr     (per_cluster_ptw_fill_vaddr[cluster_id]),
+            .ptw_fill_paddr     (per_cluster_ptw_fill_paddr[cluster_id]),
+            .ptw_fill_flags     (per_cluster_ptw_fill_flags[cluster_id]),
+        `endif
+
+        `ifdef PERF_ENABLE
+        `ifdef VM_ENABLE
+            .ptw_latency_in     (device_ptw_latency),
+            .pwc_hits_in        (device_pwc_hits),
+            .pwc_misses_in      (device_pwc_misses),
+            .pwc2_hits_in       (device_pwc2_hits),
+            .pwc2_misses_in     (device_pwc2_misses),
+        `endif
+        `endif
 
             .busy               (per_cluster_busy[cluster_id])
         );

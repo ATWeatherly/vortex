@@ -331,6 +331,23 @@
     `define TLB_SIZE (32)
     `endif
 
+    // TLB_NUM_BANKS: number of independent TLB banks (concurrent lookups).
+    // Lane requests are distributed across banks by low-order VPN bits, so up
+    // to TLB_NUM_BANKS translations proceed per cycle and a miss in one bank
+    // does not block hits in the others. Must be a power of 2 and divide the
+    // TLB capacity (128) evenly. 1 = original single-ported behavior.
+    `ifndef TLB_NUM_BANKS
+    `define TLB_NUM_BANKS 1
+    `endif
+
+    // PTW_SIZE: number of concurrent walk slots in the shared PTW.
+    // Must be <= 2^(DCACHE_TAG_WIDTH_BASE + DCACHE_TLB_SOURCE_BITS) because
+    // the slot ID is stored in the PTW mem tag field for response routing.
+    // With the default config that field is 4 bits, so PTW_SIZE <= 16.
+    `ifndef PTW_SIZE
+    `define PTW_SIZE 8
+    `endif
+
 `endif
 
 // Pipeline Configuration /////////////////////////////////////////////////////

@@ -25,6 +25,9 @@ module VX_execute import VX_gpu_pkg::*; #(
 `ifdef PERF_ENABLE
     input sysmem_perf_t     sysmem_perf,
     input pipeline_perf_t   pipeline_perf,
+`ifdef VM_ENABLE
+    input mmu_perf_t        mmu_perf,
+`endif
 `endif
 
     input base_dcrs_t       base_dcrs,
@@ -45,6 +48,9 @@ module VX_execute import VX_gpu_pkg::*; #(
 
     // commit interface
     VX_commit_csr_if.slave  commit_csr_if
+`ifdef VM_ENABLE
+    ,output wire [`XLEN-1:0] satp_value
+`endif
 );
 
 `ifdef EXT_F_ENABLE
@@ -106,6 +112,9 @@ module VX_execute import VX_gpu_pkg::*; #(
     `ifdef PERF_ENABLE
         .sysmem_perf    (sysmem_perf),
         .pipeline_perf  (pipeline_perf),
+    `ifdef VM_ENABLE
+        .mmu_perf       (mmu_perf),
+    `endif
     `endif
         .base_dcrs      (base_dcrs),
         .dispatch_if    (dispatch_if[EX_SFU * `ISSUE_WIDTH +: `ISSUE_WIDTH]),
@@ -116,6 +125,10 @@ module VX_execute import VX_gpu_pkg::*; #(
         .commit_csr_if  (commit_csr_if),
         .sched_csr_if   (sched_csr_if),
         .warp_ctl_if    (warp_ctl_if)
+
+    `ifdef VM_ENABLE
+        ,.satp_value    (satp_value)
+    `endif
     );
 
 endmodule

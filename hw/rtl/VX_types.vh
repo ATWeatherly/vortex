@@ -25,7 +25,9 @@
 `define VX_DCR_BASE_STARTUP_ARG0        12'h003
 `define VX_DCR_BASE_STARTUP_ARG1        12'h004
 `define VX_DCR_BASE_MPM_CLASS           12'h005
-`define VX_DCR_BASE_STATE_END           12'h006
+`define VX_DCR_BASE_SATP0               12'h006
+`define VX_DCR_BASE_SATP1               12'h007
+`define VX_DCR_BASE_STATE_END           12'h008
 
 `define VX_DCR_BASE_STATE(addr)         ((addr) - `VX_DCR_BASE_STATE_BEGIN)
 `define VX_DCR_BASE_STATE_COUNT         (`VX_DCR_BASE_STATE_END-`VX_DCR_BASE_STATE_BEGIN)
@@ -182,6 +184,27 @@
 // PERF: coalescer
 `define VX_CSR_MPM_COALESCER_MISS       12'hB1F     // coalescer misses
 `define VX_CSR_MPM_COALESCER_MISS_H     12'hB9F
+// PERF: TLB (VM_ENABLE only)
+`define VX_CSR_MPM_TLB_READS            12'hB20     // total TLB lookups
+`define VX_CSR_MPM_TLB_READS_H          12'hBA0
+`define VX_CSR_MPM_TLB_HITS             12'hB21     // TLB hits
+`define VX_CSR_MPM_TLB_HITS_H           12'hBA1
+`define VX_CSR_MPM_TLB_MISSES           12'hB22     // TLB misses (triggered PTW)
+`define VX_CSR_MPM_TLB_MISSES_H         12'hBA2
+`define VX_CSR_MPM_TLB_EVICTS           12'hB23     // TLB evictions on fill
+`define VX_CSR_MPM_TLB_EVICTS_H         12'hBA3
+`define VX_CSR_MPM_PTW_WALKS            12'hB24     // PTW walks completed
+`define VX_CSR_MPM_PTW_WALKS_H          12'hBA4
+`define VX_CSR_MPM_PTW_LATENCY          12'hB25     // PTW total latency cycles
+`define VX_CSR_MPM_PTW_LATENCY_H        12'hBA5
+`define VX_CSR_MPM_PWC_HITS             12'hB26     // PWC1 hits (top-level entry cached)
+`define VX_CSR_MPM_PWC_HITS_H           12'hBA6
+`define VX_CSR_MPM_PWC_MISSES           12'hB27     // PWC1 misses (full walk from root)
+`define VX_CSR_MPM_PWC_MISSES_H         12'hBA7
+`define VX_CSR_MPM_PWC2_HITS            12'hB28     // PWC2 double-hits (both levels cached, SV39 only)
+`define VX_CSR_MPM_PWC2_HITS_H          12'hBA8
+`define VX_CSR_MPM_PWC2_MISSES          12'hB29     // PWC2 misses (PWC1 hit but PWC2 missed)
+`define VX_CSR_MPM_PWC2_MISSES_H        12'hBA9
 
 // <Add your own counters: use addresses hB03..B1F, hB83..hB9F>
 
