@@ -30,6 +30,7 @@
 #endif
 
 #include <limits>
+#include <sched.h>
 #include <stdarg.h>
 #include <string>
 #include <unordered_map>
@@ -700,6 +701,7 @@ public:
         return 0;
       if (std::chrono::steady_clock::now() >= deadline)
         return -1;
+      sched_yield();
     }
   }
 
