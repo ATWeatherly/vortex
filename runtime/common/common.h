@@ -37,9 +37,9 @@
 #endif
 
 #ifndef NDEBUG
-#define DBGPRINT(format, ...) do { printf("[VXDRV] " format "", ##__VA_ARGS__); } while (0)
+#define DBGPRINT(...) do { printf("[VXDRV] " __VA_ARGS__); } while (0)
 #else
-#define DBGPRINT(format, ...) ((void)0)
+#define DBGPRINT(...) ((void)0)
 #endif
 
 #define CHECK_ERR(_expr, _cleanup) \

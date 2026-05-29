@@ -21,7 +21,7 @@ CXXFLAGS += $(CONFIGS)
 
 LDFLAGS += -shared -luuid -ldl -pthread
 
-SRCS = $(SRC_DIR)/vortex.cpp $(SRC_DIR)/driver.cpp
+SRCS = $(SRC_DIR)/vortex.cpp $(SRC_DIR)/driver.cpp $(RT_COMMON_DIR)/vm.cpp
 
 # set up target types
 ifeq ($(TARGET), opaesim)

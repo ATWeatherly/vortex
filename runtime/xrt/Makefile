@@ -10,12 +10,13 @@ SRC_DIR := $(VORTEX_HOME)/runtime/xrt
 CXXFLAGS += -std=c++17 -Wall -Wextra -Wfatal-errors
 CXXFLAGS += -I$(INC_DIR) -I$(ROOT_DIR)/hw -I$(XILINX_XRT)/include -I$(SW_COMMON_DIR) -I$(RT_COMMON_DIR)
 CXXFLAGS += -DXLEN_$(XLEN)
+CXXFLAGS += $(CONFIGS)
 CXXFLAGS += -fPIC
 
 LDFLAGS += -shared -pthread
 LDFLAGS += -L$(XILINX_XRT)/lib
 
-SRCS := $(SRC_DIR)/vortex.cpp $(SIM_DIR)/common/util.cpp
+SRCS := $(SRC_DIR)/vortex.cpp $(SIM_DIR)/common/util.cpp $(RT_COMMON_DIR)/vm.cpp
 
 # set up target types
 ifeq ($(TARGET), xrtsim)

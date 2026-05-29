@@ -527,6 +527,32 @@ extern int vx_dump_perf(vx_device_h hdevice, FILE* stream) {
       int coalescer_utilization = calcAvgPercent(dcache_requests_per_core - coalescer_misses, dcache_requests_per_core);
       fprintf(stream, "PERF: core%d: coalescer misses=%ld (hit ratio=%d%%)\n", core_id, coalescer_misses, coalescer_utilization);
 
+      // PERF: TLB (only printed if VM is enabled and counters are non-zero)
+      uint64_t tlb_reads = 0, tlb_hits = 0, tlb_misses = 0, tlb_evictions = 0, ptw_walks = 0, ptw_latency = 0;
+      uint64_t pwc_hits = 0, pwc_misses = 0, pwc2_hits = 0, pwc2_misses = 0;
+      vx_mpm_query(hdevice, VX_CSR_MPM_TLB_READS, core_id, &tlb_reads);
+      vx_mpm_query(hdevice, VX_CSR_MPM_TLB_HITS, core_id, &tlb_hits);
+      vx_mpm_query(hdevice, VX_CSR_MPM_TLB_MISSES, core_id, &tlb_misses);
+      vx_mpm_query(hdevice, VX_CSR_MPM_TLB_EVICTS, core_id, &tlb_evictions);
+      vx_mpm_query(hdevice, VX_CSR_MPM_PTW_WALKS, core_id, &ptw_walks);
+      vx_mpm_query(hdevice, VX_CSR_MPM_PTW_LATENCY, core_id, &ptw_latency);
+      vx_mpm_query(hdevice, VX_CSR_MPM_PWC_HITS, core_id, &pwc_hits);
+      vx_mpm_query(hdevice, VX_CSR_MPM_PWC_MISSES, core_id, &pwc_misses);
+      vx_mpm_query(hdevice, VX_CSR_MPM_PWC2_HITS, core_id, &pwc2_hits);
+      vx_mpm_query(hdevice, VX_CSR_MPM_PWC2_MISSES, core_id, &pwc2_misses);
+      if (tlb_reads > 0) {
+        int tlb_hit_ratio = calcAvgPercent(tlb_hits, tlb_reads);
+        uint64_t avg_ptw_latency = (ptw_walks > 0) ? (ptw_latency / ptw_walks) : 0;
+        int pwc_hit_ratio = calcAvgPercent(pwc_hits, pwc_hits + pwc_misses);
+        int pwc2_hit_ratio = calcAvgPercent(pwc2_hits, pwc_hits); // pwc2 hits as fraction of pwc1 hits
+        fprintf(stream, "PERF: core%d: tlb reads=%ld, hits=%ld (%d%%), misses=%ld, evictions=%ld, ptw_walks=%ld, ptw_latency=%ld cycles (avg=%ld cycles/walk)\n",
+                core_id, tlb_reads, tlb_hits, tlb_hit_ratio, tlb_misses, tlb_evictions, ptw_walks, ptw_latency, avg_ptw_latency);
+        fprintf(stream, "PERF: core%d: pwc hits=%ld, misses=%ld (hit ratio=%d%%)\n",
+                core_id, pwc_hits, pwc_misses, pwc_hit_ratio);
+        fprintf(stream, "PERF: core%d: pwc2 hits=%ld, misses=%ld (double-hit ratio=%d%% of pwc1 hits)\n",
+                core_id, pwc2_hits, pwc2_misses, pwc2_hit_ratio);
+      }
+
       if (l2cache_enable) {
         // PERF: L2cache
         uint64_t tmp;

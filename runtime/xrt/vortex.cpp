@@ -13,6 +13,12 @@
 
 #include <common.h>
 
+#ifdef VM_ENABLE
+#include <vm.h>
+#include <VX_config.h>
+#include <memory>
+#endif
+
 #ifdef SCOPE
 #include "scope.h"
 #endif
@@ -108,9 +114,16 @@ public:
     , xrtDevice_(nullptr)
     , xrtKernel_(nullptr)
   #endif
+#ifdef VM_ENABLE
+    , pt_reserved_(false)
+#endif
   {}
 
   ~vx_device() {
+  #ifdef VM_ENABLE
+    if (pt_reserved_)
+      global_mem_.release(PAGE_TABLE_BASE_ADDR);
+  #endif
   #ifdef SCOPE
     vx_scope_stop(this);
   #endif
@@ -276,6 +289,19 @@ public:
     std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
   #endif
 
+    // DCRs are not reset by CTL_AP_RESET, so a SATP value written by a prior
+    // VM-enabled run persists into the next run. Zero it explicitly here so
+    // the hardware starts in bare mode (no address translation) unless VM init
+    // overwrites it below.
+    CHECK_ERR(this->dcr_write(VX_DCR_BASE_SATP0, 0), { return err; });
+  #ifdef XLEN_64
+    CHECK_ERR(this->dcr_write(VX_DCR_BASE_SATP1, 0), { return err; });
+  #endif
+
+  #ifdef VM_ENABLE
+    CHECK_ERR(init_VM(), { return err; });
+  #endif
+
     return 0;
   }
 
@@ -325,7 +351,11 @@ public:
   }
 
   int mem_alloc(uint64_t size, int flags, uint64_t *dev_addr) {
+  #ifdef VM_ENABLE
+    uint64_t asize = aligned_size(size, MEM_PAGE_SIZE);  // page-align for VM
+  #else
     uint64_t asize = aligned_size(size, CACHE_BLOCK_SIZE);
+  #endif
     uint64_t addr;
     CHECK_ERR(global_mem_.allocate(asize, &addr), {
       return err;
@@ -346,6 +376,11 @@ public:
       return err;
     });
     *dev_addr = addr;
+  #ifdef VM_ENABLE
+    CHECK_ERR(vm_mgr_->phy_to_virt_map(asize, dev_addr, flags), {
+      return err;
+    });
+  #endif
     return 0;
   }
 
@@ -372,6 +407,9 @@ public:
   }
 
   int mem_free(uint64_t dev_addr) {
+  #ifdef VM_ENABLE
+    dev_addr = vm_mgr_->page_table_walk(dev_addr);
+  #endif
     CHECK_ERR(global_mem_.release(dev_addr), {
       return err;
     });
@@ -508,21 +546,11 @@ public:
     return 0;
   }
 
-  int upload(uint64_t dev_addr, const void *src, uint64_t size) {
-    auto host_ptr = (const uint8_t *)src;
-
-    // check alignment
-    if (!is_aligned(dev_addr, CACHE_BLOCK_SIZE))
-      return -1;
-
+  // DMA write to a physical device address — used directly by VMManager callbacks.
+  int upload_phys(uint64_t phys_addr, const uint8_t *src, uint64_t size) {
     auto asize = aligned_size(size, CACHE_BLOCK_SIZE);
-
-    // bound checking
-    if (dev_addr + asize > global_mem_size_)
-      return -1;
-
-    for (uint64_t end = dev_addr + asize; dev_addr < end;
-         dev_addr += CACHE_BLOCK_SIZE, host_ptr += CACHE_BLOCK_SIZE) {
+    for (uint64_t end = phys_addr + asize; phys_addr < end;
+         phys_addr += CACHE_BLOCK_SIZE, src += CACHE_BLOCK_SIZE) {
     #ifdef BANK_INTERLEAVE
       asize = CACHE_BLOCK_SIZE;
     #else
@@ -531,17 +559,17 @@ public:
       uint32_t bo_index;
       uint64_t bo_offset;
       xrt_buffer_t xrtBuffer;
-      CHECK_ERR(this->get_bank_info(dev_addr, &bo_index, &bo_offset), {
+      CHECK_ERR(this->get_bank_info(phys_addr, &bo_index, &bo_offset), {
         return err;
       });
       CHECK_ERR(this->get_buffer(bo_index, &xrtBuffer), {
         return err;
       });
     #ifdef CPP_API
-      xrtBuffer.write(host_ptr, size, bo_offset);
+      xrtBuffer.write(src, size, bo_offset);
       xrtBuffer.sync(XCL_BO_SYNC_BO_TO_DEVICE, size, bo_offset);
     #else
-      CHECK_ERR(xrtBOWrite(xrtBuffer, host_ptr, size, bo_offset), {
+      CHECK_ERR(xrtBOWrite(xrtBuffer, src, size, bo_offset), {
         dump_xrt_error(xrtDevice_, err);
         return err;
       });
@@ -549,26 +577,16 @@ public:
         dump_xrt_error(xrtDevice_, err);
         return err;
       });
-#endif
+    #endif
     }
     return 0;
   }
 
-  int download(void *dest, uint64_t dev_addr, uint64_t size) {
-    auto host_ptr = (uint8_t *)dest;
-
-    // check alignment
-    if (!is_aligned(dev_addr, CACHE_BLOCK_SIZE))
-      return -1;
-
+  // DMA read from a physical device address — used directly by VMManager callbacks.
+  int download_phys(uint64_t phys_addr, uint8_t *dst, uint64_t size) {
     auto asize = aligned_size(size, CACHE_BLOCK_SIZE);
-
-    // bound checking
-    if (dev_addr + asize > global_mem_size_)
-      return -1;
-
-    for (uint64_t end = dev_addr + asize; dev_addr < end;
-         dev_addr += CACHE_BLOCK_SIZE, host_ptr += CACHE_BLOCK_SIZE) {
+    for (uint64_t end = phys_addr + asize; phys_addr < end;
+         phys_addr += CACHE_BLOCK_SIZE, dst += CACHE_BLOCK_SIZE) {
     #ifdef BANK_INTERLEAVE
       asize = CACHE_BLOCK_SIZE;
     #else
@@ -577,7 +595,7 @@ public:
       uint32_t bo_index;
       uint64_t bo_offset;
       xrt_buffer_t xrtBuffer;
-      CHECK_ERR(this->get_bank_info(dev_addr, &bo_index, &bo_offset), {
+      CHECK_ERR(this->get_bank_info(phys_addr, &bo_index, &bo_offset), {
         return err;
       });
       CHECK_ERR(this->get_buffer(bo_index, &xrtBuffer), {
@@ -585,19 +603,61 @@ public:
       });
     #ifdef CPP_API
       xrtBuffer.sync(XCL_BO_SYNC_BO_FROM_DEVICE, size, bo_offset);
-      xrtBuffer.read(host_ptr, size, bo_offset);
+      xrtBuffer.read(dst, size, bo_offset);
     #else
       CHECK_ERR(xrtBOSync(xrtBuffer, XCL_BO_SYNC_BO_FROM_DEVICE, size, bo_offset), {
         dump_xrt_error(xrtDevice_, err);
         return err;
       });
-      CHECK_ERR(xrtBORead(xrtBuffer, host_ptr, size, bo_offset), {
+      CHECK_ERR(xrtBORead(xrtBuffer, dst, size, bo_offset), {
         dump_xrt_error(xrtDevice_, err);
         return err;
       });
     #endif
     }
     return 0;
+  }
+
+  int upload(uint64_t dev_addr, const void *src, uint64_t size) {
+    // check alignment
+    if (!is_aligned(dev_addr, CACHE_BLOCK_SIZE))
+      return -1;
+
+    auto asize = aligned_size(size, CACHE_BLOCK_SIZE);
+
+  #ifdef VM_ENABLE
+    uint64_t phys_addr = vm_mgr_->page_table_walk(dev_addr);
+    DBGPRINT("  [RT:upload] vAddr=0x%lx -> pAddr=0x%lx\n", dev_addr, phys_addr);
+  #else
+    uint64_t phys_addr = dev_addr;
+  #endif
+
+    // bound checking against physical device memory
+    if (phys_addr + asize > global_mem_size_)
+      return -1;
+
+    return upload_phys(phys_addr, (const uint8_t *)src, size);
+  }
+
+  int download(void *dest, uint64_t dev_addr, uint64_t size) {
+    // check alignment
+    if (!is_aligned(dev_addr, CACHE_BLOCK_SIZE))
+      return -1;
+
+    auto asize = aligned_size(size, CACHE_BLOCK_SIZE);
+
+  #ifdef VM_ENABLE
+    uint64_t phys_addr = vm_mgr_->page_table_walk(dev_addr);
+    DBGPRINT("  [RT:download] vAddr=0x%lx -> pAddr=0x%lx\n", dev_addr, phys_addr);
+  #else
+    uint64_t phys_addr = dev_addr;
+  #endif
+
+    // bound checking against physical device memory
+    if (phys_addr + asize > global_mem_size_)
+      return -1;
+
+    return download_phys(phys_addr, (uint8_t *)dest, size);
   }
 
   int start(uint64_t krnl_addr, uint64_t args_addr) {
@@ -674,11 +734,11 @@ public:
 
   int mpm_query(uint32_t addr, uint32_t core_id, uint64_t *value) {
     uint32_t offset = addr - VX_CSR_MPM_BASE;
-    if (offset > 31)
+    if (offset > 47)
       return -1;
     if (mpm_cache_.count(core_id) == 0) {
-      uint64_t mpm_mem_addr = IO_MPM_ADDR + core_id * 32 * sizeof(uint64_t);
-      CHECK_ERR(this->download(mpm_cache_[core_id].data(), mpm_mem_addr, 32 * sizeof(uint64_t)), {
+      uint64_t mpm_mem_addr = IO_MPM_ADDR + core_id * 48 * sizeof(uint64_t);
+      CHECK_ERR(this->download(mpm_cache_[core_id].data(), mpm_mem_addr, 48 * sizeof(uint64_t)), {
         return err;
       });
     }
@@ -695,9 +755,34 @@ private:
   uint64_t isa_caps_;
   uint64_t global_mem_size_;
   DeviceConfig dcrs_;
-  std::unordered_map<uint32_t, std::array<uint64_t, 32>> mpm_cache_;
+  std::unordered_map<uint32_t, std::array<uint64_t, 48>> mpm_cache_;
   uint32_t lg2_num_banks_;
   uint32_t lg2_bank_size_;
+
+#ifdef VM_ENABLE
+  std::unique_ptr<VMManager> vm_mgr_;
+  bool pt_reserved_;
+
+  int init_VM() {
+    DBGPRINT("[RT:init_VM] Initialize VM\n");
+    CHECK_ERR(mem_reserve(PAGE_TABLE_BASE_ADDR, PT_SIZE_LIMIT, VX_MEM_READ_WRITE), {
+      return err;
+    });
+    pt_reserved_ = true;
+    VMDevice vm_dev;
+    vm_dev.mem_write = [this](uint64_t addr, const uint8_t* src, uint64_t size) -> int {
+      return this->upload_phys(addr, src, size);
+    };
+    vm_dev.mem_read = [this](uint64_t addr, uint8_t* dst, uint64_t size) -> int {
+      return this->download_phys(addr, dst, size);
+    };
+    vm_dev.dcr_write = [this](uint32_t addr, uint32_t value) -> int {
+      return this->dcr_write(addr, value);
+    };
+    vm_mgr_ = std::make_unique<VMManager>(vm_dev);
+    return vm_mgr_->init();
+  }
+#endif
 
 #ifdef BANK_INTERLEAVE
 
