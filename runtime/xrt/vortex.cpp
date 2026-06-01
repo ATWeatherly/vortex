@@ -30,7 +30,6 @@
 #endif
 
 #include <limits>
-#include <sched.h>
 #include <stdarg.h>
 #include <string>
 #include <unordered_map>
@@ -693,29 +692,34 @@ public:
   }
 
   int ready_wait(uint64_t timeout) {
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout);
-    // Adaptive backoff: pure spin for the first ~1k iterations (covers
-    // microsecond-scale kernels), then yield, then short sleeps. This
-    // caps MMIO read rate so we don't saturate PCIe or race with XRT
-    // internal status polling.
-    uint32_t iters = 0;
+    struct timespec sleep_time;
+  #ifndef NDEBUG
+    sleep_time.tv_sec = 1;
+    sleep_time.tv_nsec = 0;
+  #else
+    sleep_time.tv_sec = 0;
+    sleep_time.tv_nsec = 1000000;
+  #endif
+
+    // to milliseconds
+    uint64_t sleep_time_ms = (sleep_time.tv_sec * 1000) + (sleep_time.tv_nsec / 1000000);
+
     for (;;) {
       uint32_t status = 0;
-      CHECK_ERR(this->read_register(MMIO_CTL_ADDR, &status), { return err; });
-      if ((status & CTL_AP_DONE) == CTL_AP_DONE)
-        return 0;
-      if (std::chrono::steady_clock::now() >= deadline)
+      CHECK_ERR(this->read_register(MMIO_CTL_ADDR, &status), {
+        return err;
+      });
+      bool is_done = (status & CTL_AP_DONE) == CTL_AP_DONE;
+      if (is_done)
+        break;
+      if (0 == timeout) {
         return -1;
-      ++iters;
-      if (iters < 1024) {
-        // tight spin
-      } else if (iters < 16384) {
-        sched_yield();
-      } else {
-        struct timespec ts = {0, 10000}; // 10us
-        nanosleep(&ts, nullptr);
       }
-    }
+      nanosleep(&sleep_time, nullptr);
+      timeout -= sleep_time_ms;
+    };
+
+    return 0;
   }
 
   int dcr_write(uint32_t addr, uint32_t value) {
