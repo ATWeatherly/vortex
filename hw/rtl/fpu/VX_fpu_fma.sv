@@ -152,7 +152,16 @@ module VX_fpu_fma import VX_gpu_pkg::*, VX_fpu_pkg::*; #(
 
         xil_fma fma (
             .aclk                (clk),
-            .aclken              (pe_enable),
+            // Force the clock-enable high during reset: per Xilinx PG060 the IP
+            // only samples ARESETn while ACLKEN is high, so without this the
+            // per-launch reset may not actually flush the pipeline.
+            .aclken              (pe_enable | reset),
+            // Flush the 16-deep IP pipeline on the per-launch core reset so it
+            // cannot leak the previous launch's partial products into the first
+            // multiplies of the next launch (silicon-only FP-multiply stale-state
+            // fault; the validity tracker in VX_pe_serializer is already reset).
+            // aresetn is active-low, synchronous, sampled while aclken is high.
+            .aresetn             (~reset),
             .s_axis_a_tvalid     (1'b1),
             .s_axis_a_tdata      (pe_data_in[i][0 +: 32]),
             .s_axis_b_tvalid     (1'b1),
