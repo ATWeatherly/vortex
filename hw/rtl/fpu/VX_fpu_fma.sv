@@ -93,6 +93,10 @@ module VX_fpu_fma import VX_gpu_pkg::*, VX_fpu_pkg::*; #(
         assign data_in[i][96 +: INST_FRM_BITS] = frm;
     end
 
+    // FREE_RUN=1: the per-lane FMA IPs are never clock-gated (pe_enable held high
+    // below) — backpressure is absorbed by the serializer's credit-gated input and
+    // output FIFO. This removes the shared data-dependent pe_enable/aclken net that
+    // skews across the PE array (the lane-0 x lane-3 coupling root cause).
     VX_pe_serializer #(
         .NUM_LANES  (NUM_LANES),
         .NUM_PES    (NUM_PES),
@@ -101,7 +105,8 @@ module VX_fpu_fma import VX_gpu_pkg::*, VX_fpu_pkg::*; #(
         .DATA_OUT_WIDTH (`FP_FLAGS_BITS + 32),
         .TAG_WIDTH  (NUM_LANES + TAG_WIDTH),
         .PE_REG     (0),
-        .OUT_BUF    (2)
+        .OUT_BUF    (2),
+        .FREE_RUN   (1)
     ) pe_serializer (
         .clk        (clk),
         .reset      (reset),
