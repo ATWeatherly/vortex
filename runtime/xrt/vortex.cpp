@@ -698,7 +698,7 @@ public:
     sleep_time.tv_nsec = 0;
   #else
     sleep_time.tv_sec = 0;
-    sleep_time.tv_nsec = 500000;   // 0.5 ms (diagnostic: halved completion-poll interval)
+    sleep_time.tv_nsec = 100000;   // 0.1 ms (diagnostic: lowered completion-poll interval; still > light-kernel runtime)
   #endif
 
     // to milliseconds (ceil so a sub-1ms interval still decrements the timeout)
