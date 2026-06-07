@@ -698,11 +698,12 @@ public:
     sleep_time.tv_nsec = 0;
   #else
     sleep_time.tv_sec = 0;
-    sleep_time.tv_nsec = 1000000;
+    sleep_time.tv_nsec = 500000;   // 0.5 ms (diagnostic: halved completion-poll interval)
   #endif
 
-    // to milliseconds
-    uint64_t sleep_time_ms = (sleep_time.tv_sec * 1000) + (sleep_time.tv_nsec / 1000000);
+    // to milliseconds (ceil so a sub-1ms interval still decrements the timeout)
+    uint64_t sleep_time_ms = (sleep_time.tv_sec * 1000)
+                           + ((sleep_time.tv_nsec + 999999) / 1000000);
 
     for (;;) {
       uint32_t status = 0;
