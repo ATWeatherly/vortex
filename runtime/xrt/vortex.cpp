@@ -698,12 +698,15 @@ public:
     sleep_time.tv_nsec = 0;
   #else
     sleep_time.tv_sec = 0;
-    sleep_time.tv_nsec = 100000;   // 0.1 ms (diagnostic: lowered completion-poll interval; still > light-kernel runtime)
+    sleep_time.tv_nsec = 100000000;   // 100 ms (diagnostic: completion-poll interval)
   #endif
 
     // to milliseconds (ceil so a sub-1ms interval still decrements the timeout)
     uint64_t sleep_time_ms = (sleep_time.tv_sec * 1000)
                            + ((sleep_time.tv_nsec + 999999) / 1000000);
+
+    int sleep_us = (int)(sleep_time.tv_sec * 1000000 + sleep_time.tv_nsec / 1000);
+    fprintf(stderr, "[RW] sleep=%d us\n", sleep_us);
 
     for (;;) {
       uint32_t status = 0;
