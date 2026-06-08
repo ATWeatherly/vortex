@@ -97,6 +97,32 @@ static void dump_xrt_error(xrtDeviceHandle xrtDevice, xrtErrorCode err) {
 
 ///////////////////////////////////////////////////////////////////////////////
 
+// ---- launch-path timing instrumentation ----
+// Enable by setting VORTEX_RT_TIMING in the environment:
+//   VORTEX_RT_TIMING=1  -> print a cumulative breakdown at device teardown
+//   VORTEX_RT_TIMING=2  -> also print every upload/download/ready_wait call
+static inline uint64_t rt_now_us() {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (uint64_t)ts.tv_sec * 1000000ull + (uint64_t)ts.tv_nsec / 1000ull;
+}
+
+// RAII helper: adds elapsed wall time (us) to *accum and bumps *count on scope exit.
+// Robust to the multiple early-return paths in upload()/download().
+struct rt_scoped_timer {
+  uint64_t start_us;
+  uint64_t *accum_us;
+  uint64_t *count;
+  rt_scoped_timer(uint64_t *accum, uint64_t *cnt)
+    : start_us(rt_now_us()), accum_us(accum), count(cnt) {}
+  ~rt_scoped_timer() {
+    *accum_us += rt_now_us() - start_us;
+    if (count) ++(*count);
+  }
+};
+
+///////////////////////////////////////////////////////////////////////////////
+
 class vx_device {
 public:
   vx_device()
@@ -111,6 +137,20 @@ public:
   {}
 
   ~vx_device() {
+    if (rt_timing_ >= 1) {
+      uint64_t total = t_upload_us_ + t_download_us_ + t_readywait_us_;
+      fprintf(stderr, "[RT-TIME] ===== launch-path breakdown =====\n");
+      fprintf(stderr, "[RT-TIME] upload   : %10lu us  calls=%-6lu bytes=%-12lu\n",
+              t_upload_us_, n_upload_, up_bytes_);
+      fprintf(stderr, "[RT-TIME] download : %10lu us  calls=%-6lu bytes=%-12lu\n",
+              t_download_us_, n_download_, dn_bytes_);
+      fprintf(stderr, "[RT-TIME] ready_wait: %9lu us  calls=%-6lu polls=%-12lu\n",
+              t_readywait_us_, n_readywait_, n_polls_);
+      fprintf(stderr, "[RT-TIME] ready_wait avg poll/call=%.1f  (sleep slack lives here)\n",
+              n_readywait_ ? (double)n_polls_ / (double)n_readywait_ : 0.0);
+      fprintf(stderr, "[RT-TIME] sum(up+dn+wait)=%lu us\n", total);
+      fprintf(stderr, "[RT-TIME] ==================================\n");
+    }
   #ifdef SCOPE
     vx_scope_stop(this);
   #endif
@@ -132,6 +172,9 @@ public:
   }
 
   int init() {
+    const char *rt_timing_s = getenv("VORTEX_RT_TIMING");
+    rt_timing_ = (rt_timing_s != nullptr) ? atoi(rt_timing_s) : 0;
+
     int device_index = DEFAULT_DEVICE_INDEX;
     const char *device_index_s = getenv("XRT_DEVICE_INDEX");
     if (device_index_s == nullptr || device_index_s[0] == '\0')
@@ -522,6 +565,10 @@ public:
   }
 
   int upload(uint64_t dev_addr, const void *src, uint64_t size) {
+    rt_scoped_timer _rt(&t_upload_us_, &n_upload_);
+    up_bytes_ += size;
+    if (rt_timing_ >= 2)
+      fprintf(stderr, "[RT-TIME] upload  dev=0x%lx size=%lu\n", dev_addr, size);
     auto host_ptr = (const uint8_t *)src;
 
     // check alignment
@@ -594,6 +641,10 @@ public:
   }
 
   int download(void *dest, uint64_t dev_addr, uint64_t size) {
+    rt_scoped_timer _rt(&t_download_us_, &n_download_);
+    dn_bytes_ += size;
+    if (rt_timing_ >= 2)
+      fprintf(stderr, "[RT-TIME] download dev=0x%lx size=%lu\n", dev_addr, size);
     auto host_ptr = (uint8_t *)dest;
 
     // check alignment
@@ -692,6 +743,8 @@ public:
   }
 
   int ready_wait(uint64_t timeout) {
+    rt_scoped_timer _rt(&t_readywait_us_, &n_readywait_);
+    uint64_t polls = 0;
     struct timespec sleep_time;
   #ifndef NDEBUG
     sleep_time.tv_sec = 1;
@@ -706,19 +759,26 @@ public:
                            + ((sleep_time.tv_nsec + 999999) / 1000000);
 
     for (;;) {
+      ++polls;
       uint32_t status = 0;
       CHECK_ERR(this->read_register(MMIO_CTL_ADDR, &status), {
+        n_polls_ += polls;
         return err;
       });
       bool is_done = (status & CTL_AP_DONE) == CTL_AP_DONE;
       if (is_done)
         break;
       if (0 == timeout) {
+        n_polls_ += polls;
         return -1;
       }
       nanosleep(&sleep_time, nullptr);
       timeout -= sleep_time_ms;
     };
+
+    n_polls_ += polls;
+    if (rt_timing_ >= 2)
+      fprintf(stderr, "[RT-TIME] ready_wait polls=%lu\n", polls);
 
     return 0;
   }
@@ -764,6 +824,12 @@ private:
   std::unordered_map<uint32_t, std::array<uint64_t, 32>> mpm_cache_;
   uint32_t lg2_num_banks_;
   uint32_t lg2_bank_size_;
+
+  // launch-path timing accumulators (us)
+  int      rt_timing_ = 0;     // 0=off, 1=summary, >=2=per-call
+  uint64_t t_upload_us_ = 0,    n_upload_ = 0,   up_bytes_ = 0;
+  uint64_t t_download_us_ = 0,  n_download_ = 0, dn_bytes_ = 0;
+  uint64_t t_readywait_us_ = 0, n_readywait_ = 0, n_polls_ = 0;
 
 #ifndef BANK_INTERLEAVE
   std::unordered_map<uint64_t, uint64_t> alloc_size_map_;
