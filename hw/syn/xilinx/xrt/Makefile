@@ -115,6 +115,12 @@ include $(SRC_DIR)/platforms.mk
 VPP_FLAGS += --report_level 2
 VPP_FLAGS += --config $(SRC_DIR)/vitis.ini
 
+# Kernel clock target (MHz). Platform default is 300 MHz, which the Vortex
+# kernel clock (clk_kernel_00) currently fails to close (WNS -0.373 ns).
+# Lower this to buy timing margin and to fit larger configurations.
+KERNEL_FREQ ?= 250
+VPP_FLAGS += --kernel_frequency $(KERNEL_FREQ)
+
 # Enable perf counters
 ifdef PERF
 	CFLAGS += -DPERF_ENABLE
