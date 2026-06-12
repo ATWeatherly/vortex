@@ -42,7 +42,11 @@ using namespace vortex;
 #define CPP_API
 #endif
 
-// #define BANK_INTERLEAVE
+// Enabled to match the hardware line-interleave (PLATFORM_MEMORY_INTERLEAVE=1)
+// when the U50 uses the un-merged per-bank AXI config (8 masters) in platforms.mk.
+// Buffers are striped across all banks so each matmul spans all HBM channels.
+// Revert (re-comment) if rebuilding the merged single-master bitstream.
+#define BANK_INTERLEAVE
 
 #define MMIO_CTL_ADDR 0x00
 #define MMIO_DEV_ADDR 0x10

@@ -22,9 +22,30 @@ ifneq ($(findstring xilinx_u55c,$(XSA)),)
   #VPP_FLAGS += $(foreach i,$(shell seq 0 31), --connectivity.sp vortex_afu_1.m_axi_mem_$(i):HBM[$(i)])
 else ifneq ($(findstring xilinx_u50,$(XSA)),)
   # 8 GB of HBM2 with 32 channels (256 MB per channel)
-  CONFIGS += -DPLATFORM_MEMORY_NUM_BANKS=32 -DPLATFORM_MEMORY_ADDR_WIDTH=33
-  CONFIGS += -DPLATFORM_MERGED_MEMORY_INTERFACE
-  VPP_FLAGS += --connectivity.sp vortex_afu_1.m_axi_mem_0:HBM[0:31]
+  # Per-bank split: 8 AXI masters (= VX_MEM_PORTS for SOCKET_SIZE=2, 4 cores),
+  # line-interleaved (PLATFORM_MEMORY_INTERLEAVE defaults to 1, so each buffer is
+  # striped across all 8 masters). Each master -> 4 HBM channels (1 GB); all 32
+  # channels / 8 GB used. NUM_BANKS must equal VX_MEM_PORTS for a 1:1 port<->master
+  # map. ADDR_WIDTH stays 33 (total 8 GB; 33-3 = 30 = 1 GB per master).
+  # NOTE: requires BANK_INTERLEAVE enabled in runtime/xrt/vortex.cpp to match the
+  # hardware line-interleave; smoke-test vecadd/sgemm on HW before trusting llama2.
+  # SOCKET_SIZE=2 is what makes VX_MEM_PORTS=8 (1 dcache per 2 cores) for a clean
+  # 1:1 port<->master map; set here (not on the make CLI) so it isn't clobbered by
+  # command-line CONFIGS= overriding the Makefile's CONFIGS += chain.
+  CONFIGS += -DSOCKET_SIZE=2
+  CONFIGS += -DPLATFORM_MEMORY_NUM_BANKS=8 -DPLATFORM_MEMORY_ADDR_WIDTH=33
+  VPP_FLAGS += --connectivity.sp vortex_afu_1.m_axi_mem_0:HBM[0:3]
+  VPP_FLAGS += --connectivity.sp vortex_afu_1.m_axi_mem_1:HBM[4:7]
+  VPP_FLAGS += --connectivity.sp vortex_afu_1.m_axi_mem_2:HBM[8:11]
+  VPP_FLAGS += --connectivity.sp vortex_afu_1.m_axi_mem_3:HBM[12:15]
+  VPP_FLAGS += --connectivity.sp vortex_afu_1.m_axi_mem_4:HBM[16:19]
+  VPP_FLAGS += --connectivity.sp vortex_afu_1.m_axi_mem_5:HBM[20:23]
+  VPP_FLAGS += --connectivity.sp vortex_afu_1.m_axi_mem_6:HBM[24:27]
+  VPP_FLAGS += --connectivity.sp vortex_afu_1.m_axi_mem_7:HBM[28:31]
+  # Original single merged-master config (restore to revert to 1 HBM-channel-group):
+  #CONFIGS += -DPLATFORM_MEMORY_NUM_BANKS=32 -DPLATFORM_MEMORY_ADDR_WIDTH=33
+  #CONFIGS += -DPLATFORM_MERGED_MEMORY_INTERFACE
+  #VPP_FLAGS += --connectivity.sp vortex_afu_1.m_axi_mem_0:HBM[0:31]
 else ifneq ($(findstring xilinx_u280,$(XSA)),)
   # 8 GB of HBM2 with 32 channels (256 MB per channel)
   CONFIGS += -DPLATFORM_MEMORY_NUM_BANKS=32 -DPLATFORM_MEMORY_ADDR_WIDTH=33
