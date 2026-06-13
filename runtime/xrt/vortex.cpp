@@ -289,6 +289,48 @@ public:
 
     printf("info: device name=%s, memory_capacity=0x%lx bytes, memory_banks=%ld.\n", device_name.c_str(), global_mem_size_, num_banks);
 
+    // ---- BO memory-group probe (VORTEX_BO_PROBE=1) ----
+    // Diagnostic for the 8-channel U50 "userptr bo: Operation not permitted" bug:
+    // per-bank BOs are allocated with a raw bank index as the XRT memory group,
+    // which on this shell resolves to a single 256 MB HBM channel rather than the
+    // 1 GB interleaved MBG group, so any BO > 256 MB fails. This probe allocates a
+    // throwaway device BO at each candidate memory-group index (largest size first)
+    // and reports the largest size each index accepts, so we can find which index
+    // (if any) maps to a full 1 GB group. It then exits without touching the device
+    // further. Range overridable with VORTEX_BO_PROBE_MAX (default 40 covers
+    // 32 HBM channels + PLRAM + HOST + any grouped indices).
+    if (const char *probe = getenv("VORTEX_BO_PROBE"); probe && probe[0] == '1') {
+      const uint64_t MB = 1ull << 20;
+      const uint64_t sizes[] = { 1024 * MB, 512 * MB, 256 * MB, 64 * MB, 16 * MB };
+      int max_idx = 40;
+      if (const char *mi = getenv("VORTEX_BO_PROBE_MAX")) {
+        int v = atoi(mi);
+        if (v > 0) max_idx = v;
+      }
+      fprintf(stderr, "[BO-PROBE] num_banks=%lu bank_size=%lu MB; probing group indices 0..%d\n",
+              num_banks, bank_size / MB, max_idx);
+      for (int idx = 0; idx <= max_idx; ++idx) {
+        uint64_t best = 0;
+        for (uint64_t sz : sizes) {
+          try {
+            xrt::bo b(xrtDevice_, sz, xrt::bo::flags::normal, idx); // freed at scope end
+            best = sz;       // sizes descending: first success is the max this index accepts
+            break;
+          } catch (...) {
+            // try the next-smaller size
+          }
+        }
+        if (best)
+          fprintf(stderr, "[BO-PROBE] group idx %2d : max BO = %4lu MB%s\n",
+                  idx, best / MB, (best >= bank_size) ? "  <-- accepts full bank" : "");
+        else
+          fprintf(stderr, "[BO-PROBE] group idx %2d : no allocation up to %lu MB\n",
+                  idx, sizes[0] / MB);
+      }
+      fprintf(stderr, "[BO-PROBE] done; exiting. Unset VORTEX_BO_PROBE to use the device normally.\n");
+      exit(0);
+    }
+
   #ifdef BANK_INTERLEAVE
     xrtBuffers_.reserve(num_banks);
     uint64_t bo_size = bank_bo_size(bank_size);
