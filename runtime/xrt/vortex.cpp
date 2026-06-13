@@ -125,6 +125,23 @@ struct rt_scoped_timer {
   }
 };
 
+// Per-bank BO size cap. Some shells/drivers refuse a single device BO equal to a
+// full HBM bank (observed on the 8-channel U50 build: 1 GB/bank). XRT then falls
+// back to a host userptr BO which the driver denies with EPERM ("failed to
+// allocate userptr bo: Operation not permitted"). Capping the per-bank BO to a
+// smaller size avoids the oversized device allocation. Safe because allocations
+// are striped across banks (get_bank_info), so each bank only holds
+// total_used/num_banks bytes — a few MB for small models; xrt-smi validate shows
+// 16 MB BOs work and 256 MB == one HBM pseudo-channel. Set VORTEX_BANK_BO_SIZE to
+// the cap in bytes (e.g. 268435456 for 256 MB); default 0 = no cap (full bank).
+static uint64_t bank_bo_size(uint64_t bank_size) {
+  static const uint64_t cap = []{
+    const char* e = getenv("VORTEX_BANK_BO_SIZE");
+    return (e && e[0]) ? strtoull(e, nullptr, 0) : 0ull;
+  }();
+  return (cap && cap < bank_size) ? cap : bank_size;
+}
+
 ///////////////////////////////////////////////////////////////////////////////
 
 class vx_device {
@@ -274,11 +291,12 @@ public:
 
   #ifdef BANK_INTERLEAVE
     xrtBuffers_.reserve(num_banks);
+    uint64_t bo_size = bank_bo_size(bank_size);
     for (uint32_t i = 0; i < num_banks; ++i) {
     #ifdef CPP_API
-      xrtBuffers_.emplace_back(xrtDevice_, bank_size, xrt::bo::flags::normal, i);
+      xrtBuffers_.emplace_back(xrtDevice_, bo_size, xrt::bo::flags::normal, i);
     #else
-      CHECK_HANDLE(xrtBuffer, xrtBOAlloc(xrtDevice_, bank_size, XRT_BO_FLAGS_NONE, i), {
+      CHECK_HANDLE(xrtBuffer, xrtBOAlloc(xrtDevice_, bo_size, XRT_BO_FLAGS_NONE, i), {
          return -1;
       });
       xrtBuffers_.push_back(xrtBuffer);
@@ -428,14 +446,13 @@ public:
       return err;
     });
   #ifdef BANK_INTERLEAVE
-    if (0 == global_mem_.allocated()) {
-    #ifndef CPP_API
-      for (auto &entry : xrtBuffers_) {
-        xrtBOFree(entry);
-      }
-    #endif
-      xrtBuffers_.clear();
-    }
+    // NOTE: per-bank BOs are allocated once in init() and indexed directly by
+    // get_buffer(); they are NOT recreated on mem_alloc(). Freeing/clearing them
+    // here when allocation hits zero would leave get_buffer() reading an empty
+    // vector if the program allocates again after a full free (e.g. llama2's
+    // teardown allocs after freeing) -> std::out_of_range crash. Keep the BOs for
+    // the device lifetime; the destructor releases them. (allocated()==0 path
+    // intentionally left as a no-op.)
   #else
     auto sz_it = alloc_size_map_.find(dev_addr);
     if (sz_it == alloc_size_map_.end()) {
@@ -904,7 +921,7 @@ private:
       }
     } else {
       printf("allocating bank%d...\n", bank_id);
-      uint64_t bank_size = 1ull << lg2_bank_size_;
+      uint64_t bank_size = bank_bo_size(1ull << lg2_bank_size_);
     #ifdef CPP_API
       // Try the matching XRT memory group; fall back to group 0 for merged
       // memory interfaces (e.g. U50 PLATFORM_MERGED_MEMORY_INTERFACE) where
