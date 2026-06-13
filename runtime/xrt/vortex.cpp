@@ -331,19 +331,34 @@ public:
       exit(0);
     }
 
+    // Resolve the per-bank BO memory-group base (see bo_group_base_ note). Prefer an
+    // explicit override; otherwise the grouped (MBG) entries sit just above the
+    // MEM_TOPOLOGY entries, so the base = number of MEM_TOPOLOGY mems.
+    bo_group_base_ = 0;
+    if (const char *gb = getenv("VORTEX_BO_GROUP_BASE"); gb && gb[0]) {
+      bo_group_base_ = (uint32_t)strtoul(gb, nullptr, 0);
+    } else {
+    #ifdef CPP_API
+      try { bo_group_base_ = (uint32_t)xclbin.get_mems().size(); } catch (...) { bo_group_base_ = 0; }
+    #endif
+    }
+    fprintf(stderr, "[VXDRV] per-bank BO memory-group base = %u (bank i -> group idx %u+i)\n",
+            bo_group_base_, bo_group_base_);
+
   #ifdef BANK_INTERLEAVE
     xrtBuffers_.reserve(num_banks);
     uint64_t bo_size = bank_bo_size(bank_size);
     for (uint32_t i = 0; i < num_banks; ++i) {
+      uint32_t grp = bo_group_base_ + i;
     #ifdef CPP_API
-      xrtBuffers_.emplace_back(xrtDevice_, bo_size, xrt::bo::flags::normal, i);
+      xrtBuffers_.emplace_back(xrtDevice_, bo_size, xrt::bo::flags::normal, grp);
     #else
-      CHECK_HANDLE(xrtBuffer, xrtBOAlloc(xrtDevice_, bo_size, XRT_BO_FLAGS_NONE, i), {
+      CHECK_HANDLE(xrtBuffer, xrtBOAlloc(xrtDevice_, bo_size, XRT_BO_FLAGS_NONE, grp), {
          return -1;
       });
       xrtBuffers_.push_back(xrtBuffer);
     #endif
-      printf("*** allocated bank%u/%u, size=%lu\n", i, num_banks, bank_size);
+      printf("*** allocated bank%u/%u, size=%lu, group=%u\n", i, num_banks, bo_size, grp);
     }
   #endif
 
@@ -887,6 +902,12 @@ private:
   std::unordered_map<uint32_t, std::array<uint64_t, 32>> mpm_cache_;
   uint32_t lg2_num_banks_;
   uint32_t lg2_bank_size_;
+  // Memory-group base index for per-bank BOs. On a multi-channel xclbin the raw
+  // bank indices 0..N-1 hit individual HBM channels (capped at one channel's size),
+  // while the interleaved per-port groups the hardware actually uses are indexed
+  // ABOVE the MEM_TOPOLOGY entries (e.g. 32 HBM + 4 PLRAM + 1 HOST = 37 -> groups
+  // at 37..44 on the 8-channel U50). bank i -> group bo_group_base_ + i.
+  uint32_t bo_group_base_ = 0;
 
   // launch-path timing accumulators (us)
   int      rt_timing_ = 0;     // 0=off, 1=summary, >=2=per-call
@@ -969,15 +990,17 @@ private:
       // memory interfaces (e.g. U50 PLATFORM_MERGED_MEMORY_INTERFACE) where
       // all HBM banks are exposed through a single group.  BOs are allocated
       // sequentially in group 0, so bank N lands at physical N*bank_size.
+      uint32_t grp = bo_group_base_ + bank_id;
       auto xrtBuffer = [&]() -> xrt::bo {
         try {
-          return xrt::bo(xrtDevice_, bank_size, xrt::bo::flags::normal, bank_id);
+          return xrt::bo(xrtDevice_, bank_size, xrt::bo::flags::normal, grp);
         } catch (...) {
           return xrt::bo(xrtDevice_, bank_size, xrt::bo::flags::normal, 0);
         }
       }();
     #else
-      xrt_buffer_t xrtBuffer = xrtBOAlloc(xrtDevice_, bank_size, XRT_BO_FLAGS_NONE, bank_id);
+      uint32_t grp = bo_group_base_ + bank_id;
+      xrt_buffer_t xrtBuffer = xrtBOAlloc(xrtDevice_, bank_size, XRT_BO_FLAGS_NONE, grp);
       if (xrtBuffer == nullptr) {
         xrtBuffer = xrtBOAlloc(xrtDevice_, bank_size, XRT_BO_FLAGS_NONE, 0);
       }
