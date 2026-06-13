@@ -332,14 +332,24 @@ public:
     }
 
     // Resolve the per-bank BO memory-group base (see bo_group_base_ note). Prefer an
-    // explicit override; otherwise the grouped (MBG) entries sit just above the
-    // MEM_TOPOLOGY entries, so the base = number of MEM_TOPOLOGY mems.
+    // explicit override; otherwise self-calibrate by finding the first memory index
+    // that accepts a full bank_size BO. On a multi-channel xclbin the raw indices are
+    // individual HBM channels that cap at one channel's size and throw for bank_size,
+    // while the interleaved per-port groups (indexed above the channel/PLRAM/HOST
+    // entries) accept it. When bank_size already fits one channel this returns 0
+    // (legacy raw-index behavior).
     bo_group_base_ = 0;
     if (const char *gb = getenv("VORTEX_BO_GROUP_BASE"); gb && gb[0]) {
       bo_group_base_ = (uint32_t)strtoul(gb, nullptr, 0);
     } else {
     #ifdef CPP_API
-      try { bo_group_base_ = (uint32_t)xclbin.get_mems().size(); } catch (...) { bo_group_base_ = 0; }
+      for (uint32_t idx = 0; idx < 256; ++idx) {
+        try {
+          xrt::bo probe(xrtDevice_, bank_size, xrt::bo::flags::normal, idx); // freed at scope end
+          bo_group_base_ = idx;
+          break;
+        } catch (...) { /* index too small or invalid; keep scanning */ }
+      }
     #endif
     }
     fprintf(stderr, "[VXDRV] per-bank BO memory-group base = %u (bank i -> group idx %u+i)\n",
@@ -358,7 +368,7 @@ public:
       });
       xrtBuffers_.push_back(xrtBuffer);
     #endif
-      printf("*** allocated bank%u/%u, size=%lu, group=%u\n", i, num_banks, bo_size, grp);
+      printf("*** allocated bank%u/%lu, size=%lu, group=%u\n", i, num_banks, bo_size, grp);
     }
   #endif
 
