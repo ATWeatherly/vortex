@@ -302,6 +302,7 @@ public:
     // (if any) maps to a full 1 GB group. It then exits without touching the device
     // further. Range overridable with VORTEX_BO_PROBE_MAX (default 40 covers
     // 32 HBM channels + PLRAM + HOST + any grouped indices).
+  #ifdef CPP_API
     if (const char *probe = getenv("VORTEX_BO_PROBE"); probe && probe[0] == '1') {
       const uint64_t MB = 1ull << 20;
       const uint64_t sizes[] = { 1024 * MB, 512 * MB, 256 * MB, 64 * MB, 16 * MB };
@@ -333,6 +334,7 @@ public:
       fprintf(stderr, "[BO-PROBE] done; exiting. Unset VORTEX_BO_PROBE to use the device normally.\n");
       exit(0);
     }
+  #endif
 
     // Resolve the per-bank BO memory-group base (see bo_group_base_ note). Prefer an
     // explicit override; otherwise self-calibrate by finding the first memory index
