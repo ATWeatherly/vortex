@@ -175,6 +175,9 @@ public:
     const char *rt_timing_s = getenv("VORTEX_RT_TIMING");
     rt_timing_ = (rt_timing_s != nullptr) ? atoi(rt_timing_s) : 0;
 
+    const char *perf_accum_s = getenv("VORTEX_PERF_ACCUM");
+    mpm_accum_enable_ = (perf_accum_s != nullptr) ? (atoi(perf_accum_s) != 0) : true;
+
     int device_index = DEFAULT_DEVICE_INDEX;
     const char *device_index_s = getenv("XRT_DEVICE_INDEX");
     if (device_index_s == nullptr || device_index_s[0] == '\0')
@@ -717,6 +720,16 @@ public:
   }
 
   int start(uint64_t krnl_addr, uint64_t args_addr) {
+    // fold the previous launch's counters into the running totals before this
+    // launch resets them (see mpm_accumulate)
+    if (mpm_accum_enable_) {
+      CHECK_ERR(this->mpm_accumulate(), {
+        return err;
+      });
+    } else {
+      mpm_accum_.clear();
+    }
+
     // set kernel info
     CHECK_ERR(this->dcr_write(VX_DCR_BASE_STARTUP_ADDR0, krnl_addr & 0xffffffff), {
       return err;
@@ -736,8 +749,7 @@ public:
       return err;
     });
 
-    // clear mpm cache
-    mpm_cache_.clear();
+    mpm_pending_ = mpm_accum_enable_;
 
     return 0;
   }
@@ -780,6 +792,12 @@ public:
     if (rt_timing_ >= 2)
       fprintf(stderr, "[RT-TIME] ready_wait polls=%lu\n", polls);
 
+    // the launch is done: fold its counters into the running totals now,
+    // before the next launch's epilogue overwrites the dump region
+    CHECK_ERR(this->mpm_accumulate(), {
+      return err;
+    });
+
     return 0;
   }
 
@@ -798,17 +816,54 @@ public:
     return dcrs_.read(addr, value);
   }
 
+  // The AFU asserts vx_reset on every ap_start, which zeroes the MPM CSRs, and
+  // each launch's epilogue overwrites the dump region at IO_MPM_ADDR — so a
+  // single read at device close only sees the LAST launch. Fold every completed
+  // launch into host-side running totals so vx_dump_perf reports whole-session
+  // counts (matching simx/rtlsim, where the core is never reset between
+  // launches). Slot 1 is the exitcode, not a counter: keep the last value.
+  // Set VORTEX_PERF_ACCUM=0 to restore last-launch-only readings with no
+  // per-launch DMA.
+  int mpm_accumulate() {
+    if (!mpm_pending_)
+      return 0;
+    mpm_pending_ = false;
+    uint32_t num_cores = (dev_caps_ >> 24) & 0xffff;
+    for (uint32_t core_id = 0; core_id < num_cores; ++core_id) {
+      std::array<uint64_t, 32> counters;
+      uint64_t mpm_mem_addr = IO_MPM_ADDR + core_id * 32 * sizeof(uint64_t);
+      CHECK_ERR(this->download(counters.data(), mpm_mem_addr, 32 * sizeof(uint64_t)), {
+        return err;
+      });
+      auto& accum = mpm_accum_[core_id];
+      for (uint32_t i = 0; i < 32; ++i) {
+        if (i == 1) {
+          accum[i] = counters[i];
+        } else {
+          accum[i] += counters[i];
+        }
+      }
+    }
+    return 0;
+  }
+
   int mpm_query(uint32_t addr, uint32_t core_id, uint64_t *value) {
     uint32_t offset = addr - VX_CSR_MPM_BASE;
     if (offset > 31)
       return -1;
-    if (mpm_cache_.count(core_id) == 0) {
+    if (mpm_accum_enable_) {
+      CHECK_ERR(this->mpm_accumulate(), {
+        return err;
+      });
+    } else if (mpm_accum_.count(core_id) == 0) {
+      // accumulation disabled: lazy read of the last launch's dump
       uint64_t mpm_mem_addr = IO_MPM_ADDR + core_id * 32 * sizeof(uint64_t);
-      CHECK_ERR(this->download(mpm_cache_[core_id].data(), mpm_mem_addr, 32 * sizeof(uint64_t)), {
+      CHECK_ERR(this->download(mpm_accum_[core_id].data(), mpm_mem_addr, 32 * sizeof(uint64_t)), {
         return err;
       });
     }
-    *value = mpm_cache_.at(core_id).at(offset);
+    auto it = mpm_accum_.find(core_id);
+    *value = (it != mpm_accum_.end()) ? it->second.at(offset) : 0;
     return 0;
   }
 
@@ -821,7 +876,9 @@ private:
   uint64_t isa_caps_;
   uint64_t global_mem_size_;
   DeviceConfig dcrs_;
-  std::unordered_map<uint32_t, std::array<uint64_t, 32>> mpm_cache_;
+  std::unordered_map<uint32_t, std::array<uint64_t, 32>> mpm_accum_;
+  bool mpm_pending_ = false;      // a completed launch not yet folded into mpm_accum_
+  bool mpm_accum_enable_ = true;  // VORTEX_PERF_ACCUM=0 disables
   uint32_t lg2_num_banks_;
   uint32_t lg2_bank_size_;
 
