@@ -1,7 +1,12 @@
 PROJECT = Vortex
 TOP_LEVEL_ENTITY = $(PROJECT)
 SRC_FILE = $(PROJECT).sv
+# Only generate the Xilinx floating_point IP when the FPU exists in the
+# config; defining FPU_IP unconditionally leaks an (empty) FPU_IP env var
+# into project.tcl via make command-line overrides, breaking the build.
+ifeq (,$(filter -DVX_CFG_EXT_F_DISABLE,$(CONFIGS)))
 FPU_IP = 1
+endif
 
 include ../../common.mk
 
