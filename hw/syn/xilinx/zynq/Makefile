@@ -1,8 +1,15 @@
 ROOT_DIR := $(realpath ../../../..)
 include $(ROOT_DIR)/config.mk
 
-# Arty Z7-10 (Zynq-7000). Use DEVICE=xc7z020clg400-1 for an Arty Z7-20.
+# Target board: arty-z7-10 (XC7Z010) or zybo-z7-20 (XC7Z020). The board name
+# selects the Digilent board part (PS7 DDR/MIO preset) in project.tcl and the
+# default device below.
+BOARD ?= arty-z7-10
+ifeq ($(BOARD),zybo-z7-20)
+DEVICE ?= xc7z020clg400-1
+else
 DEVICE ?= xc7z010clg400-1
+endif
 
 # PL clock (FCLK_CLK0) in MHz
 CLK_MHZ ?= 50
@@ -42,6 +49,13 @@ XCONFIGS := $(shell python3 $(ROOT_DIR)/ci/gen_config.py --config=$(VORTEX_HOME)
 RTL_INCLUDE = -I$(ROOT_DIR)/sw -I$(ROOT_DIR)/hw -I$(RTL_DIR) -I$(RTL_DIR)/libs -I$(RTL_DIR)/interfaces -I$(RTL_DIR)/core -I$(RTL_DIR)/mem -I$(RTL_DIR)/cache -I$(RTL_DIR)/fpu
 RTL_INCLUDE += -I$(SRC_DIR)
 
+# Xilinx floating_point IP generation when the config has an FPU
+ifeq (,$(filter -DVX_CFG_EXT_F_DISABLE,$(CONFIGS)))
+FPU_IP_ENV = FPU_IP=project_1/ip
+else
+FPU_IP_ENV =
+endif
+
 CFLAGS += -DVX_CFG_XLEN=$(XLEN) -DVX_CFG_XLEN_$(XLEN)
 CFLAGS += $(CONFIGS)
 CFLAGS += $(RTL_INCLUDE)
@@ -58,7 +72,7 @@ pre_opt_hook.tcl: $(SRC_DIR)/pre_opt_hook.tcl
 
 build: done.bit
 done.bit: project_1/sources.txt pre_opt_hook.tcl
-	MAX_JOBS=$(JOBS) OPT_LEVEL=$(OPT_LEVEL) CLK_MHZ=$(CLK_MHZ) BOARD_REPO=$(BOARD_REPO) TOOL_DIR=$(SCRIPT_DIR) \
+	MAX_JOBS=$(JOBS) OPT_LEVEL=$(OPT_LEVEL) CLK_MHZ=$(CLK_MHZ) BOARD=$(BOARD) BOARD_REPO=$(BOARD_REPO) $(FPU_IP_ENV) TOOL_DIR=$(SCRIPT_DIR) \
 	  $(VIVADO) -mode batch -source $(SRC_DIR)/project.tcl -tclargs $(DEVICE) project_1/sources.txt
 	echo done > done.bit
 

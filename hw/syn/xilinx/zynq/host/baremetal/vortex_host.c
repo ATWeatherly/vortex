@@ -71,10 +71,14 @@
 #define DCR_CLUSTER_DIM_Y  0x022
 #define DCR_CLUSTER_DIM_Z  0x023
 
-#define VX_NUM_THREADS  2  // must match -DVX_CFG_NUM_THREADS of the bitstream
+#ifndef VX_NUM_THREADS
+#define VX_NUM_THREADS  2  /* must match -DVX_CFG_NUM_THREADS of the bitstream */
+#endif
 
 // ---- PS UART0 (MIO14/15, 115200; ref clock 100 MHz per PCW config) ----
-#define UART_BASE   0xE0000000u
+#ifndef UART_BASE
+#define UART_BASE   0xE0000000u   /* Arty Z7: UART0; Zybo Z7: build with -DUART_BASE=0xE0001000 (UART1) */
+#endif
 #define UART_CR     (UART_BASE + 0x00)
 #define UART_MR     (UART_BASE + 0x04)
 #define UART_BAUDGEN (UART_BASE + 0x18)

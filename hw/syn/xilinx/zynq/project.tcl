@@ -40,14 +40,16 @@ if {[info exists ::env(MAX_JOBS)]} {
 
 puts "Using device_part=$device_part vcs_file=$vcs_file clk_mhz=$clk_mhz"
 
-# Digilent board files provide the PS7 DDR3/MIO preset for the Arty Z7-10.
+# Digilent board files provide the PS7 DDR3/MIO preset for the target board.
 # board.repoPaths must be set before any board query in the session.
+set board_name "arty-z7-10"
+if {[info exists ::env(BOARD)]} { set board_name $::env(BOARD) }
 if {[info exists ::env(BOARD_REPO)]} {
   set_param board.repoPaths [list $::env(BOARD_REPO)]
 }
-set board_parts [get_board_parts -quiet *arty-z7-10*]
+set board_parts [get_board_parts -quiet *${board_name}*]
 if {[llength $board_parts] == 0} {
-  puts "ERROR: arty-z7-10 board part not found. Set BOARD_REPO to the new/board_files subdir of a https://github.com/Digilent/vivado-boards checkout."
+  puts "ERROR: ${board_name} board part not found. Set BOARD_REPO to the new/board_files subdir of a https://github.com/Digilent/vivado-boards checkout."
   exit 1
 }
 set board_part [lindex $board_parts end]
@@ -55,8 +57,19 @@ puts "Using board_part=$board_part"
 
 proc run_setup {} {
   global device_part vcs_file tool_dir script_dir clk_mhz board_part
+  global argv argc ;# xilinx_ip_gen.tcl reads the global ::argv/::argc
 
   set project_name "project_1"
+
+  # create the Xilinx floating_point FPU IP when EXT_F is enabled — before
+  # create_project: the generator opens its own in-memory project.
+  # (FPU_IP env = ip output dir, same contract as the dut flow)
+  if {[info exists ::env(FPU_IP)]} {
+    set ip_dir $::env(FPU_IP)
+    set argv [list $ip_dir $device_part]
+    set argc 2
+    source ${tool_dir}/xilinx_ip_gen.tcl
+  }
 
   source "${tool_dir}/parse_vcs_list.tcl"
   set vlist [parse_vcs_list "${vcs_file}"]
@@ -67,6 +80,15 @@ proc run_setup {} {
 
   create_project $project_name $project_name -force -part $device_part
   set_property board_part $board_part [current_project]
+
+  if {[info exists ::env(FPU_IP)]} {
+    set ip_dir $::env(FPU_IP)
+    add_files -norecurse -verbose ${ip_dir}/xil_fma/xil_fma.xci
+    add_files -norecurse -verbose ${ip_dir}/xil_fdiv/xil_fdiv.xci
+    add_files -norecurse -verbose ${ip_dir}/xil_fsqrt/xil_fsqrt.xci
+    add_files -norecurse -verbose ${ip_dir}/xil_fmul/xil_fmul.xci
+    add_files -norecurse -verbose ${ip_dir}/xil_fadd/xil_fadd.xci
+  }
 
   set obj [get_filesets sources_1]
   add_files -norecurse -verbose -fileset $obj ${vsources_list}
@@ -145,7 +167,14 @@ proc run_setup {} {
   save_bd_design
   close_bd_design "design_1"
 
-  set_property SYNTH_CHECKPOINT_MODE "Hierarchical" [get_files design_1.bd]
+  # Global (non-OOC) synthesis: the Vortex module reference instantiates the
+  # floating_point IP (xil_fma etc.), which OOC module-ref sub-runs cannot
+  # resolve — everything must synthesize in one pass when the FPU is enabled.
+  if {[info exists ::env(FPU_IP)]} {
+    set_property SYNTH_CHECKPOINT_MODE "None" [get_files design_1.bd]
+  } else {
+    set_property SYNTH_CHECKPOINT_MODE "Hierarchical" [get_files design_1.bd]
+  }
 
   # Wrapper
   set wrapper_path [make_wrapper -fileset sources_1 -files [get_files -norecurse design_1.bd] -top]
