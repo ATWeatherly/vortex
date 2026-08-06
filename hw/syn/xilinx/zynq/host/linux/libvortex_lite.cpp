@@ -12,16 +12,25 @@
 // Every vx_start re-uploads the kernel image and re-zeroes its BSS: each
 // launch is a full GPU reset re-running crt0, and the flat image carries no
 // BSS-zeroing of its own.
+// Compiled with -DVX_LITE_BAREMETAL, the same file targets the freestanding
+// Cortex-A9 runtime (host/baremetal/rt): physical == virtual (flat MMU map
+// with the device window Device-typed/uncached), so the /dev/mem mmap is
+// replaced by direct physical pointers; file IO still works because the
+// runtime's newlib syscalls serve preloaded blobs.
 #include "vortex.h"
 
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <vector>
+#include <time.h>
+#ifdef VX_LITE_BAREMETAL
+#include "../baremetal/rt/bm_platform.h"
+#else
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <unistd.h>
-#include <time.h>
+#endif
 
 // ---- physical layout ----
 #define SHIM_PHYS       0x43C00000u
@@ -53,9 +62,16 @@
 #define DCR_WARP_STEP_X   0x01E
 #define DCR_CLUSTER_DIM_X 0x021
 
+// Hardware shape (must match the bitstream config; override per-board)
+#ifndef VX_NUM_CORES
 #define VX_NUM_CORES    1
+#endif
+#ifndef VX_NUM_WARPS
 #define VX_NUM_WARPS    2
+#endif
+#ifndef VX_NUM_THREADS
 #define VX_NUM_THREADS  2
+#endif
 
 struct FreeBlock {
     uint64_t addr;
@@ -136,6 +152,10 @@ extern "C" {
 
 int vx_dev_open(vx_device_h* hdevice) {
     Device* d = new Device();
+#ifdef VX_LITE_BAREMETAL
+    d->shim = (volatile uint32_t*)SHIM_PHYS;
+    d->dev  = (volatile uint8_t*)DEV_PHYS_BASE;
+#else
     d->fd = open("/dev/mem", O_RDWR | O_SYNC);
     if (d->fd < 0) { perror("open /dev/mem"); delete d; return -1; }
     d->shim = (volatile uint32_t*)mmap(nullptr, 0x1000, PROT_READ | PROT_WRITE,
@@ -145,6 +165,7 @@ int vx_dev_open(vx_device_h* hdevice) {
     if (d->shim == MAP_FAILED || d->dev == MAP_FAILED) {
         perror("mmap"); delete d; return -1;
     }
+#endif
     if (shim_rd(d, SHIM_MAGIC) != SHIM_MAGIC_VAL) {
         fprintf(stderr, "libvortex-lite: shim magic mismatch (bitstream loaded?)\n");
         delete d; return -1;
@@ -157,7 +178,9 @@ int vx_dev_open(vx_device_h* hdevice) {
 int vx_dev_close(vx_device_h hdevice) {
     Device* d = (Device*)hdevice;
     shim_wr(d, SHIM_CTRL, 1);
+#ifndef VX_LITE_BAREMETAL
     close(d->fd);
+#endif
     delete d;
     return 0;
 }
@@ -307,7 +330,11 @@ int vx_start(vx_device_h hdevice, vx_buffer_h hkernel, vx_buffer_h harguments) {
     dcr_wr(d, DCR_BLOCK_SIZE, 1);
 
     shim_wr(d, SHIM_CTRL, 0);  // release reset
-    usleep(10);                // >> RESET_DELAY(8) cycles @ 50 MHz
+#ifdef VX_LITE_BAREMETAL
+    bm_udelay(10);             // >> RESET_DELAY(8) cycles @ 50 MHz
+#else
+    usleep(10);
+#endif
     shim_wr(d, SHIM_START, 1); // launch
 
     // busy must rise before ready_wait polls for fall
