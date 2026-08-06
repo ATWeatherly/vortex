@@ -1,0 +1,8 @@
+*.elf
+*.bit
+*.xsa
+*.log
+*.jou
+*.rpt
+project_1/
+ws/
