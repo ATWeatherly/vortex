@@ -293,7 +293,9 @@ int vx_start(vx_device_h hdevice, vx_buffer_h hkernel, vx_buffer_h harguments) {
 
     dcr_wr(d, DCR_STARTUP_ADDR0, (uint32_t)kb->addr);
     dcr_wr(d, DCR_STARTUP_ADDR1, 0);
-    dcr_wr(d, DCR_STARTUP_ARG0, (uint32_t)ab->addr);
+    // null args => STARTUP_ARG0 = 0 => MSCRATCH = 0 on the device: hostless
+    // kernels (tests/kernel/*) take this path and self-launch main()
+    dcr_wr(d, DCR_STARTUP_ARG0, ab ? (uint32_t)ab->addr : 0);
     dcr_wr(d, DCR_STARTUP_ARG1, 0);
     for (int i = 0; i < 3; i++) {
         dcr_wr(d, DCR_GRID_DIM_X + i, 1);
@@ -324,7 +326,8 @@ int vx_ready_wait(vx_device_h hdevice, uint64_t timeout_ms) {
     uint64_t t0 = now_ms();
     while (shim_rd(d, SHIM_STATUS) & 1) {
         if (now_ms() - t0 > timeout_ms) {
-            fprintf(stderr, "libvortex-lite: kernel timeout (busy stuck)\n");
+            // quiet: short timeouts are a legitimate polling idiom (vxrun);
+            // callers decide whether expiry is an error
             return -1;
         }
     }

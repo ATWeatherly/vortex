@@ -88,15 +88,23 @@ anything new means removing something else.
 
 - **Runs on real silicon**: every result here is a physical FPGA executing
   kernels from board DDR3 with results verified by the ARM host — nothing
-  about it is simulated. The hardware-proven set is: vecadd (hostless,
-  twice), and the llama2 matmul kernel across **thousands of consecutive
-  launches** (~25 per token × 40 tokens on stories260K, plus the stories15M
-  runs) with golden-verified outputs. The broader Vortex regression suite
-  has not run on the board. Confidence beyond these workloads rests on RTL
-  simulation of the same frozen configuration (Verilator, including a
-  hostile AXI memory model with backpressure, 20–60-cycle latencies, and
-  out-of-order responses), which is supporting evidence, not a hardware
-  result.
+  about it is simulated. Hardware-proven set (all via the Linux/
+  libvortex-lite flow on the tuned configuration):
+
+  | Workload | Result |
+  |---|---|
+  | vecadd (hostless) | PASS |
+  | fibonacci (hostless) | PASS |
+  | hello (hostless) | PASS |
+  | conform (hostless, 9 subtests) | 8/9 PASS — the vote subtest fails **by test design** at NUM_THREADS=2 (`tid<2` is true for all threads; expects ≥3); simx and rtlsim fail identically, i.e. hardware matches both simulators bit-for-bit including the failure mode |
+  | matmul soak: 1000 randomized launches, host-verified, allocator churned | **PASS, 0 mismatches** |
+  | llama2 matmuls (~25 launches/token, golden-verified tokens) | PASS |
+
+  The full upstream regression suite (`tests/regression/*`) still cannot
+  run (host-API/CP dependency). Confidence beyond the table rests on RTL
+  simulation of the same configuration (Verilator, including a hostile AXI
+  model with backpressure, 20–60-cycle latencies, and out-of-order
+  responses), which is supporting evidence, not a hardware result.
 - The final bitstream has no debug ILA (it cannot coexist with `EXT_A` at
   this utilization); hardware debug requires rebuilding a reduced config.
 - One RTL-adjacent repo change was required: a `DISABLE_ASYNC_BRAM_PATCH`
