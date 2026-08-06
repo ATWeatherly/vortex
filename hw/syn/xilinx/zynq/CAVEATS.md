@@ -24,7 +24,7 @@ Demonstrated:
 
 | Feature | Default | This port | Why |
 |---|---|---|---|
-| Floating-point unit (`EXT_F`) | on | **removed** | The F32 soft-FPU alone is ~27k LUTs — 1.5× the whole chip. FP in kernels works only as soft-float library calls on the integer ALU (~10–50× slower per op). The DSP-based FPU IP was not attempted; at 81% LUT utilization it almost certainly cannot fit alongside the core. |
+| Floating-point unit (`EXT_F`) | on | **removed** | The F32 soft-FPU alone is ~27k LUTs — 1.5× the whole chip. FP in kernels works only as soft-float library calls on the integer ALU. The DSP-based FPU IP was synthesized and **definitively does not fit either**: 20.9k LUTs at 2×2 threads, 19.1k even at 1 warp with LMEM freed (7-series DSP48E1 mapping needs ~7k LUTs of glue) — before the ~0.7k the PS interconnect adds. Hardware FP on this family starts at the XC7Z020. |
 | Warps × threads | 4 × 4 | **2 × 2** | 4 hardware threads total (SIMD width 2). 4-thread variants exceed the device (`w2t4` ≈ 20.8k LUTs). 4 warps × 2 threads fits standalone (14.7k) but not with atomics + PS interconnect. |
 | I-cache / D-cache | 16 KB, 4-way each | **4 KB, direct-mapped each** | Area (LUTs + BRAM). |
 | Internal memory bus | 512-bit | **64-bit** (`MEM_BLOCK_SIZE=8`) | The make-or-break change: the 512-bit datapath alone pushes the core to 18k+ LUTs (unplaceable). Also shrinks cache lines to 8 bytes, which costs miss-rate performance. |
@@ -111,8 +111,23 @@ verified generated tokens on stories15M.
 |---|---|---|
 | x86 reference (`-v 0`) | stories260K | 4,875 |
 | ARM-on-board only (`-v 0`) | stories260K | 222.9 |
-| **Vortex matmuls (`-v 1`)** | stories260K | **0.119** (~8.4 s/token) |
-| **Vortex matmuls (`-v 1`)** | stories15M (60 MB, benchmark default) | **0.00216** (~7.7 min/token) |
+| Vortex matmuls, first-light build | stories260K | 0.119 (~8.4 s/token) |
+| **Vortex matmuls, tuned build** | stories260K | **0.197** (~5.1 s/token) |
+| Vortex matmuls, first-light build | stories15M (60 MB, benchmark default) | 0.00216 (~7.7 min/token) |
+| **Vortex matmuls, tuned build** | stories15M | **0.00349** (~4.8 min/token) |
+
+The tuned build (measured after a systematic performance pass, all steps
+golden-verified): fused single-rounding soft-float MAC (+18%), 16-byte cache
+lines (`MEM_BLOCK_SIZE=16`, the internal-bus/line-size knob decoupled from
+the 64-bit AXI port by the width adapter), 66.7 MHz (Fmax 70.3), 8 KB 2-way
+icache + 2-way dcache, `LMEM_DISABLE` to pay for it — 14.5k LUTs (82%).
+Instrumented attribution along the way established: 99.6% of runtime is
+device-side kernel execution; host↔device copies and launch overhead are
+negligible (weight caching and a writeback-dcache experiment both measured
+as no-ops); associativity was worth only +4%. The end state is
+**instruction-throughput-bound**: ~306 cycles per hart per MAC is simply the
+cost of IEEE-correct SoftFloat mulAdd on a 4-thread in-order core — further
+gains require sacrificing FP fidelity (fast-path MAC), not better caching.
 
 Caveats on that claim:
 
