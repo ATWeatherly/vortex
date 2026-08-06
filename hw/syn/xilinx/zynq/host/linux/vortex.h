@@ -34,6 +34,7 @@ int vx_dev_open(vx_device_h* hdevice);
 int vx_dev_close(vx_device_h hdevice);
 int vx_dev_caps(vx_device_h hdevice, uint32_t caps_id, uint64_t* value);
 int vx_mem_alloc(vx_device_h hdevice, uint64_t size, int flags, vx_buffer_h* hbuffer);
+int vx_mem_reserve(vx_device_h hdevice, uint64_t address, uint64_t size, int flags, vx_buffer_h* hbuffer);
 int vx_mem_free(vx_buffer_h hbuffer);
 int vx_mem_address(vx_buffer_h hbuffer, uint64_t* address);
 int vx_copy_to_dev(vx_buffer_h hbuffer, const void* host_ptr, uint64_t dst_offset, uint64_t size);

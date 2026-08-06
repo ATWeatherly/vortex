@@ -177,6 +177,17 @@ int vx_mem_alloc(vx_device_h hdevice, uint64_t size, int flags, vx_buffer_h* hbu
     return 0;
 }
 
+int vx_mem_reserve(vx_device_h hdevice, uint64_t address, uint64_t size, int flags, vx_buffer_h* hbuffer) {
+    (void)flags;
+    Device* d = (Device*)hdevice;
+    if (address < DEV_PHYS_BASE || address + size > DEV_PHYS_BASE + DEV_PHYS_SIZE) {
+        fprintf(stderr, "libvortex-lite: reserve outside device window\n");
+        return -1;
+    }
+    *hbuffer = new Buffer{d, address, size};
+    return 0;
+}
+
 int vx_mem_free(vx_buffer_h hbuffer) {
     // bump allocator: individual frees are no-ops (llama2's buffers are
     // grow-only caches anyway)

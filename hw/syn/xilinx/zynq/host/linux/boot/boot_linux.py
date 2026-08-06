@@ -146,8 +146,9 @@ def main():
     print("== post-boot setup ==")
     u.sendl("mkdir -p /mnt/sd && mount /dev/mmcblk0p1 /mnt/sd && echo MOUNT_OK")
     print(u.drain(4).decode("utf-8", "replace")[-120:])
-    # FCLK0 -> 50 MHz (IOPLL 1000 MHz / (10*2)), then shim magic check
-    u.sendl("devmem 0xF8000008 32 0xDF0D; devmem 0xF8000170 32 0x00200A00; devmem 0xF8000004 32 0x767B; devmem 0x43C0001C")
+    # FCLK0 -> 66.67 MHz (IOPLL 1000 MHz / (15*1); design constrained at 67),
+    # then shim magic check
+    u.sendl("devmem 0xF8000008 32 0xDF0D; devmem 0xF8000170 32 0x00100F00; devmem 0xF8000004 32 0x767B; devmem 0x43C0001C")
     out = u.drain(4).decode("utf-8", "replace")
     print(out[-120:])
     ok = "0x56585A37" in out
