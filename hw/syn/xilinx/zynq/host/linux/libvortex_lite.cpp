@@ -57,15 +57,28 @@
 #define VX_NUM_WARPS    2
 #define VX_NUM_THREADS  2
 
+struct FreeBlock {
+    uint64_t addr;
+    uint64_t size;
+};
+
 struct Device {
     int fd = -1;
     volatile uint32_t* shim = nullptr;
     volatile uint8_t*  dev = nullptr;       // maps DEV_PHYS_BASE..+256MB
     uint64_t alloc_next = ALLOC_BASE;
+    std::vector<FreeBlock> free_list;       // first-fit reuse of freed blocks
     // cached kernel image for per-launch re-upload
     std::vector<uint8_t> kimg;
     uint64_t k_min_vma = 0, k_max_vma = 0;
 };
+
+static bool vxlite_debug() {
+    static int en = -1;
+    if (en < 0) en = getenv("VXLITE_DEBUG") ? 1 : 0;
+    return en == 1;
+}
+#define VXDBG(...) do { if (vxlite_debug()) fprintf(stderr, "[vxlite] " __VA_ARGS__); } while (0)
 
 struct Buffer {
     Device* dev;
@@ -166,14 +179,32 @@ int vx_dev_caps(vx_device_h hdevice, uint32_t caps_id, uint64_t* value) {
 int vx_mem_alloc(vx_device_h hdevice, uint64_t size, int flags, vx_buffer_h* hbuffer) {
     (void)flags;
     Device* d = (Device*)hdevice;
-    uint64_t addr = (d->alloc_next + 63) & ~63ull;
-    if (addr + size > ALLOC_END) {
-        fprintf(stderr, "libvortex-lite: device pool exhausted\n");
+    uint64_t asz = (size + 63) & ~63ull;
+    // first-fit from the free list before growing the bump pointer
+    for (size_t i = 0; i < d->free_list.size(); ++i) {
+        if (d->free_list[i].size >= asz) {
+            uint64_t addr = d->free_list[i].addr;
+            if (d->free_list[i].size == asz) {
+                d->free_list.erase(d->free_list.begin() + i);
+            } else {
+                d->free_list[i].addr += asz;
+                d->free_list[i].size -= asz;
+            }
+            VXDBG("alloc %llu B @ 0x%llx (reused)\n",
+                  (unsigned long long)size, (unsigned long long)addr);
+            *hbuffer = new Buffer{d, addr, asz};
+            return 0;
+        }
+    }
+    uint64_t addr = d->alloc_next;
+    if (addr + asz > ALLOC_END) {
+        fprintf(stderr, "libvortex-lite: device pool exhausted (%llu B requested)\n",
+                (unsigned long long)size);
         return -1;
     }
-    d->alloc_next = addr + size;
-    Buffer* b = new Buffer{d, addr, size};
-    *hbuffer = b;
+    d->alloc_next = addr + asz;
+    VXDBG("alloc %llu B @ 0x%llx\n", (unsigned long long)size, (unsigned long long)addr);
+    *hbuffer = new Buffer{d, addr, asz};
     return 0;
 }
 
@@ -184,14 +215,22 @@ int vx_mem_reserve(vx_device_h hdevice, uint64_t address, uint64_t size, int fla
         fprintf(stderr, "libvortex-lite: reserve outside device window\n");
         return -1;
     }
+    VXDBG("reserve %llu B @ 0x%llx\n", (unsigned long long)size, (unsigned long long)address);
     *hbuffer = new Buffer{d, address, size};
     return 0;
 }
 
 int vx_mem_free(vx_buffer_h hbuffer) {
-    // bump allocator: individual frees are no-ops (llama2's buffers are
-    // grow-only caches anyway)
-    delete (Buffer*)hbuffer;
+    if (!hbuffer) return 0;
+    Buffer* b = (Buffer*)hbuffer;
+    // reserved buffers (outside the pool) and the kernel image are not
+    // returned to the free list
+    if (b->addr >= ALLOC_BASE && b->addr < ALLOC_END) {
+        b->dev->free_list.push_back({b->addr, b->size});
+        VXDBG("free %llu B @ 0x%llx\n", (unsigned long long)b->size,
+              (unsigned long long)b->addr);
+    }
+    delete b;
     return 0;
 }
 

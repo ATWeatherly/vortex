@@ -63,9 +63,14 @@ anything new means removing something else.
   (the board's stock PetaLinux 2019.2 SD image, booted with `mem=256M` to
   wall the kernel off from the Vortex DDR window) with `libvortex-lite`, a
   ~250-line userspace reimplementation of the legacy `vx_*` API over
-  `/dev/mem`. Both are JTAG/UART-orchestrated by `host/linux/boot/
-  boot_linux.py`; there is no self-booting deployment of the Vortex side
-  (files are delivered by JTAG-staging DDR and U-Boot `fatwrite` to SD).
+  `/dev/mem`. **The Linux mode is fully self-booting**: a persistent U-Boot
+  environment (`bootcmd=run vortexboot`, see `host/linux/boot/SELFBOOT.md`)
+  loads the Vortex bitstream from SD, applies the post-config SLCR writes
+  U-Boot omits, sets the PL clock, and boots with a custom device tree
+  (`vortex.dtb`: reserved-memory carve-out for the Vortex window, stale PL
+  driver node removed) — power-on to working shim with zero host
+  interaction. JTAG remains the file-delivery path (`boot_linux.py --put`,
+  staging DDR + U-Boot `fatwrite`) and the recovery/override flow.
 - Kernels must be integer-only (or accept soft-float), linked at
   `0x1000_0000` with a relocated memory map (stacks/IO moved into Zynq DDR
   range) that is **baked into the generated headers of the whole build
