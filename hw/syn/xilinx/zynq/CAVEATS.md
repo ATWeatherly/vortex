@@ -187,3 +187,81 @@ verified-correct results on the vecadd kernel and on the llama2 benchmark,
 where Linux on the chip's ARM cores offloads every matmul to Vortex and
 generates token-for-token reference-identical text at 0.119 tok/s
 (stories260K) — an architectural existence proof, not a performance result.
+
+---
+
+# Part II — Vortex on the XC7Z020 (Zybo Z7-20)
+
+Section 6's prediction was tested directly: the board was swapped for a Zybo
+Z7-20 (XC7Z020, 53,200 LUTs, 220 DSP48E1, 140 BRAM36, 1 GB DDR3L) and the
+same flow re-targeted with a `BOARD` knob. Most of Part I's section 1 does
+disappear. This part records what the bigger part actually bought, and the
+new caveats that came with it.
+
+## 7. Configuration and utilization (Zybo Z7-20, 67 MHz)
+
+| Feature | Z010 port | Z020 port |
+|---|---|---|
+| FPU | none (SoftFloat in kernel) | **hardware, Xilinx floating_point IP (DSP48)** |
+| Warps × threads | 2 × 2 | **4 × 4** |
+| I$/D$ | 8 KB 2-way / 4 KB 2-way | **16 KB 2-way / 16 KB 2-way** |
+| Local memory | disabled | **enabled (16 KB)** |
+| Memory bus | 16-byte lines | 16-byte lines |
+| Atomics (EXT_A) | yes | yes |
+| D$ policy | write-through + IO mailbox | writeback + IO mailbox |
+| Clock | 66.7 MHz | 66.7 MHz |
+| Utilization | 14.2k/17.6k LUTs (81%) | **38.6k/53.2k LUTs (72.6%)**, WNS +0.99 |
+
+OOC sweep (core only): mb16 39.9k LUTs / Fmax 71.4; mb32 43.3k / 69.4.
+mb16 chosen for margin. The full integrated design came in *below* the
+core-only estimate (BD optimization).
+
+## 8. Measured results (all from full PS resets, UART-captured)
+
+- `vecadd` hostless: PASS (exit=0) twice, 16 threads.
+- Hard-float kernel rtlsim self-test: bitwise match, SIMT vs sequential
+  on-device reference.
+- **llama2 stories260K** (`-t 0 -n 40`): **byte-identical to the x86 golden
+  story, 49.06 tok/s** — 249× the Z010's soft-float 0.197 tok/s.
+- **llama2 stories15M** (`-t 0 -n 20`): **byte-identical to golden,
+  1.066 tok/s** — 305× the Z010's 0.00349 tok/s.
+
+The byte-identical claim survived the switch from bit-exact SoftFloat to
+the hardware FPU (including any FMA contraction differences) at temperature
+0 on both models — argmax sampling absorbed any ULP-level differences.
+
+## 9. The host story changed completely (new caveats)
+
+The Zybo's QSPI boots a factory demo: **no U-Boot, no Linux, no SD boot
+chain**. Part I's Linux/PYNQ-style host does not apply; delivery is
+JTAG-only. The llama2 host is the *same unmodified* `llama.cpp` + vxmath +
+libvortex-lite sources, but compiled freestanding against a new bare-metal
+Cortex-A9 runtime (`host/baremetal/rt/`):
+
+- Flat-mapped MMU: host memory cached (Normal WB/WA), the Vortex window
+  0x1000_0000–0x1FFF_FFFF and all peripherals Device + execute-never.
+  Coherence with the PL's S_AXI_HP0 traffic holds by construction — no
+  cache maintenance anywhere.
+- newlib syscalls back `fopen`/`read`/`mmap` with a table of JTAG-preloaded
+  blobs (`run_bm.tcl … file@addr …`); the model checkpoint, tokenizer, and
+  kernel image are staged into host-cacheable DDR above the device window.
+- VFPv3 hard-float ABI (`thumb/v7-a+fp/hard` multilib); A9 global timer
+  provides `clock_gettime` (newlib has none).
+- The QSPI demo leaves a **non-flat MMU table** on the stopped core; `dow`
+  faults with "MMU section translation fault" unless the script issues
+  `rst -processor` first. (The Arty never hit this — its U-Boot mapped DDR
+  flat.)
+
+Caveat inherited from Part I: still no Command Processor — the launch path
+is the same shim/DCR protocol, one kernel launch per matmul, kernel image
+re-uploaded and BSS re-zeroed per launch (~31 KB over the uncached window).
+None of this was optimized; per-shape attribution was not re-run on the
+Z020.
+
+*One-sentence summary for citation:* On the XC7Z020 at 67 MHz, Vortex fits
+as a 4-warp × 4-thread core with a DSP-based hardware FPU, 16 KB caches,
+local memory, and atomics in 73% of the device, and — driven by a
+freestanding bare-metal ARM host over the same shim/DCR protocol —
+generates byte-identical-to-reference llama2 text at 49.1 tok/s
+(stories260K) and 1.07 tok/s (stories15M), 250–305× the XC7Z010 soft-float
+port on the same benchmark.
