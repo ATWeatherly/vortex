@@ -1,0 +1,3 @@
+*.o
+*.a
+vecadd_cp_arm
