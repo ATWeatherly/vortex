@@ -1,0 +1,71 @@
+# Static ARM (musl, hard-float) build of the full Vortex runtime with the
+# Zynq /dev/mem Command Processor backend — for PetaLinux-class hosts on
+# the Zynq-7000 CP integration (hw/syn/xilinx/zynq CP=1).
+#
+#   make -f Makefile.arm            -> libvortex_zynq.a
+#
+# Link an application with:  $(AR_LIB) -lpthread  (static; no dlopen).
+# The generated headers in $(BUILD_TREE)/{sw,hw} carry the board's
+# relocated memory map — do not regenerate.
+
+VORTEX_HOME ?= /home/aweatherly8/projects/vortex
+BUILD_TREE  ?= $(VORTEX_HOME)/build
+CROSS       ?= $(HOME)/tools/arm-linux-musleabihf-cross/bin/arm-linux-musleabihf-
+
+CXX := $(CROSS)g++
+AR  := $(CROSS)ar
+
+RT      := $(VORTEX_HOME)/sw/runtime
+COMMON  := $(RT)/common
+
+CXXFLAGS := -std=c++17 -O2 -Wall -mcpu=cortex-a9 -mfpu=vfpv3 -mfloat-abi=hard
+CXXFLAGS += -I$(RT)/include -I$(VORTEX_HOME)/sw/kernel/include
+CXXFLAGS += -I$(BUILD_TREE)/sw -I$(BUILD_TREE)/hw
+CXXFLAGS += -I$(VORTEX_HOME)/sw/common -I$(COMMON)
+CXXFLAGS += -DNDEBUG
+
+# Hardware config (must match the CP bitstream)
+CONFIGS ?= -DVX_CFG_EXT_A_ENABLE \
+           -DVX_CFG_NUM_WARPS=4 -DVX_CFG_NUM_THREADS=4 \
+           -DVX_CFG_ICACHE_SIZE=16384 -DVX_CFG_ICACHE_NUM_WAYS=2 \
+           -DVX_CFG_DCACHE_SIZE=16384 -DVX_CFG_DCACHE_NUM_WAYS=2 \
+           -DVX_CFG_PLATFORM_MEMORY_NUM_BANKS=1 -DVX_CFG_MEM_BLOCK_SIZE=16
+XCONFIGS := $(shell python3 $(VORTEX_HOME)/ci/gen_config.py \
+              --config=$(VORTEX_HOME)/VX_config.toml --cflags='$(CONFIGS) -DVX_CFG_XLEN=32')
+CXXFLAGS += $(XCONFIGS)
+
+SRCS := \
+	vortex.cpp \
+	dispatcher_static.cpp \
+	$(COMMON)/graphics.cpp \
+	$(COMMON)/result.cpp \
+	$(COMMON)/device.cpp \
+	$(COMMON)/buffer.cpp \
+	$(COMMON)/queue.cpp \
+	$(COMMON)/event.cpp \
+	$(COMMON)/module.cpp \
+	$(COMMON)/runtime_helpers.cpp \
+	$(COMMON)/perf.cpp \
+	$(COMMON)/legacy_runtime.cpp \
+	$(COMMON)/legacy_utils.cpp \
+	$(COMMON)/utils.cpp \
+	$(COMMON)/vm.cpp
+
+OBJS := $(addsuffix .o, $(basename $(notdir $(SRCS))))
+
+all: libvortex_zynq.a
+
+%.o: %.cpp
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+%.o: $(COMMON)/%.cpp
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+libvortex_zynq.a: $(OBJS)
+	$(AR) rcs $@ $(OBJS)
+	@ls -la $@
+
+clean:
+	rm -f *.o *.a
+
+.PHONY: all clean

@@ -111,8 +111,12 @@ proc run_setup {} {
     CONFIG.PCW_FPGA0_PERIPHERAL_FREQMHZ $clk_mhz \
   ] $ps7
 
-  # Vortex top (module reference)
-  set vortex_top [ create_bd_cell -type module -reference Vortex_z7_top Vortex_z7_top_0 ]
+  # Vortex top (module reference): Vortex_z7_top (shim) or Vortex_z7_cp_top
+  # (Command Processor integration) — selected by the Makefile's CP knob.
+  set vx_top "Vortex_z7_top"
+  if {[info exists ::env(VX_TOP)]} { set vx_top $::env(VX_TOP) }
+  set with_cp [expr {$vx_top eq "Vortex_z7_cp_top"}]
+  set vortex_top [ create_bd_cell -type module -reference $vx_top Vortex_z7_top_0 ]
 
   # Reset generator
   set rst [ create_bd_cell -type ip -vlnv xilinx.com:ip:proc_sys_reset proc_sys_reset_0 ]
@@ -121,9 +125,10 @@ proc run_setup {} {
   set smc_ctrl [ create_bd_cell -type ip -vlnv xilinx.com:ip:smartconnect smartconnect_ctrl ]
   set_property -dict [list CONFIG.NUM_SI {1} CONFIG.NUM_MI {1}] $smc_ctrl
 
-  # Memory path: m_axi_mem -> smartconnect -> S_AXI_HP0
+  # Memory path: m_axi_mem (+ m_axi_host with CP) -> smartconnect -> S_AXI_HP0
   set smc_mem [ create_bd_cell -type ip -vlnv xilinx.com:ip:smartconnect smartconnect_mem ]
-  set_property -dict [list CONFIG.NUM_SI {1} CONFIG.NUM_MI {1}] $smc_mem
+  set num_si [expr {$with_cp ? 2 : 1}]
+  set_property -dict [list CONFIG.NUM_SI $num_si CONFIG.NUM_MI {1}] $smc_mem
 
   # Clocks: FCLK_CLK0 drives everything
   connect_bd_net [get_bd_pins processing_system7_0/FCLK_CLK0] \
@@ -145,6 +150,9 @@ proc run_setup {} {
   connect_bd_intf_net [get_bd_intf_pins processing_system7_0/M_AXI_GP0] [get_bd_intf_pins smartconnect_ctrl/S00_AXI]
   connect_bd_intf_net [get_bd_intf_pins smartconnect_ctrl/M00_AXI] [get_bd_intf_pins Vortex_z7_top_0/s_axi_ctrl]
   connect_bd_intf_net [get_bd_intf_pins Vortex_z7_top_0/m_axi_mem] [get_bd_intf_pins smartconnect_mem/S00_AXI]
+  if {$with_cp} {
+    connect_bd_intf_net [get_bd_intf_pins Vortex_z7_top_0/m_axi_host] [get_bd_intf_pins smartconnect_mem/S01_AXI]
+  }
   connect_bd_intf_net [get_bd_intf_pins smartconnect_mem/M00_AXI] [get_bd_intf_pins processing_system7_0/S_AXI_HP0]
 
   # Optional System ILA on the Vortex memory AXI (ENABLE_ILA=1)
@@ -162,6 +170,11 @@ proc run_setup {} {
   assign_bd_address -offset 0x00000000 -range 0x20000000 \
     -target_address_space [get_bd_addr_spaces Vortex_z7_top_0/m_axi_mem] \
     [get_bd_addr_segs processing_system7_0/S_AXI_HP0/HP0_DDR_LOWOCM] -force
+  if {$with_cp} {
+    assign_bd_address -offset 0x00000000 -range 0x20000000 \
+      -target_address_space [get_bd_addr_spaces Vortex_z7_top_0/m_axi_host] \
+      [get_bd_addr_segs processing_system7_0/S_AXI_HP0/HP0_DDR_LOWOCM] -force
+  }
 
   validate_bd_design
   save_bd_design

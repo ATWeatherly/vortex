@@ -49,6 +49,16 @@ XCONFIGS := $(shell python3 $(ROOT_DIR)/ci/gen_config.py --config=$(VORTEX_HOME)
 RTL_INCLUDE = -I$(ROOT_DIR)/sw -I$(ROOT_DIR)/hw -I$(RTL_DIR) -I$(RTL_DIR)/libs -I$(RTL_DIR)/interfaces -I$(RTL_DIR)/core -I$(RTL_DIR)/mem -I$(RTL_DIR)/cache -I$(RTL_DIR)/fpu
 RTL_INCLUDE += -I$(SRC_DIR)
 
+# CP=1 builds the Command Processor integration (VX_afu_wrap top) instead of
+# the minimal shim. Same BD topology plus the CP's host-memory AXI master.
+CP ?= 0
+ifeq ($(CP),1)
+VX_TOP := Vortex_z7_cp_top
+RTL_INCLUDE += -I$(RTL_DIR)/afu/xrt -I$(RTL_DIR)/cp
+else
+VX_TOP := Vortex_z7_top
+endif
+
 # Xilinx floating_point IP generation when the config has an FPU
 ifeq (,$(filter -DVX_CFG_EXT_F_DISABLE,$(CONFIGS)))
 FPU_IP_ENV = FPU_IP=project_1/ip
@@ -65,14 +75,14 @@ all: build
 gen-sources: project_1/sources.txt
 project_1/sources.txt:
 	mkdir -p project_1
-	$(SCRIPT_DIR)/gen_sources.sh $(CFLAGS) -TVortex_z7_top -P -Cproject_1/src -Oproject_1/sources.txt
+	$(SCRIPT_DIR)/gen_sources.sh $(CFLAGS) -T$(VX_TOP) -P -Cproject_1/src -Oproject_1/sources.txt
 
 pre_opt_hook.tcl: $(SRC_DIR)/pre_opt_hook.tcl
 	cp $< $@
 
 build: done.bit
 done.bit: project_1/sources.txt pre_opt_hook.tcl
-	MAX_JOBS=$(JOBS) OPT_LEVEL=$(OPT_LEVEL) CLK_MHZ=$(CLK_MHZ) BOARD=$(BOARD) BOARD_REPO=$(BOARD_REPO) $(FPU_IP_ENV) TOOL_DIR=$(SCRIPT_DIR) \
+	MAX_JOBS=$(JOBS) OPT_LEVEL=$(OPT_LEVEL) CLK_MHZ=$(CLK_MHZ) BOARD=$(BOARD) BOARD_REPO=$(BOARD_REPO) VX_TOP=$(VX_TOP) $(FPU_IP_ENV) TOOL_DIR=$(SCRIPT_DIR) \
 	  $(VIVADO) -mode batch -source $(SRC_DIR)/project.tcl -tclargs $(DEVICE) project_1/sources.txt
 	echo done > done.bit
 
