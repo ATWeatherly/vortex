@@ -24,7 +24,7 @@
 // driven here with full-width INCR constants (matching what the XRT
 // platforms infer).
 module Vortex_z7_cp_wrap #(
-    parameter C_M_AXI_MEM_DATA_WIDTH = 64,
+    parameter C_M_AXI_MEM_DATA_WIDTH = 512,
     parameter C_M_AXI_MEM_ADDR_WIDTH = 32,
     parameter C_M_AXI_MEM_ID_WIDTH   = 32
 ) (

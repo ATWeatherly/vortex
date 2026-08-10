@@ -14,7 +14,7 @@
 // Plain-Verilog top for the Vivado IPI module reference (SystemVerilog is not
 // allowed as a reference's top file). All logic lives in Vortex_z7_cp_wrap.sv.
 module Vortex_z7_cp_top #(
-    parameter C_M_AXI_MEM_DATA_WIDTH = 64,
+    parameter C_M_AXI_MEM_DATA_WIDTH = 512,
     parameter C_M_AXI_MEM_ADDR_WIDTH = 32,
     parameter C_M_AXI_MEM_ID_WIDTH   = 32
 ) (
