@@ -269,6 +269,22 @@ vx_result_t Device::cp_init() {
     CP_WR(CP_Q_CONTROL,        0x1);
     CP_WR(CP_REG_CTRL,         0x1);
 
+    // The CP has no host-visible reset (Q_CONTROL.reset / CP_CTRL.reset_all
+    // are unwired in RTL — VX_cp_core parks them in UNUSED_VAR): its fetch
+    // head and retired-seqnum counter survive a host-process restart. Adopt
+    // the hardware's state instead of assuming zero: resume the seqnum
+    // sequence and place ring writes where the idle fetch head actually is
+    // (head == tail == seqnum * CL when the queue is drained). Without
+    // this, a second process's waits are pre-satisfied by the stale larger
+    // seqnum and it reads results the CP has not produced yet.
+    {
+        uint32_t hw_seqnum = 0;
+        if (p->cp_reg_read(CP_Q_SEQNUM, &hw_seqnum) != VX_SUCCESS)
+            return VX_ERR_DEVICE_LOST;
+        cp_expected_seqnum_ = hw_seqnum;
+        cp_tail_            = uint64_t(hw_seqnum) * CP_CL_BYTES;
+    }
+
     cp_enabled_ = true;
 
     // Discover VM support at runtime: the CP publishes VM_ENABLED in DEV_CAPS
