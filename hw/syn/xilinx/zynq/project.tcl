@@ -203,6 +203,12 @@ proc run_setup {} {
     set_property strategy "Flow_RuntimeOptimized"        [get_runs synth_1]
     set_property strategy "Performance_RuntimeOptimized" [get_runs impl_1]
   }
+  # AREA_OPT=1: trade Fmax for slices (needed for near-capacity designs
+  # like the 512-bit CP integration on the Z020).
+  if {[info exists ::env(AREA_OPT)] && $::env(AREA_OPT) == 1} {
+    set_property strategy "Flow_AreaOptimized_high" [get_runs synth_1]
+    set_property strategy "Area_Explore"            [get_runs impl_1]
+  }
 
   update_compile_order -fileset sources_1
 }

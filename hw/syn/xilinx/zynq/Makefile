@@ -82,7 +82,7 @@ pre_opt_hook.tcl: $(SRC_DIR)/pre_opt_hook.tcl
 
 build: done.bit
 done.bit: project_1/sources.txt pre_opt_hook.tcl
-	MAX_JOBS=$(JOBS) OPT_LEVEL=$(OPT_LEVEL) CLK_MHZ=$(CLK_MHZ) BOARD=$(BOARD) BOARD_REPO=$(BOARD_REPO) VX_TOP=$(VX_TOP) $(FPU_IP_ENV) TOOL_DIR=$(SCRIPT_DIR) \
+	MAX_JOBS=$(JOBS) OPT_LEVEL=$(OPT_LEVEL) AREA_OPT=$(AREA_OPT) CLK_MHZ=$(CLK_MHZ) BOARD=$(BOARD) BOARD_REPO=$(BOARD_REPO) VX_TOP=$(VX_TOP) $(FPU_IP_ENV) TOOL_DIR=$(SCRIPT_DIR) \
 	  $(VIVADO) -mode batch -source $(SRC_DIR)/project.tcl -tclargs $(DEVICE) project_1/sources.txt
 	echo done > done.bit
 
