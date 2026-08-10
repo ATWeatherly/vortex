@@ -265,3 +265,44 @@ freestanding bare-metal ARM host over the same shim/DCR protocol —
 generates byte-identical-to-reference llama2 text at 49.1 tok/s
 (stories260K) and 1.07 tok/s (stories15M), 250–305× the XC7Z010 soft-float
 port on the same benchmark.
+
+## 10. Command Processor integration (Part II addendum, 2026-08-10)
+
+The port no longer needs its minimal shim: `CP=1` builds VX_afu_wrap (the
+XRT AFU: Command Processor + core) into the same BD, and the **stock
+Vortex runtime** — vortex2 queues, module loader, CP command ring, DMA —
+runs llama2 on the Zybo, driven from JTAG-booted Linux.
+
+| | shim + bare-metal (Part II §8) | CP + stock runtime |
+|---|---|---|
+| Config | 4×4, FPU, 16K caches, LMEM, 67 MHz | 4×4, FPU, 8K caches, no LMEM, 58.8 MHz |
+| Utilization | 38.6k LUTs (72.6%) | 47.3k LUTs (88.9%), AREA_OPT strategies |
+| stories260K | 49.06 tok/s | **236.4 tok/s** (4.8×) |
+| stories15M | 1.066 tok/s | **4.72 tok/s** (4.4×) |
+
+Both CP results byte-identical to the x86 goldens. The speedup is the CP
+doing its job: no per-matmul kernel re-upload, launches and DMA queued
+through the ring instead of host register pokes.
+
+Hard-won caveats:
+- **The CP's DMA/fetch engines are fixed 512-bit** (64-byte cache-line
+  beats, `awsize=3'd6` internal, and the AFU port macros do not export
+  awsize). Build the masters at 512-bit and let the BD smartconnect
+  down-convert to HP0's 64-bit — at 64-bit width every beat truncates and
+  device-memory traffic vanishes *with completing handshakes* (the DMA
+  ignores write responses; Q_ERROR stays 0).
+- 512-bit + converters exceed default-strategy placement on the Z020;
+  `AREA_OPT=1` (Flow_AreaOptimized_high + Area_Explore) fits at 88.9%
+  with Fmax ≈ 64 MHz → clock at 58.8 (IOPLL /17).
+- The relocated software map must set `VX_MEM_USER_BASE_ADDR=0x10000000`
+  (the stock allocator's device pool base — the leftover default 0x10000
+  had the CP DMA-ing into Linux's own RAM), and CP kernels link at
+  `STARTUP_ADDR=0x14000000` so ascending buffer allocation and the
+  module's kernel reservation cannot collide.
+- Host side: `sw/runtime/zynq` — a ~150-line /dev/mem callbacks.h backend
+  (CP regfile at ctrl+0x1000, ring pool = 16 MB uncached reserve at
+  0x0F000000 with `mem=240M`) + a static dispatcher; the full runtime
+  core builds as a static musl ARM library, pthreads and all.
+- Linux comes up with no boot medium at all: ps7_init-as-FSBL + U-Boot +
+  a dtc-built FIT (slimmed initramfs; **PL nodes stripped from the DTB**
+  — Digilent's v_tc sits at 0x43C00000 and its probe bus-aborts init).
