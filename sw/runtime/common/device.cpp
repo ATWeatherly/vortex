@@ -253,6 +253,12 @@ vx_result_t Device::cp_init() {
         auto _r = p->cp_reg_write((_off), (_val));                          \
         if (_r != VX_SUCCESS) return _r;                                    \
     } while (0)
+    // Reset the queue before programming it: on real hardware the CP's
+    // internal tail/head/seqnum survive a host-process restart (the device
+    // is not reset between opens), and a stale seqnum larger than the new
+    // process's expectations satisfies every completion wait immediately —
+    // the host then reads results the CP has not produced yet.
+    CP_WR(CP_Q_CONTROL,        0x2);   // reset_pulse
     CP_WR(CP_Q_RING_BASE_LO,   uint32_t(cp_ring_.cp_addr & 0xFFFFFFFFu));
     CP_WR(CP_Q_RING_BASE_HI,   uint32_t(cp_ring_.cp_addr >> 32));
     CP_WR(CP_Q_HEAD_ADDR_LO,   uint32_t(cp_head_.cp_addr & 0xFFFFFFFFu));

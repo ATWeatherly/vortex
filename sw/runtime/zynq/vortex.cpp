@@ -99,6 +99,10 @@ public:
 
   // ----- CP register channel (regfile window at +0x1000) -----
   int cp_reg_write(uint32_t off, uint32_t value) {
+    // Full barrier on BOTH sides: ring-entry writes (pool_ mapping) and
+    // this MMIO doorbell (ctrl_ mapping) are different Device regions —
+    // ARM does not order across them without an explicit dmb/dsb.
+    __sync_synchronize();
     ctrl_[(CP_WINDOW + off) / 4] = value;
     __sync_synchronize();
     return 0;
