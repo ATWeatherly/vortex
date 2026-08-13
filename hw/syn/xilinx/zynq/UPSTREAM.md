@@ -82,3 +82,48 @@ Suggested fix: `ALIGN(4)` on the tdata/tbss boundaries (or align
 
 **Proposed order:** 2 (trivial), 5 (small linker fix), 3 (issue only),
 4 (issue with repro), 1 (the big PR, after the others land or reference it).
+
+## 6. Bug: CP queue reset is documented but unwired — second host process reads phantom completions
+
+`VX_cp_axil_regfile` documents `Q_CONTROL.reset_pulse` (bit 1) and
+`CP_CTRL.reset_all` (bit 1), and drives a `q_reset_pulse[]` output. In
+`VX_cp_core` that output is discarded:
+
+```systemverilog
+  // Reset pulse from regfile (Q_CONTROL.reset / CP_CTRL.reset_all) is
+  // not propagated to CPEs as a separate signal. ...
+  for (genvar q = 0; q < NUM_QUEUES; ++q) begin : g_unused_reset
+    `UNUSED_VAR (q_reset_pulse[q])
+  end
+```
+
+So a host cannot reset the CP. On a real device the CP is only reset when
+the FPGA is reprogrammed, and its fetch head + retired-seqnum counter
+survive host-process exit. `Device::cp_init_` then programs a fresh ring
+and starts counting `cp_expected_seqnum_` from 0, while the hardware's
+`Q_SEQNUM` is still at (say) 21000. Every `cp_batch_end` poll —
+`if (seqnum32 >= target) break;` — is satisfied instantly, so the host
+reads result buffers before the CP has written them.
+
+Symptom: the first process after programming the bitstream is correct;
+every later process returns stale/garbage data, intermittently and
+proportional to how fast the host submits (pacing the host — e.g. adding
+per-call verification — hides it completely). Nothing reports an error:
+`Q_ERROR` stays 0 and every command does eventually execute.
+
+Reproduced on a Zynq-7000 (XC7Z020) CP integration: run any two runtime
+processes back-to-back on one bitstream load.
+
+Two fixes, ideally both:
+1. **RTL**: honor the documented reset — propagate `q_reset_pulse` to the
+   CPE fetch/retire state (clear head/tail/seqnum), or delete the bits
+   from the register map and its documentation.
+2. **Runtime** (what this port does, works with today's RTL): read
+   `Q_SEQNUM` at open and adopt it — `cp_expected_seqnum_ = hw_seqnum;
+   cp_tail_ = hw_seqnum * CP_CL_BYTES;` — so the host resumes the
+   hardware's sequence instead of assuming a fresh device.
+
+Also worth hardening regardless: `sw/runtime`'s MMIO writes rely on a
+release fence *before* the doorbell but none after; on ARM the ring
+(Normal/Device host memory) and the CP regfile (Device MMIO) are separate
+regions and need barriers on both sides.
