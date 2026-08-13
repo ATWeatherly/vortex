@@ -263,13 +263,15 @@ re-uploaded and BSS re-zeroed per launch (~31 KB over the uncached window).
 None of this was optimized; per-shape attribution was not re-run on the
 Z020.
 
-*One-sentence summary for citation:* On the XC7Z020 at 67 MHz, Vortex fits
-as a 4-warp × 4-thread core with a DSP-based hardware FPU, 16 KB caches,
-local memory, and atomics in 73% of the device, and — driven by a
-freestanding bare-metal ARM host over the same shim/DCR protocol —
-generates byte-identical-to-reference llama2 text at 49.1 tok/s
-(stories260K) and 1.07 tok/s (stories15M), 250–305× the XC7Z010 soft-float
-port on the same benchmark.
+*One-sentence summary for citation:* On the XC7Z020, Vortex fits as a
+4-warp × 4-thread core with a DSP-based hardware FPU, 16 KB caches, local
+memory and atomics in 73% of the device at 67 MHz (shim path, `vecadd`
+verified), or — adding the Command Processor and the stock Vortex runtime
+— in 89% at 58.8 MHz, where llama2 runs entirely on the GPU and generates
+byte-identical-to-reference text at 14.99 tok/s (stories260K) and 0.294
+tok/s (stories15M): 76–84× the XC7Z010 soft-float port, and ~16× slower
+than the board's own Cortex-A9 — an architecture demonstration rather
+than a performance result.
 
 ## 10. Command Processor integration — llama2 on Vortex (2026-08-13)
 
