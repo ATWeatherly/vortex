@@ -221,14 +221,19 @@ core-only estimate (BD optimization).
 - `vecadd` hostless: PASS (exit=0) twice, 16 threads.
 - Hard-float kernel rtlsim self-test: bitwise match, SIMT vs sequential
   on-device reference.
-- **llama2 stories260K** (`-t 0 -n 40`): **byte-identical to the x86 golden
-  story, 49.06 tok/s** — 249× the Z010's soft-float 0.197 tok/s.
-- **llama2 stories15M** (`-t 0 -n 20`): **byte-identical to golden,
-  1.066 tok/s** — 305× the Z010's 0.00349 tok/s.
+- **llama2 on this bare-metal path was never validly measured — see the
+  retraction below.** The working llama2 results for this board are in
+  section 10 (Command Processor path).
 
-The byte-identical claim survived the switch from bit-exact SoftFloat to
-the hardware FPU (including any FMA contraction differences) at temperature
-0 on both models — argmax sampling absorbed any ULP-level differences.
+> **RETRACTED (2026-08-13).** Earlier revisions of this section claimed
+> llama2 at 49.06 tok/s (stories260K) and 1.066 tok/s (stories15M) on the
+> bare-metal host. Those runs did **not** use Vortex: the benchmark's
+> device offload is opt-in via `-v 1`, and the bare-metal host's baked-in
+> command line omitted it, so every matmul ran on the ARM core while the
+> program still printed golden text. The numbers were ARM-CPU-only
+> measurements. Nothing about the bitstream, the runtime, or the kernel
+> was wrong — only the claim. The bare-metal path was not re-measured with
+> `-v 1`; effort moved to the CP integration instead.
 
 ## 9. The host story changed completely (new caveats)
 
@@ -266,43 +271,75 @@ generates byte-identical-to-reference llama2 text at 49.1 tok/s
 (stories260K) and 1.07 tok/s (stories15M), 250–305× the XC7Z010 soft-float
 port on the same benchmark.
 
-## 10. Command Processor integration (Part II addendum, 2026-08-10)
+## 10. Command Processor integration — llama2 on Vortex (2026-08-13)
 
-The port no longer needs its minimal shim: `CP=1` builds VX_afu_wrap (the
-XRT AFU: Command Processor + core) into the same BD, and the **stock
-Vortex runtime** — vortex2 queues, module loader, CP command ring, DMA —
-runs llama2 on the Zybo, driven from JTAG-booted Linux.
+`CP=1` builds VX_afu_wrap (the XRT AFU: Command Processor + core) into the
+same BD, and the **stock Vortex runtime** — vortex2 queues, module loader,
+CP command ring, CP-driven DMA and launches — runs llama2 on the Zybo from
+JTAG-booted Linux. Every matmul executes on Vortex (`-v 1`), and both
+models generate text **byte-identical to the x86 goldens**.
 
-| | shim + bare-metal (Part II §8) | CP + stock runtime |
-|---|---|---|
-| Config | 4×4, FPU, 16K caches, LMEM, 67 MHz | 4×4, FPU, 8K caches, no LMEM, 58.8 MHz |
-| Utilization | 38.6k LUTs (72.6%) | 47.3k LUTs (88.9%), AREA_OPT strategies |
-| stories260K | 49.06 tok/s | **236.4 tok/s** (4.8×) |
-| stories15M | 1.066 tok/s | **4.72 tok/s** (4.4×) |
+| | value |
+|---|---|
+| Bitstream | 47,270 LUTs (88.9% of the XC7Z020), WNS +0.54 @ **58.8 MHz** |
+| Config | 4 warps × 4 threads, hardware FPU, 8 KB 2-way I$/D$, no LMEM |
+| Flow | `CP=1 AREA_OPT=1 BOARD=zybo-z7-20 CLK_MHZ=59` |
+| `vecadd` (stock regression) | PASSED, `instrs=400 cycles=2848 IPC=0.14` |
+| **llama2 stories260K** (`-t 0 -n 40 -v 1`) | **14.99 tok/s**, golden — 1440 matmuls, 2.66 s device time |
+| **llama2 stories15M** (`-t 0 -n 20 -v 1`) | **0.294 tok/s**, golden — 860 matmuls, 68.9 s device time |
 
-Both CP results byte-identical to the x86 goldens. The speedup is the CP
-doing its job: no per-matmul kernel re-upload, launches and DMA queued
-through the ring instead of host register pokes.
+Comparisons that hold:
+
+| | Arty Z7-10 (shim, soft-float, 66.7 MHz) | Zybo Z7-20 (CP, hardware FPU, 58.8 MHz) | speedup |
+|---|---|---|---|
+| stories260K | 0.197 tok/s | **14.99 tok/s** | 76× |
+| stories15M | 0.00349 tok/s | **0.294 tok/s** | 84× |
+
+**The ARM host CPU is faster than the GPU at this scale**, and saying so
+is the honest framing: the same binary with `-v 0` does ~236 tok/s
+(stories260K) and ~4.7 tok/s (stories15M) on one Cortex-A9. A 16-lane
+59 MHz soft GPU on a 89%-full XC7Z020 will not beat a 666 MHz dual-issue
+ARM with VFP on 288-dimension matrix-vector products — the offload is an
+architecture demonstration (a complete CP-driven GPGPU stack on a $200
+board), not a performance win.
 
 Hard-won caveats:
+- **The benchmark's Vortex offload is opt-in (`-v 1`).** Without it
+  llama.cpp runs every matmul on the host CPU and still prints golden
+  text — an easy way to publish a CPU number as a GPU result. Always
+  confirm `>> Using vortex acceleration` and non-zero device time.
 - **The CP's DMA/fetch engines are fixed 512-bit** (64-byte cache-line
-  beats, `awsize=3'd6` internal, and the AFU port macros do not export
+  beats, `awsize=3'd6` internal; the AFU port macros do not even export
   awsize). Build the masters at 512-bit and let the BD smartconnect
-  down-convert to HP0's 64-bit — at 64-bit width every beat truncates and
+  down-convert to HP0's 64 bits — at 64-bit width every beat truncates and
   device-memory traffic vanishes *with completing handshakes* (the DMA
-  ignores write responses; Q_ERROR stays 0).
-- 512-bit + converters exceed default-strategy placement on the Z020;
-  `AREA_OPT=1` (Flow_AreaOptimized_high + Area_Explore) fits at 88.9%
-  with Fmax ≈ 64 MHz → clock at 58.8 (IOPLL /17).
+  ignores write responses, so `Q_ERROR` stays 0).
+- **The CP has no working host-visible reset** (`Q_CONTROL.reset_pulse` /
+  `CP_CTRL.reset_all` are unwired — see UPSTREAM.md #6), so its fetch head
+  and retired-seqnum survive host-process exit. A second process that
+  assumes a fresh device has all its completion waits pre-satisfied by the
+  stale larger seqnum and reads results the CP has not produced yet:
+  intermittent, host-rate-dependent corruption that *disappears whenever
+  you slow the host down to look at it*. The runtime now reads `Q_SEQNUM`
+  at open and resumes the hardware's sequence.
+- 512-bit + width converters exceed default-strategy placement on the
+  Z020; `AREA_OPT=1` (Flow_AreaOptimized_high + Area_Explore) fits at
+  88.9% with Fmax ≈ 64 MHz → clock at 58.8 (IOPLL /17).
 - The relocated software map must set `VX_MEM_USER_BASE_ADDR=0x10000000`
-  (the stock allocator's device pool base — the leftover default 0x10000
+  (the stock allocator's device-pool base — the leftover 0x10000 default
   had the CP DMA-ing into Linux's own RAM), and CP kernels link at
   `STARTUP_ADDR=0x14000000` so ascending buffer allocation and the
   module's kernel reservation cannot collide.
-- Host side: `sw/runtime/zynq` — a ~150-line /dev/mem callbacks.h backend
-  (CP regfile at ctrl+0x1000, ring pool = 16 MB uncached reserve at
-  0x0F000000 with `mem=240M`) + a static dispatcher; the full runtime
-  core builds as a static musl ARM library, pthreads and all.
-- Linux comes up with no boot medium at all: ps7_init-as-FSBL + U-Boot +
-  a dtc-built FIT (slimmed initramfs; **PL nodes stripped from the DTB**
-  — Digilent's v_tc sits at 0x43C00000 and its probe bus-aborts init).
+- Large uploads must be chunked by the caller: the runtime stages each
+  transfer through a host allocation of the same size, and the CP-visible
+  pool is a small physically-reserved region (the 15M classifier weight
+  alone is 36 MB).
+- Host side: `sw/runtime/zynq` — a ~150-line `/dev/mem` callbacks.h backend
+  (CP regfile at ctrl+0x1000, 16 MB uncached pool at 0x0F000000 with
+  `mem=240M`) plus a static dispatcher; the full runtime core builds as a
+  static musl ARM library, pthreads and all.
+- Linux comes up with no boot medium: ps7_init-as-FSBL + U-Boot + a
+  dtc-built FIT (slimmed initramfs; **PL nodes stripped from the DTB** —
+  Digilent's `v_tc` sits at 0x43C00000 and its probe bus-aborts init).
+  Pin `initrd_high`/`fdt_high` below the `mem=` ceiling or the ramdisk
+  lands where the kernel cannot see it.
