@@ -345,3 +345,129 @@ Hard-won caveats:
   Digilent's `v_tc` sits at 0x43C00000 and its probe bus-aborts init).
   Pin `initrd_high`/`fdt_high` below the `mem=` ceiling or the ramdisk
   lands where the kernel cannot see it.
+
+## 11. Performance model: what actually limits this port (2026-08-13)
+
+Every matmul the llama2 offload issues (`C[M,1] = A[M,K] @ B[K,1]`) costs
+
+    t = 0.252 ms + (M*K) / rate(K)
+
+with `rate(K)` = 4.5 MMAC/s normally, 3.9 when the streamed rows collide
+into 4 dcache sets, and **2.1 when they collide into 2**. Both terms were
+measured on this bitstream (CP, 4x4 threads, 8 KB 2-way dcache, 58.8 MHz);
+the conflict function is derived from cache geometry, not fitted.
+
+### The fixed 0.252 ms
+
+~14,800 cycles, and it is this port's launch protocol end to end: memcpy
+the input vector into the CP staging pool, write a ring entry, two MMIO
+doorbell writes over M_AXI_GP0, CP DMA-fetches the 64 B command, decodes,
+runs CMD_MEM_WRITE then CMD_LAUNCH (KMU CTA distribution + reset delay),
+every thread re-runs the crt0 prologue, an implicit CMD_CACHE_FLUSH walks
+all 512 line-slots of the dcache, CMD_MEM_READ returns C, a completion
+record is written to host memory, and the host polls Q_SEQNUM over
+uncached GP0 reads. It scales with dcache size (flush) and clock, and
+amortizes if several matmuls share one doorbell.
+
+### Why the rate is 4.5 MMAC/s — three stages of loss
+
+| ceiling | value | limited by |
+|---|---|---|
+| FPU peak | 235 MMAC/s | 4 FPU lanes x 58.8 MHz |
+| issue ceiling, this kernel | 33.6 MMAC/s | 7 instructions per 4 lane-MACs at ISSUE_WIDTH=1 |
+| achieved | **4.5 MMAC/s** | memory stalls |
+
+The compiler emits a 7-instruction inner loop with no unrolling, and the
+`fmadd.s` consumes both `flw` results two instructions later:
+
+    flw fa4,0(a5) ; flw fa3,0(a6) ; addi a0,a0,-1 ; add a6,a6,t0
+    fmadd.s fa5,fa4,fa3,fa5 ; addi a5,a5,4 ; bnez a0,loop
+
+So each warp issues its loads and immediately stalls on them. With 4 warps
+and LSU_PENDING_SIZE=8, very few misses are ever in flight: working back
+from throughput, one 16-byte line lands every ~52 cycles, implying only
+~2-4 outstanding misses. The result is **1.9% of FPU peak and 3.8% of the
+HP0 port's ~470 MB/s** — neither the DSP FPU nor DDR bandwidth is the
+bottleneck. This is a memory-level-parallelism limit.
+
+Note also that these are matrix-*vector* products: every weight is read
+exactly once per call and no weight matrix fits in 8 KB, so bytes streamed
+= 4*M*K always and the cost is linear in MACs with no reuse to exploit.
+
+### The dcache conflict function (white box)
+
+8 KB / 2-way / 16-byte lines = 256 sets, set index `(addr/16) mod 256`.
+The 16 threads of a block stream 16 rows of A spaced `K*4` bytes apart, so
+row *i* lands in set `(i*K/4) mod 256`, and the rate follows the number of
+distinct sets:
+
+| K | distinct sets | MMAC/s |
+|---|---|---|
+| 64, 172, 288 | 16 | ~4.5 |
+| 128 | 8 | 4.04 |
+| 256, 768 | 4 | ~3.9 |
+| **512** | **2** | **2.1** |
+
+**Powers of two are pathological**: K=512 halves throughput.
+
+### Blind validation on stories42M
+
+The model was calibrated on 260K/15M shapes, then used to predict
+stories42M (dim 512, hidden 1376, 8 layers, vocab 32000) **before the
+checkpoint was downloaded**. Three of its four matmul groups have K=512,
+so the model predicted a 2.7x-larger model would be 5.3x slower:
+
+| | predicted | measured | error |
+|---|---|---|---|
+| matmuls / token | 57 | 57 | exact |
+| MMAC / token | 41.68 | 41.68 | exact |
+| device ms / token | 18,350 | 18,443 | 0.5% |
+| tok/s | 0.0545 | **0.0550** | **0.9%** |
+
+Output byte-identical to the x86 golden. A no-conflict model would have
+predicted 0.108 tok/s — wrong by 96%. Across 260K, 15M and 42M the model
+tracks a 280x span of per-token work.
+
+### Where the time goes per token
+
+| | 260K | 15M | 42M |
+|---|---|---|---|
+| attention (q,k,v,wo) | 18.8 ms (28%) | 445 ms (13%) | 3,984 ms (22%) |
+| FFN (w1,w3,w2) | 39.8 ms (60%) | 926 ms (27%) | 6,601 ms (36%) |
+| classifier | 7.5 ms (11%) | 2,026 ms (60%) | 7,765 ms (42%) |
+
+The classifier dominates at scale (vocab 512 -> 32000), and it is 61% of
+the entire 260K->15M slowdown. Fixed per-call overhead is 14% of the 260K
+token but only 0.3% of the 15M one, which is why the small model is
+*less* efficient per MAC.
+
+### What this says to optimize (in order)
+
+1. **Unroll the matmul inner loop** — attacks the 7x issue tax directly
+   and creates memory-level parallelism. Kernel-only change, no RTL.
+2. **Pad K away from powers of two** (e.g. 512 -> 528). Worth >2x on
+   42M-shaped models, costs only padding.
+3. **More warps** — more latency hiding, but costs area on an 89%-full die.
+4. **LMEM tiling** — would break the linear-in-MACs assumption entirely.
+
+A faster clock or a wider memory bus would buy almost nothing.
+
+### Profiling counters
+
+`-DPERF_ENABLE` (via `--perf=N` upstream, plus `VORTEX_PROFILING=N` at
+runtime) costs, measured A/B at post-synthesis on this exact design:
+
+| | baseline | PERF_ENABLE | delta |
+|---|---|---|---|
+| Slice LUTs | 41,895 (78.8%) | 43,103 (81.0%) | +1,208 (+2.9%) |
+| Slice Registers | 46,743 (43.9%) | 48,828 (45.9%) | +2,085 (+4.5%) |
+
+Cheap in absolute terms, but the CP bitstream is already at 88.85% after
+implementation and the extra ~2.3 points of LUTs fail slice packing (short
+by ~98 slices). Profiling on this board needs a trimmed config (2 warps or
+4 KB caches) — which changes the machine being measured, so its counters
+characterize the microarchitecture's behaviour rather than certify this
+bitstream. The three things still inferred rather than measured, and which
+those counters would settle: the split between raw memory latency and miss
+concurrency, why 2-set conflict costs 2.14x rather than 4x, and the
+internal breakdown of the 0.252 ms.
