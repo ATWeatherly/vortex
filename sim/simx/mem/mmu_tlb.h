@@ -42,6 +42,14 @@ public:
   // Invalidate every entry (sfence.vma equivalent).
   void flush();
 
+  // Zero the perf counters (kernel-launch reset, like the caches').
+  void reset_perf() {
+    reads_ = 0;
+    hits_ = 0;
+    misses_ = 0;
+    evictions_ = 0;
+  }
+
   uint64_t reads()     const { return reads_; }
   uint64_t hits()      const { return hits_; }
   uint64_t misses()    const { return misses_; }

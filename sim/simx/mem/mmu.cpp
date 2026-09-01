@@ -53,6 +53,7 @@ void Mmu::on_reset() {
   // cached translations cannot outlive one — the shared levels clear here
   // too and would otherwise disagree with this one.
   tlb_.flush();
+  tlb_.reset_perf();
 }
 
 void Mmu::set_satp(uint64_t satp) {

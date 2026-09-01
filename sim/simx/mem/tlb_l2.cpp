@@ -30,6 +30,7 @@ L2Tlb::L2Tlb(const SimContext& ctx, const char* name, uint32_t num_clients)
 L2Tlb::~L2Tlb() {}
 
 void L2Tlb::on_reset() {
+  perf_ = PerfStats();
   for (auto& set : sets_) {
     for (auto& e : set) {
       e = Entry();

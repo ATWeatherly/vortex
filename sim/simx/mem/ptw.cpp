@@ -35,6 +35,9 @@ void Ptw::on_reset() {
   for (auto& e : walk_cache_) {
     e = WcEntry();
   }
+  // Perf counters reset per launch like the caches'; the RTL counters
+  // clear on the same reset.
+  perf_ = PerfStats();
   // fault_ deliberately survives: a launch is reset per dispatch, and a
   // fault raised by one launch of a batch must still be readable after the
   // next one starts. It clears when the host reads the report.

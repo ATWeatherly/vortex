@@ -97,6 +97,10 @@ public:
   uint64_t satp() const { return satp_ ? satp_->get_satp() : 0; }
 
 private:
+  // Ranges already identity-mapped (VA==PA): re-covering a sub-range is
+  // idempotent and skips the VA reservation.
+  std::vector<std::pair<uint64_t, uint64_t>> identity_ranges_;
+
   uint8_t alloc_page_table(uint64_t* pt_addr);
   int16_t update_page_table(uint64_t ppn, uint64_t vpn, uint32_t flag, uint8_t leaf_level = 0);
 

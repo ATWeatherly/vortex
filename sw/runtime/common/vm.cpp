@@ -332,7 +332,24 @@ int VMManager::install_identity_map(uint64_t addr, uint64_t size) {
   constexpr uint32_t IDENTITY_PTE_FLAGS =
       PTE_V | PTE_R | PTE_W | PTE_X | PTE_U | PTE_A | PTE_D;
 
-  (void)virtual_mem_->reserve(addr, size);
+  // VA bookkeeping only: an identity map fully inside a range this manager
+  // already identity-mapped (the init-time system regions, or a recycled
+  // pinned-slab allocation) is a legitimate re-cover — update_page_table
+  // verifies the existing leaf yields the same translation — and must not
+  // re-reserve, or the allocator reports a spurious overlap error on every
+  // such install (visible on any XLEN=64 xrt run: the kernel-image reserve
+  // lands inside the init map of the high region).
+  bool covered = false;
+  for (const auto& r : identity_ranges_) {
+    if (addr >= r.first && (addr + size) <= (r.first + r.second)) {
+      covered = true;
+      break;
+    }
+  }
+  if (!covered) {
+    (void)virtual_mem_->reserve(addr, size);
+    identity_ranges_.emplace_back(addr, size);
+  }
 
   uint64_t cur = addr;
   uint64_t end = addr + size;
