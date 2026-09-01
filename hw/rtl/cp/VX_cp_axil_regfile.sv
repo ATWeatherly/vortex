@@ -78,6 +78,9 @@ module VX_cp_axil_regfile
   // One-cycle reset pulse per queue when the host writes Q_CONTROL.reset.
   output logic                      q_reset_pulse [NUM_QUEUES],
 
+  // CP_SATP — page-table root for the CP DMA's walker.
+  output logic [63:0]               satp,
+
   // AFU host-port drain counters, read-only at global 0x30/0x34 (block 0x30
   // fully padded). Debug visibility for the staged-readback investigation:
   // the question "did the CP's write ever leave the AFU" is answerable from
@@ -115,6 +118,7 @@ module VX_cp_axil_regfile
   // ---- Global registers ----
   logic [31:0] r_cp_ctrl;
   logic [63:0] r_cycle_count;
+  logic [63:0] r_satp;
 
   always_ff @(posedge clk) begin
     if (reset) r_cycle_count <= '0;
@@ -188,7 +192,10 @@ module VX_cp_axil_regfile
     logic [5:0]       off;
     if (is_global(addr, 8'h00)) return r_cp_ctrl;
     if (is_global(addr, 8'h04)) return {30'd0, cp_error, cp_busy};
-    if (is_global(addr, 8'h08)) return {8'd0,
+    // DEV_CAPS bit 24 = VM_ENABLED: the runtime discovers VM support here
+    // and only then builds page tables and programs CP_SATP.
+    if (is_global(addr, 8'h08)) return {7'd0,
+                                        1'(`VX_CFG_VM_ENABLED),
                                         8'(AXI_TID_W),
                                         8'(RING_SIZE_LOG2_MAX),
                                         8'(NUM_QUEUES)};
@@ -200,14 +207,10 @@ module VX_cp_axil_regfile
     if (is_global(addr, 8'h24)) return gpu_isa_caps[63:32];
     // Block padding -- see the 16-byte block note on is_decoded(). Read as
     // zero; they exist so their enclosing block is fully populated.
-    // 0x28/0x2C are CP_SATP_LO/HI in the software ABI (sw/runtime/common/
-    // device.cpp), i.e. the CP DMA MMU page-table root. This CP has no MMU --
-    // there is no satp anywhere in hw/rtl/cp -- so it correctly reports
-    // VM_ENABLED=0 in CP_DEV_CAPS and the runtime never writes them. Reading
-    // zero is the honest answer; implement them for real if an MMU is added.
     if (is_global(addr, 8'h0C)) return 32'd0;
-    if (is_global(addr, 8'h28)) return 32'd0;
-    if (is_global(addr, 8'h2C)) return 32'd0;
+    // CP_SATP_LO/HI — the CP DMA MMU's page-table root (see VX_cp_mmu).
+    if (is_global(addr, 8'h28)) return r_satp[31:0];
+    if (is_global(addr, 8'h2C)) return r_satp[63:32];
     // AFU host-port drain counters (debug, read-only).
     if (is_global(addr, 8'h30)) return dbg_host_w_counts;
     if (is_global(addr, 8'h34)) return dbg_host_r_counts;
@@ -350,6 +353,7 @@ module VX_cp_axil_regfile
     automatic logic [5:0]       off;
     if (reset) begin
       r_cp_ctrl <= '0;
+      r_satp    <= '0;
       for (int i = 0; i < NUM_QUEUES; ++i) begin
         r_ring_base[i]       <= '0;
         r_head_addr[i]       <= '0;
@@ -376,7 +380,11 @@ module VX_cp_axil_regfile
       end
 
       if (wr_commit && is_decoded(wr_addr_buf)) begin
-        if (is_global(wr_addr_buf, 8'h00)) begin
+        if (is_global(wr_addr_buf, 8'h28)) begin
+          r_satp[31:0] <= wr_data_buf;
+        end else if (is_global(wr_addr_buf, 8'h2C)) begin
+          r_satp[63:32] <= wr_data_buf;
+        end else if (is_global(wr_addr_buf, 8'h00)) begin
           r_cp_ctrl <= wr_data_buf;
           if (wr_data_buf[1]) begin
             for (int i = 0; i < NUM_QUEUES; ++i) q_reset_pulse[i] <= 1'b1;
@@ -471,5 +479,7 @@ module VX_cp_axil_regfile
       `UNUSED_VAR (q_error[gi])
     end
   endgenerate
+
+  assign satp = r_satp;
 
 endmodule : VX_cp_axil_regfile

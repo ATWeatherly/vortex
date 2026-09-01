@@ -7,6 +7,10 @@ follows the version pins recorded in [VERSION](VERSION) (`VORTEX_VERSION`,
 
 ## [Unreleased]
 
+### Added
+
+- **RTL command-processor VM (`VX_cp_mmu`).** The RTL CP now matches the software CP model: `CP_SATP_LO/HI` (0x028/0x02C) hold the page-table root, `CP_DEV_CAPS` publishes `VM_ENABLED` (bit 24), and the DMA engine translates its device-side operand once per chunk through a walker that reads PTEs over the DMA's device AXI channel. `F_MEM_PHYSICAL` skips translation; a walk fault passes the address through untranslated, like `cmd_processor.cpp`'s `cp_translate`. The walker takes its geometry and PTE fault predicate from `VX_tlb_pkg` / matches `VX_ptw_walker`, bypasses its 2-entry translation cache in BARE mode, and drops it on a `CACHE_FLUSH` DCR or a SATP change (a walk straddling the invalidation is answered but not cached). *Why:* VM previously worked wherever the software CP runs (simx and the sim AFUs' emulated CP path) but the RTL CP reported `VM_ENABLED=0`, so on xrt/opae hardware the runtime silently skipped page tables entirely.
+
 ### Fixed
 
 - **SimX arbiter input grouping.** `TxArbiter`/`TxRxArbiter` grouped inputs by `log2ceil(inputs / outputs)` where `VX_stream_arb` uses ceiling division, so a request count that is not a multiple of the output count left the trailing inputs unserved (3 cores over 2 shared icaches hangs at boot). Covered by the `cache: demo-shared-icache-odd` catalog case.

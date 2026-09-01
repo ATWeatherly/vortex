@@ -212,6 +212,15 @@ tests:
 # above) are reported, via the shared walker. Re-enable when L1 permission-fault
 # reporting is added.
 
+# CP DMA translation through the RTL command processor: the xrt driver uses
+# the RTL CP (DEV_CAPS.VM_ENABLED, CP_SATP, VX_cp_mmu per-chunk walker), so
+# uploads/downloads of VA operands exercise the DMA walker end to end.
+- id: xrt-cp
+  drivers:
+  - xrt
+  app: sgemm
+  tier: full
+
 # ---------------------------------------------------------------------------
 # check: model_parity — same VM-enabled app on both drivers (xlen 32); exact
 # instret + cycles within tolerance. SimX is the timing model of the RTL.

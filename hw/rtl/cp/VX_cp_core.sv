@@ -147,6 +147,8 @@ module VX_cp_core
   logic       fetch_idle      [NUM_QUEUES];
   logic       engine_idle     [NUM_QUEUES];
 
+  wire [63:0] cp_satp;
+
   VX_cp_axil_regfile #(
     .NUM_QUEUES (NUM_QUEUES),
     .ADDR_W     (AXIL_AW)
@@ -162,6 +164,7 @@ module VX_cp_core
     .last_dcr_rsp   (dcr_last_rsp_data),
     .q_state        (q_state),
     .q_reset_pulse  (q_reset_pulse),
+    .satp           (cp_satp),
     .q_clear_ack    (q_clear),
     .dbg_host_w_counts (dbg_host_w_counts),
     .dbg_host_r_counts (dbg_host_r_counts)
@@ -368,9 +371,17 @@ module VX_cp_core
   VX_mem_axi_if #(.ADDR_W(ADDR_W), .DATA_W(DATA_W), .ID_W(ID_W)) cmpl_axi     ();
   VX_mem_axi_if #(.ADDR_W(ADDR_W), .DATA_W(DATA_W), .ID_W(ID_W)) event_axi    ();
 
+  // CMD_CACHE_FLUSH sweeps a CACHE_FLUSH DCR read across the cores; the
+  // same event means the page tables may have changed, so it invalidates
+  // the DMA walker's translation cache.
+  wire cp_xlat_flush = gpu_if_int.dcr_req_valid && !gpu_if_int.dcr_req_rw
+                    && (gpu_if_int.dcr_req_addr == `VX_DCR_ADDR_BITS'(`VX_DCR_BASE_CACHE_FLUSH));
+
   VX_cp_dma u_dma (
     .clk      (clk),
     .reset    (reset),
+    .satp     (cp_satp),
+    .xlat_flush (cp_xlat_flush),
     .grant    (any_dma_grant),
     .cmd      (granted_dma_cmd),
     .done     (dma_done),

@@ -28,7 +28,11 @@
 //
 // FSM:
 //   S_IDLE   : grant -> latch op/dst/src/size                 -> S_SETUP
-//   S_SETUP  : size 0 -> S_DONE; else size the chunk          -> S_REQ_AR
+//   S_SETUP  : size 0 -> S_DONE; else size the chunk; under VM a
+//              device-side read operand translates first      -> S_XLAT_RD/S_REQ_AR
+//   S_XLAT_RD/S_XLAT_WR : VX_cp_mmu walks the page table for the chunk's
+//              device-side operand (one translation per chunk; chunks never
+//              cross a page)
 //   S_REQ_AR : drive AR on the read port; arready             -> S_READ
 //   S_READ   : capture rdata beats into buf_r; last beat      -> S_REQ_AW
 //   S_REQ_AW : drive AW on the write port; awready            -> S_WRITE
@@ -67,6 +71,10 @@ module VX_cp_dma
   input  wire                       clk,
   input  wire                       reset,
 
+  input  wire [63:0]                satp,
+  // page tables may have changed (CACHE_FLUSH DCR): drop cached translations
+  input  wire                       xlat_flush,
+
   input  wire                       grant,
   input  cmd_t                      cmd,
   output logic                      done,
@@ -82,13 +90,15 @@ module VX_cp_dma
   localparam int BCNT_W    = 7;           // chunk length 1..64
 
   typedef enum logic [3:0] {
-    S_IDLE, S_SETUP, S_REQ_AR, S_READ, S_REQ_AW, S_WRITE, S_WAIT_B,
-    S_FLUSH_AR, S_FLUSH_R, S_DONE
+    S_IDLE, S_SETUP, S_XLAT_RD, S_REQ_AR, S_READ, S_XLAT_WR, S_REQ_AW,
+    S_WRITE, S_WAIT_B, S_FLUSH_AR, S_FLUSH_R, S_DONE
   } state_e;
 
   state_e               state;
   logic [7:0]           op_r;             // latched opcode (host/dev routing)
-  logic [63:0]          dst_r, src_r;
+  logic                 phys_r;             // F_MEM_PHYSICAL: skip translation
+  logic [63:0]          dst_r, src_r;       // as issued (device side is a VA under VM)
+  logic [63:0]          src_pa_r, dst_pa_r; // per-chunk translated device addresses
   logic [63:0]          rem_beats;        // 64 B beats still to move
   logic [BCNT_W-1:0]    chunk_beats;      // beats in the current chunk
   logic [BIDX_W-1:0]    beat_idx;
@@ -117,6 +127,61 @@ module VX_cp_dma
   wire rd_from_host = (cp_opcode_e'(op_r) == CMD_MEM_WRITE);  // upload: read host
   wire wr_to_host   = (cp_opcode_e'(op_r) == CMD_MEM_READ);   // download: write host
 
+  // ---- Device-side address translation ----
+  // Host addresses are host-physical and never translate; device-side
+  // operands are VAs under VM unless the command carries F_MEM_PHYSICAL.
+  // Chunks never cross a 4 KB boundary (beats_to_4k), so one translation
+  // per chunk per device-side operand suffices.
+`ifdef VX_CFG_VM_ENABLE
+  wire        xlat_enable    = !phys_r;
+  wire        xlat_rd_needed = xlat_enable && !rd_from_host;
+  wire        xlat_wr_needed = xlat_enable && !wr_to_host;
+  wire        xlat_req_valid = ((state == S_XLAT_RD) || (state == S_XLAT_WR));
+  wire [63:0] xlat_req_vaddr = (state == S_XLAT_RD) ? src_r : dst_r;
+  wire        xlat_rsp_valid;
+  wire [63:0] xlat_rsp_paddr;
+  wire        xlat_req_ready;
+  `UNUSED_VAR (xlat_req_ready)
+
+  wire        mmu_arvalid;
+  wire [63:0] mmu_araddr;
+  wire        mmu_rready;
+  wire        xlat_active = xlat_req_valid;
+
+  VX_cp_mmu u_mmu (
+    .clk         (clk),
+    .reset       (reset),
+    .satp        (satp),
+    .flush       (xlat_flush),
+    .req_valid   (xlat_req_valid && !xlat_rsp_valid),
+    .req_ready   (xlat_req_ready),
+    .req_vaddr   (xlat_req_vaddr),
+    .rsp_valid   (xlat_rsp_valid),
+    .rsp_ready   (1'b1),
+    .rsp_paddr   (xlat_rsp_paddr),
+    .mem_arvalid (mmu_arvalid),
+    .mem_arready (axi_dev.arready),
+    .mem_araddr  (mmu_araddr),
+    .mem_rvalid  (axi_dev.rvalid),
+    .mem_rready  (mmu_rready),
+    .mem_rdata   (axi_dev.rdata)
+  );
+`else
+  wire        xlat_rd_needed = 1'b0;
+  wire        xlat_wr_needed = 1'b0;
+  wire        xlat_rsp_valid = 1'b0;
+  wire [63:0] xlat_rsp_paddr = '0;
+  wire        xlat_active    = 1'b0;
+  wire        mmu_arvalid    = 1'b0;
+  wire [63:0] mmu_araddr     = '0;
+  wire        mmu_rready     = 1'b0;
+  `UNUSED_VAR (satp)
+  `UNUSED_VAR (xlat_flush)
+  `UNUSED_VAR (phys_r)
+  `UNUSED_VAR (xlat_rsp_valid)
+  `UNUSED_VAR (xlat_rsp_paddr)
+`endif
+
   // Last beat of the current chunk.
   wire last_beat = (BCNT_W'({1'b0, beat_idx}) == (chunk_beats - BCNT_W'(1)));
 
@@ -135,6 +200,7 @@ module VX_cp_dma
         S_IDLE: begin
           if (grant) begin
             op_r      <= cmd.hdr.opcode;
+            phys_r    <= cmd.hdr.flags[F_MEM_PHYSICAL];
             dst_r     <= cmd.arg0;
             src_r     <= cmd.arg1;
             // Round the byte count up to a whole cache line.
@@ -150,7 +216,21 @@ module VX_cp_dma
           end else begin
             chunk_beats <= next_chunk;
             beat_idx    <= '0;
-            state       <= S_REQ_AR;
+            src_pa_r    <= src_r;
+            dst_pa_r    <= dst_r;
+            state       <= xlat_rd_needed ? S_XLAT_RD : S_REQ_AR;
+          end
+        end
+        S_XLAT_RD: begin
+          if (xlat_rsp_valid) begin
+            src_pa_r <= xlat_rsp_paddr;
+            state    <= S_REQ_AR;
+          end
+        end
+        S_XLAT_WR: begin
+          if (xlat_rsp_valid) begin
+            dst_pa_r <= xlat_rsp_paddr;
+            state    <= S_REQ_AW;
           end
         end
         S_REQ_AR: begin
@@ -164,7 +244,7 @@ module VX_cp_dma
             buf_r[beat_idx] <= rd_rdata;
             if (last_beat) begin
               beat_idx <= '0;
-              state    <= S_REQ_AW;
+              state    <= xlat_wr_needed ? S_XLAT_WR : S_REQ_AW;
             end else begin
               beat_idx <= beat_idx + BIDX_W'(1);
             end
@@ -259,16 +339,18 @@ module VX_cp_dma
     axi_host.bready  = wr_bready  &  wr_to_host;
 
     // ----- axi_dev -----
-    axi_dev.arvalid  = rd_arvalid & ~rd_from_host;
-    axi_dev.araddr   = src_r;
+    // In a translate state the walker owns the AR/R channel; the DMA's own
+    // read states never overlap with it.
+    axi_dev.arvalid  = xlat_active ? mmu_arvalid : (rd_arvalid & ~rd_from_host);
+    axi_dev.araddr   = xlat_active ? mmu_araddr  : src_pa_r;
     axi_dev.arid     = TID_PREFIX;
-    axi_dev.arlen    = burst_len;
+    axi_dev.arlen    = xlat_active ? 8'd0 : burst_len;
     axi_dev.arsize   = 3'd6;
     axi_dev.arburst  = 2'b01;
-    axi_dev.rready   = rd_rready  & ~rd_from_host;
+    axi_dev.rready   = xlat_active ? mmu_rready : (rd_rready & ~rd_from_host);
 
     axi_dev.awvalid  = wr_awvalid & ~wr_to_host;
-    axi_dev.awaddr   = dst_r;
+    axi_dev.awaddr   = dst_pa_r;
     axi_dev.awid     = TID_PREFIX;
     axi_dev.awlen    = burst_len;
     axi_dev.awsize   = 3'd6;

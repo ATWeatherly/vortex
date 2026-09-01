@@ -381,10 +381,14 @@ Reads are registered (AR latches, R returns the decoded value the next
 cycle). Undecoded addresses return `0xDEADBEEF` with DECERR on both
 channels.
 
-> **FPGA/sim divergence:** the RTL regfile has **no** `CP_SATP_LO/HI`
-> registers. The Emulation CP *does* (`0x028/0x02C`,
-> [`cmd_processor.cpp:72-73`](../../sim/common/cmd_processor.cpp#L72)),
-> and the runtime writes them only when VM is advertised. See §8.
+The RTL regfile carries `CP_SATP_LO/HI` at `0x028/0x02C` and publishes
+`VM_ENABLED` in `CP_DEV_CAPS` bit 24, matching the Emulation CP
+([`cmd_processor.cpp:72-73`](../../sim/common/cmd_processor.cpp#L72));
+the runtime writes SATP on both paths when VM is advertised. The DMA
+engine translates its device-side operand once per chunk through
+[`VX_cp_mmu`](../../hw/rtl/cp/VX_cp_mmu.sv), a small walker that reads
+PTEs over the DMA's device AXI channel and shares its geometry and fault
+predicate with the core-side walker (`VX_tlb_pkg`). See §8.
 
 ---
 
@@ -446,8 +450,9 @@ upper byte of the CP's own caps word is free, and the Emulation CP uses it
 **The RTL CP hardwires all three to zero.** Its `CP_DEV_CAPS` read returns
 `{8'd0, AXI_TID_W, RING_SIZE_LOG2_MAX, NUM_QUEUES}`
 ([`VX_cp_axil_regfile.sv:177-180`](../../hw/rtl/cp/VX_cp_axil_regfile.sv#L177)),
-so on FPGA every launch takes the 20-DCR fallback, SATP is never
-programmed, and draws stream as a ring batch. The runtime consumes the
+so on FPGA every launch takes the 20-DCR fallback and draws stream as a
+ring batch; `VM_ENABLED` (bit 24) is real on the RTL CP, so SATP is
+programmed whenever the build enables VM. The runtime consumes the
 bits at open ([`device.cpp:274-282`](../../sw/runtime/common/device.cpp#L274))
 and branches accordingly, so the graphics driver calls `vx_enqueue_draw`
 unconditionally on every backend.
@@ -530,9 +535,8 @@ a divergence — with one queue the RTL's arbiters are degenerate too.
 
 The Emulation CP's MMIO map matches the RTL regfile **plus**:
 
-- `CP_SATP_LO/HI` at `0x028/0x02C`
-  ([`cmd_processor.cpp:72-73`](../../sim/common/cmd_processor.cpp#L72)),
-- the `CP_DEV_CAPS` feature bits 24-26 (§6),
+- the `CP_DEV_CAPS` feature bits 25-26 (§6; bit 24 `VM_ENABLED` and
+  `CP_SATP_LO/HI` are shared with the RTL regfile),
 - a software page-table walk `cp_translate` (Sv32/Sv39, megapage-aware,
   [`:157-201`](../../sim/common/cmd_processor.cpp#L157)) honoring the
   `MEM_FLAG_PHYSICAL` flag ([`:519-520`](../../sim/common/cmd_processor.cpp#L519)),

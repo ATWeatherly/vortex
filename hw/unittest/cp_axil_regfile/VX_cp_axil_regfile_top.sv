@@ -55,7 +55,10 @@ module VX_cp_axil_regfile_top
   output wire [NUM_QUEUES*$bits(cpe_state_t)-1:0] q_state_packed,
   output wire [NUM_QUEUES-1:0]                     q_reset_pulse,
   // One-cycle acknowledge that a CPE actually cleared; zeroes tail + enable.
-  input  wire [NUM_QUEUES-1:0]                     q_clear_ack
+  input  wire [NUM_QUEUES-1:0]                     q_clear_ack,
+
+  // CP_SATP as seen by the DMA walker
+  output wire [63:0]                               satp
 );
 
   VX_cp_axil_s_if #(.ADDR_W(ADDR_W)) s_if ();
@@ -117,7 +120,8 @@ module VX_cp_axil_regfile_top
     .q_reset_pulse  (q_reset_arr),
     .dbg_host_w_counts (32'd0),
     .dbg_host_r_counts (32'd0),
-    .q_clear_ack    (q_clear_ack_arr)
+    .q_clear_ack    (q_clear_ack_arr),
+    .satp           (satp)
   );
 
 endmodule : VX_cp_axil_regfile_top
