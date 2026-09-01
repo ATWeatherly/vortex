@@ -221,4 +221,24 @@ module VX_tlb_l1 import VX_gpu_pkg::*, VX_tlb_pkg::*; #(
     assign mmu_perf.ptw_latency   = '0;
 `endif
 
+`ifdef DBG_TRACE_MMU
+    always @(posedge clk) begin
+        if (tlb_bus_if.req_valid && tlb_bus_if.req_ready) begin
+            `TRACE(2, ("%t: %m miss-req: id=%0d, vpn=0x%0h\n", $time, tlb_bus_if.req_data.id, tlb_bus_if.req_data.vpn))
+        end
+        if (tlb_bus_if.req_valid && !tlb_bus_if.req_ready) begin
+            `TRACE(3, ("%t: %m miss-req-stall: vpn=0x%0h\n", $time, tlb_bus_if.req_data.vpn))
+        end
+        if (tlb_bus_if.rsp_valid && tlb_bus_if.rsp_ready) begin
+            `TRACE(2, ("%t: %m fill: id=%0d, ppn=0x%0h, fault=%b\n", $time, tlb_bus_if.rsp_data.id, tlb_bus_if.rsp_data.ppn, tlb_bus_if.rsp_data.fault))
+        end
+        if (replay_valid && replay_ready) begin
+            `TRACE(2, ("%t: %m replay\n", $time))
+        end
+        if (kill_valid && kill_ready) begin
+            `TRACE(2, ("%t: %m kill: fault=%b ppn=0x%0h level=%0d flags=0x%0h\n", $time, drain_fault, drain_ppn, drain_level, drain_flags))
+        end
+    end
+`endif
+
 endmodule

@@ -405,4 +405,27 @@ module VX_tlb_l2 import VX_gpu_pkg::*, VX_tlb_pkg::*; #(
     assign flush_clear   = flush_if.req && empty;
     assign flush_if.done = flush_if.req && empty;
 
+`ifdef DBG_TRACE_MMU
+    always @(posedge clk) begin
+        if (client_if.req_valid && client_if.req_ready) begin
+            `TRACE(2, ("%t: %m client-req: id=%0d, vpn=0x%0h\n", $time, client_if.req_data.id, client_if.req_data.vpn))
+        end
+        if (client_if.req_valid && !client_if.req_ready) begin
+            `TRACE(3, ("%t: %m client-req-stall: vpn=0x%0h\n", $time, client_if.req_data.vpn))
+        end
+        if (client_if.rsp_valid && client_if.rsp_ready) begin
+            `TRACE(2, ("%t: %m client-rsp: id=%0d, ppn=0x%0h, fault=%b\n", $time, client_if.rsp_data.id, client_if.rsp_data.ppn, client_if.rsp_data.fault))
+        end
+        if (client_if.rsp_valid && !client_if.rsp_ready) begin
+            `TRACE(3, ("%t: %m client-rsp-stall: id=%0d\n", $time, client_if.rsp_data.id))
+        end
+        if (ptw_if.req_valid && ptw_if.req_ready) begin
+            `TRACE(2, ("%t: %m ptw-req: slot=%0d, vpn=0x%0h\n", $time, ptw_req_slot, ptw_req_vpn))
+        end
+        if (ptw_if.rsp_valid && ptw_if.rsp_ready) begin
+            `TRACE(2, ("%t: %m ptw-fill: slot=%0d, fault=%b\n", $time, ptw_if.rsp_data.id, ptw_if.rsp_data.fault))
+        end
+    end
+`endif
+
 endmodule

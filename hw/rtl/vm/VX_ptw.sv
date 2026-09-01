@@ -280,4 +280,18 @@ module VX_ptw import VX_gpu_pkg::*, VX_tlb_pkg::*; #(
     assign empty = ~(| w_active);
     assign flush_if.done = flush_if.req && ~(| w_active);
 
+`ifdef DBG_TRACE_MMU
+    always @(posedge clk) begin
+        if (dispatch_fire) begin
+            `TRACE(2, ("%t: %m walk-start: id=%0d, vpn=0x%0h, wc_hit=%b, walkers_free=%b\n", $time, miss_if.req_data.id, miss_if.req_data.vpn, wc_hit, w_req_ready))
+        end
+        if (miss_if.req_valid && !any_free) begin
+            `TRACE(3, ("%t: %m walk-stall: vpn=0x%0h, active=%b\n", $time, miss_if.req_data.vpn, w_active))
+        end
+        if (miss_if.rsp_valid && miss_if.rsp_ready) begin
+            `TRACE(2, ("%t: %m walk-done: id=%0d, fault=%b\n", $time, miss_if.rsp_data.id, miss_if.rsp_data.fault))
+        end
+    end
+`endif
+
 endmodule

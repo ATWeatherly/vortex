@@ -390,4 +390,25 @@ module VX_mmu import VX_gpu_pkg::*, VX_tlb_pkg::*; #(
     end
     assign empty = ~(| pipe_busy) && tlb_empty;
 
+`ifdef DBG_TRACE_MMU
+    for (genvar l = 0; l < NUM_REQS; ++l) begin : g_dbg_lane
+        always @(posedge clk) begin
+            if (core_bus_if[l].req_valid && !core_bus_if[l].req_ready) begin
+                `TRACE(3, ("%t: %m lane%0d in-stall: bypass=%b park=%b hit=%b pfault=%b replay_to=%b pipe_rdy=%b park_sel=%b park_rdy=%b mshr_match=%b cam_hit=%b\n", $time, l, cat_bypass[l], cat_park[l], cat_hit[l], cat_pfault[l], replay_to_lane[l], pipe_ready[l], park_sel[l], park_ready, mshr_match[l], cam_hit[l]))
+            end
+            if (mem_bus_if[l].req_valid && !mem_bus_if[l].req_ready) begin
+                `TRACE(3, ("%t: %m lane%0d out-stall\n", $time, l))
+            end
+        end
+    end
+    always @(posedge clk) begin
+        if (replay_drop) begin
+            `TRACE(2, ("%t: %m replay-drop: lane=%0d flags=0x%0h acc=%0d amo=%b vpn=0x%0h ppn=0x%0h level=%0d\n", $time, replay_lane, replay_flags, replay_acc, replay_amo, replay_vpn, replay_ppn, replay_level))
+        end
+        if (replay_valid && !replay_ready) begin
+            `TRACE(3, ("%t: %m replay-stall: lane=%0d perm=%b\n", $time, replay_lane, replay_perm))
+        end
+    end
+`endif
+
 endmodule
