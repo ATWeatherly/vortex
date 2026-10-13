@@ -1,4 +1,8 @@
-/build*
+/build/
 /.*
 # Archived/superseded docs — kept on disk, never tracked
 docs/archives/
+
+# Zynq runtime build output (see build_runtime.sh)
+/payload/
+/payload.tar

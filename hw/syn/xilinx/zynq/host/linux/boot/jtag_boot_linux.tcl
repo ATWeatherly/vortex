@@ -39,6 +39,15 @@ after 500
 
 fpga -file $bit
 
+# Halt both cores BEFORE ps7_init: it performs register writes and a
+# global-timer delay loop (mask_delay 0xF8F00200) that require a stopped
+# core. Against a running core it fails intermittently with
+# "Memory read error at 0xF8F00208. Cannot halt processor core, timeout",
+# depending on what the previous occupant (e.g. the QSPI factory demo)
+# is doing when ps7_init runs.
+targets -set -filter {name =~ "*Cortex-A9*#1"}; catch {stop}
+targets -set -filter {name =~ "*Cortex-A9*#0"}; catch {stop}
+
 source $ps7init
 ps7_init
 ps7_post_config

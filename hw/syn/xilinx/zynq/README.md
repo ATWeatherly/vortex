@@ -46,14 +46,30 @@ tree, regenerate both:
 
 ```sh
 cd <build>
-Z='-DVX_MEM_STACK_BASE_ADDR=536805376 -DVX_MEM_IO_BASE_ADDR=535822336 -DVX_MEM_IO_END_ADDR=535887872'
-XLEN=32 python3 ../ci/gen_config.py --config ../VX_types.toml --cflags "$Z" --format verilog --resolved --output hw/VX_types.vh
-XLEN=32 python3 ../ci/gen_config.py --config ../VX_types.toml --cflags "$Z" --format cpp --resolved --output sw/VX_types.h
+Z='-DVX_MEM_USER_BASE_ADDR=268435456 -DVX_MEM_STACK_BASE_ADDR=536805376 -DVX_MEM_IO_BASE_ADDR=535822336 -DVX_MEM_IO_END_ADDR=535887872 -DVX_CFG_XLEN=32'
+python3 ../ci/gen_config.py --config ../VX_types.toml --cflags "$Z" --format verilog --resolved --output hw/VX_types.vh
+python3 ../ci/gen_config.py --config ../VX_types.toml --cflags "$Z" --format cpp --resolved --output sw/VX_types.h
 ```
 
+Or just run `./build_runtime.sh` from the repo root, which does this (and
+verifies the result) before building the runtime.
+
+Two corrections to the earlier form of this recipe, both of which bite
+silently:
+
+- **`-DVX_CFG_XLEN=32` must be in the cflags.** `XLEN=32` as an environment
+  variable is *not* enough — `gen_config.py` evaluates `$VX_CFG_XLEN_64`
+  from the cflags and dies with `Undefined key 'VX_CFG_XLEN'` without it.
+- **`VX_MEM_USER_BASE_ADDR` must be overridden too.** It is the base of the
+  runtime's device allocator (`ALLOC_BASE_ADDR` in
+  `sw/runtime/common/common.h`). Left at its 0x10000 default, the CP DMAs
+  buffer contents straight into Linux's own RAM — the host sees plausible
+  garbage and the device never receives the data.
+
 (Values are decimal because `gen_config.py` overrides don't parse hex:
-536805376 = 0x1FFF0000, 535822336 = 0x1FF00000, 535887872 = 0x1FF10000.
-`LMEM_BASE`, `IO_COUT`, `EXIT_CODE` derive automatically.)
+268435456 = 0x10000000, 536805376 = 0x1FFF0000, 535822336 = 0x1FF00000,
+535887872 = 0x1FF10000. `LMEM_BASE`, `IO_COUT`, `EXIT_CODE` derive
+automatically.)
 
 ## Shim register map (0x43C0_0000)
 
