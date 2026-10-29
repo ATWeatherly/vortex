@@ -186,6 +186,27 @@ import VX_raster_pkg::*;
         .result_if  (pe_result_if[PE_IDX_WCTL])
     );
 
+    // registered CSR request: keeps the SFU dispatch buffer (far from the CSR
+    // read mux and the scheduler CSRs) out of the CSR read/write cycle
+    VX_execute_if #(
+        .data_t (sfu_execute_t)
+    ) csr_execute_if();
+
+    VX_elastic_buffer #(
+        .DATAW   ($bits(sfu_execute_t)),
+        .SIZE    (2),
+        .OUT_REG (1)
+    ) csr_req_buf (
+        .clk       (clk),
+        .reset     (reset),
+        .valid_in  (pe_execute_if[PE_IDX_CSRS].valid),
+        .ready_in  (pe_execute_if[PE_IDX_CSRS].ready),
+        .data_in   (pe_execute_if[PE_IDX_CSRS].data),
+        .data_out  (csr_execute_if.data),
+        .valid_out (csr_execute_if.valid),
+        .ready_out (csr_execute_if.ready)
+    );
+
     VX_csr_unit #(
         .INSTANCE_ID (`SFORMATF(("%s-csr", INSTANCE_ID))),
         .CORE_ID   (CORE_ID),
@@ -194,7 +215,7 @@ import VX_raster_pkg::*;
         .clk            (clk),
         .reset          (reset),
 
-        .execute_if     (pe_execute_if[PE_IDX_CSRS]),
+        .execute_if     (csr_execute_if),
 
     `ifdef PERF_ENABLE
         .sysmem_perf    (sysmem_perf),

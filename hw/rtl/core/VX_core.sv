@@ -156,12 +156,14 @@ module VX_core import VX_gpu_pkg::*, VX_tlb_pkg::*; #(
     tcu_perf_t tcu_perf;
     assign pipeline_perf.tcu = tcu_perf;
 `endif
-    sysmem_perf_t sysmem_perf_tmp;
+    sysmem_perf_t sysmem_perf_w, sysmem_perf_tmp;
     always @(*) begin
-        sysmem_perf_tmp = sysmem_perf;
-        sysmem_perf_tmp.lmem = lmem_perf;
-        sysmem_perf_tmp.coalescer = coalescer_perf;
+        sysmem_perf_w = sysmem_perf;
+        sysmem_perf_w.lmem = lmem_perf;
+        sysmem_perf_w.coalescer = coalescer_perf;
     end
+    // registered locally: the L2/L3/memory counters live across the die from the CSR read mux
+    `BUFFER(sysmem_perf_tmp, sysmem_perf_w);
 `endif
 
     VX_dcr_csr_if dcr_csr_if();
