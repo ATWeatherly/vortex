@@ -94,10 +94,22 @@ module VX_cache_bank import VX_gpu_pkg::*; #(
 );
     localparam PIPELINE_STAGES = LATENCY;
     localparam PIPE_EX = LATENCY - 2;       // extra data-deferral stages (0 = classic 2-stage)
-    // mem-req queue depth (pow2): max of pipeline floor (2*PIPELINE) and writeback reservation (MSHR), plus MREQ_SIZE extra slots.
-    // A writeback cache emits an eviction request alongside the fill on a dirty miss, so up to MSHR_SIZE writebacks can
-    // enqueue at once (one per outstanding miss); reserving MSHR_SIZE slots keeps the queue from stalling the fill drain that frees them.
-    localparam MREQ_QUEUE_SIZE = 1 << `CLOG2(`MAX(2 * PIPELINE_STAGES, WRITEBACK ? MSHR_SIZE : 0) + MREQ_SIZE);
+    // mem-req queue depth (pow2). Core requests are throttled at MREQ_ALM_FULL
+    // (pipeline floor plus MREQ_SIZE extra slots); MSHR replays (write-through:
+    // replayed stores), fills/flushes (writeback: evictions) and writeback beats
+    // draw on MREQ_RESERVE = MSHR_SIZE further entries, so they are never held
+    // up by memory-side write backpressure. A bank must always be able to
+    // accept fill data regardless of whether its own writes are draining: the
+    // memory controller cannot retire those writes while the read data it
+    // already holds is being refused (fill<->write deadlock on the U50 under
+    // store floods, GEMV_Q8_ACC>=4 kernels, 2026-10). The reservation used to
+    // exist only in the sizing while every consumer gated on the same
+    // almost-full flag, which made it ineffective.
+    localparam MREQ_RESERVE    = MSHR_SIZE;
+    localparam MREQ_QUEUE_SIZE = 1 << `CLOG2(2 * PIPELINE_STAGES + MREQ_RESERVE + MREQ_SIZE);
+    localparam MREQ_ALM_FULL   = MREQ_QUEUE_SIZE - PIPELINE_STAGES - MREQ_RESERVE; // core-request watermark
+    localparam MREQ_HI_FULL    = MREQ_QUEUE_SIZE - PIPELINE_STAGES;                // replay/fill/flush watermark
+    localparam MREQ_SIZEW      = `CLOG2(MREQ_QUEUE_SIZE+1);
     // core-rsp queue depth (pow2): registered-skid minimum (2) plus CRSQ_SIZE extra slots
     localparam CRSQ_QUEUE_SIZE = 1 << `CLOG2(2 + CRSQ_SIZE);
     `STATIC_ASSERT(LATENCY >= 2, ("invalid parameter: cache bank LATENCY must be >= 2"))
@@ -169,6 +181,8 @@ module VX_cache_bank import VX_gpu_pkg::*; #(
     wire mshr_probe_pending_ld, mshr_probe_pending_amo;
     wire mshr_any_ld, mshr_any_amo, mshr_persist_ld, mshr_persist_amo;
     wire mreq_queue_empty, mreq_queue_alm_full;
+    wire [MREQ_SIZEW-1:0] mreq_queue_size;
+    wire mreq_queue_hi_full = (mreq_queue_size >= MREQ_SIZEW'(MREQ_HI_FULL));
     wire [`CS_LINE_ADDR_WIDTH-1:0] mem_rsp_addr;
     wire [`UP(`CS_SECTOR_SEL_BITS)-1:0] mem_rsp_sector; // sector this fill installs
     wire [MSHR_ADDR_WIDTH-1:0] mshr_alloc_id, mshr_previd;
@@ -372,9 +386,11 @@ module VX_cache_bank import VX_gpu_pkg::*; #(
     wire amo_wb_path   = amo_wb_pending && ~amo_hit_st1;
     wire creq_enable   = creq_grant && (amo_creq_path || amo_wb_path);
 
-    assign replay_ready   = replay_grant && ~fwd_head && ~replay_link_hold && ~(!WRITEBACK && replay_rw && mreq_queue_alm_full) && ~pipe_stall;
-    assign mem_rsp_ready  = fill_grant && ~fwd_pending && ~fill_inflight && ~replay_link_hold && ~amo_wbq_full && ~(WRITEBACK && mreq_queue_alm_full) && ~pipe_stall;
-    assign flush_ready    = flush_grant && ~(WRITEBACK && mreq_queue_alm_full) && ~pipe_stall;
+    // replays, fills and flushes use the reserved part of the memory request
+    // queue (MREQ_HI_FULL), never the core-request watermark: see MREQ_RESERVE.
+    assign replay_ready   = replay_grant && ~fwd_head && ~replay_link_hold && ~(!WRITEBACK && replay_rw && mreq_queue_hi_full) && ~pipe_stall;
+    assign mem_rsp_ready  = fill_grant && ~fwd_pending && ~fill_inflight && ~replay_link_hold && ~amo_wbq_full && ~(WRITEBACK && mreq_queue_hi_full) && ~pipe_stall;
+    assign flush_ready    = flush_grant && ~(WRITEBACK && mreq_queue_hi_full) && ~pipe_stall;
     assign core_req_ready = creq_grant && ~mreq_queue_alm_full && ~mshr_alm_full && ~pipe_stall
                          && ~amo_commit_busy && ~req_input_defer;
 
@@ -1182,7 +1198,7 @@ module VX_cache_bank import VX_gpu_pkg::*; #(
         `UNUSED_PIN (onehot_out)
     );
     wire [SEC-1:0] wb_sec_oh = SEC'(1) << wb_sector;
-    wire wb_beat_accept = is_wb_beat && ~mreq_queue_alm_full;
+    wire wb_beat_accept = is_wb_beat && ~mreq_queue_hi_full;
     wire [SEC-1:0] wb_mask_nxt = wb_beat_accept ? (wb_mask_cur & ~wb_sec_oh) : wb_mask_cur;
     assign wb_hold = (| wb_mask_nxt); // beats remain after this cycle -> hold stC
     always @(posedge clk) begin
@@ -1279,7 +1295,7 @@ module VX_cache_bank import VX_gpu_pkg::*; #(
     VX_fifo_queue #(
         .DATAW    (1 + `CS_LINE_SECTOR_ADDR_WIDTH + SECTOR_SIZE + `CS_SECTOR_WIDTH + MEM_TAG_WIDTH + `UP(MEM_ATTR_WIDTH)),
         .DEPTH    (MREQ_QUEUE_SIZE),
-        .ALM_FULL (MREQ_QUEUE_SIZE - PIPELINE_STAGES),
+        .ALM_FULL (MREQ_ALM_FULL),
         .OUT_REG  (`TO_OUT_BUF_REG(MEM_OUT_BUF))
     ) mem_req_queue (
         .clk      (clk),
@@ -1292,7 +1308,7 @@ module VX_cache_bank import VX_gpu_pkg::*; #(
         .alm_full (mreq_queue_alm_full),
         `UNUSED_PIN (full),
         `UNUSED_PIN (alm_empty),
-        `UNUSED_PIN (size)
+        .size     (mreq_queue_size)
     );
     assign mem_req_valid = ~mreq_queue_empty;
 

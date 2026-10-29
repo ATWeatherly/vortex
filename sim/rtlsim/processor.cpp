@@ -122,6 +122,15 @@ public:
     // create device instance
     device_ = new Vrtlsim_shim(context_);
 
+    if (const char* e = std::getenv("VORTEX_MEM_MAX_WR")) throttle_max_wr_ = std::atoi(e);
+    if (const char* e = std::getenv("VORTEX_MEM_MAX_RD")) throttle_max_rd_ = std::atoi(e);
+    if (const char* e = std::getenv("VORTEX_MEM_RAW_STALL")) throttle_raw_ = (std::atoi(e) != 0);
+    if (const char* e = std::getenv("VORTEX_MEM_PIPE_LATENCY")) throttle_lat_ = std::atoll(e);
+    if (const char* e = std::getenv("VORTEX_MEM_COUPLED")) throttle_coupled_ = (std::atoi(e) != 0);
+    if (throttle_on()) {
+      printf("[sim] AXI throttle: max_wr=%u max_rd=%u raw_stall=%d pipe_latency=%lu coupled=%d\n", throttle_max_wr_, throttle_max_rd_, (int)throttle_raw_, (unsigned long)throttle_lat_, (int)throttle_coupled_);
+    }
+
   #ifdef VCD_OUTPUT
     context_->traceEverOn(true);
     tfp_ = new VerilatedVcdC();
@@ -355,11 +364,38 @@ private:
       if (device_->mem_rsp_valid[b] && mem_rd_rsp_ready_[b]) {
         device_->mem_rsp_valid[b] = 0;
       }
+      if (throttle_on() && !throttle_coupled_) {
+        // AXI mode: writes complete on their own (B channel), independently of
+        // read-data delivery, and reads return out of order (distinct IDs).
+        for (auto it = pending_mem_reqs_[b].begin(); it != pending_mem_reqs_[b].end(); ) {
+          if ((*it)->write && req_done(*it)) {
+            if (n_pending_wr_[b]) --n_pending_wr_[b];
+            delete *it;
+            it = pending_mem_reqs_[b].erase(it);
+          } else {
+            ++it;
+          }
+        }
+        if (device_->mem_rsp_valid[b] == 0) {
+          for (auto it = pending_mem_reqs_[b].begin(); it != pending_mem_reqs_[b].end(); ++it) {
+            auto mem_rsp = *it;
+            if (!mem_rsp->write && req_done(mem_rsp)) {
+              device_->mem_rsp_valid[b] = 1;
+              memcpy(VDataCast<void*, VX_CFG_PLATFORM_MEMORY_DATA_SIZE>::get(device_->mem_rsp_data[b]), mem_rsp->data.data(), VX_CFG_PLATFORM_MEMORY_DATA_SIZE);
+              device_->mem_rsp_tag[b] = mem_rsp->tag;
+              if (n_pending_rd_[b]) --n_pending_rd_[b];
+              pending_mem_reqs_[b].erase(it);
+              delete mem_rsp;
+              break;
+            }
+          }
+        }
+      } else
       if (device_->mem_rsp_valid[b] == 0) {
         if (!pending_mem_reqs_[b].empty()) {
           auto mem_rsp_it = pending_mem_reqs_[b].begin();
           auto mem_rsp = *mem_rsp_it;
-          if (mem_rsp->ready) {
+          if (req_done(mem_rsp)) {
             if (!mem_rsp->write) {
               // return read responses
               device_->mem_rsp_valid[b] = 1;
@@ -367,6 +403,8 @@ private:
               device_->mem_rsp_tag[b] = mem_rsp->tag;
             }
             // delete the request
+            if (mem_rsp->write) { if (n_pending_wr_[b]) --n_pending_wr_[b]; }
+            else                { if (n_pending_rd_[b]) --n_pending_rd_[b]; }
             pending_mem_reqs_[b].erase(mem_rsp_it);
             delete mem_rsp;
           }
@@ -400,12 +438,14 @@ private:
             mem_req->bank_addr = uint64_t(device_->mem_req_addr[b]) * VX_CFG_PLATFORM_MEMORY_DATA_SIZE;
             mem_req->write = true;
             mem_req->ready = false;
+            mem_req->t_issue = timestamp;
 
             // enqueue dram request
             dram_queue_[b].push(mem_req);
 
             // add to pending list
             pending_mem_reqs_[b].emplace_back(mem_req);
+            ++n_pending_wr_[b];
           }
         } else {
           // process memory reads
@@ -415,6 +455,7 @@ private:
           mem_req->bank_addr = uint64_t(device_->mem_req_addr[b]) * VX_CFG_PLATFORM_MEMORY_DATA_SIZE;
           mem_req->write = false;
           mem_req->ready = false;
+          mem_req->t_issue = timestamp;
           ram_->read(mem_req->data.data(), byte_addr, VX_CFG_PLATFORM_MEMORY_DATA_SIZE);
 
           // enqueue dram request
@@ -422,7 +463,30 @@ private:
 
           // add to pending list
           pending_mem_reqs_[b].emplace_back(mem_req);
+          ++n_pending_rd_[b];
         }
+      }
+
+      // AXI-boundary throttle: decide ready for the next edge from the request
+      // the device is presenting now (valid is held until accepted).
+      if (throttle_on()) {
+        bool rdy = true;
+        if (device_->mem_req_valid[b]) {
+          bool rw = device_->mem_req_rw[b];
+        #if VX_CFG_PLATFORM_MEMORY_INTERLEAVE == 1
+          uint64_t nxt_addr = (uint64_t(device_->mem_req_addr[b]) * VX_CFG_PLATFORM_MEMORY_NUM_BANKS + b) * VX_CFG_PLATFORM_MEMORY_DATA_SIZE;
+        #else
+          uint64_t nxt_addr = (uint64_t(device_->mem_req_addr[b]) + (b << g_mem_bank_addr_width)) * VX_CFG_PLATFORM_MEMORY_DATA_SIZE;
+        #endif
+          if (rw && throttle_max_wr_ && n_pending_wr_[b] >= throttle_max_wr_) rdy = false;
+          if (!rw && throttle_max_rd_ && n_pending_rd_[b] >= throttle_max_rd_) rdy = false;
+          if (!rw && throttle_raw_) {
+            for (auto r : pending_mem_reqs_[b]) {
+              if (r->write && r->addr == nxt_addr) { rdy = false; break; }
+            }
+          }
+        }
+        device_->mem_req_ready[b] = rdy;
       }
     }
   }
@@ -448,6 +512,7 @@ private:
     uint64_t tag;
     bool write;
     bool ready;
+    uint64_t t_issue;
   } mem_req_t;
 
   std::unordered_map<int, std::stringstream> print_bufs_;
@@ -455,6 +520,24 @@ private:
   std::list<mem_req_t*> pending_mem_reqs_[VX_CFG_PLATFORM_MEMORY_NUM_BANKS];
 
   std::queue<mem_req_t*> dram_queue_[VX_CFG_PLATFORM_MEMORY_NUM_BANKS];
+
+  // AXI-boundary throttle (env-gated, default off = legacy behaviour):
+  //   VORTEX_MEM_MAX_WR=<n>   max writes outstanding per bank (VX_mem_to_axi write tracker)
+  //   VORTEX_MEM_MAX_RD=<n>   max reads outstanding per bank
+  //   VORTEX_MEM_RAW_STALL=1  a read at the head stalls while a write to the same
+  //                           line is outstanding (the store->fill ordering stall)
+  //   VORTEX_MEM_PIPE_LATENCY=<cycles>  extra fixed request->response latency
+  uint32_t throttle_max_wr_ = 0;
+  uint32_t throttle_max_rd_ = 0;
+  bool     throttle_raw_    = false;
+  uint64_t throttle_lat_    = 0;
+  uint32_t n_pending_wr_[VX_CFG_PLATFORM_MEMORY_NUM_BANKS] = {};
+  uint32_t n_pending_rd_[VX_CFG_PLATFORM_MEMORY_NUM_BANKS] = {};
+  //   VORTEX_MEM_COUPLED=1    writes retire only in order behind read responses (a DRAM
+  //                           controller that cannot make progress while read data is refused)
+  bool     throttle_coupled_ = false;
+  bool throttle_on() const { return throttle_max_wr_ || throttle_max_rd_ || throttle_raw_ || throttle_lat_; }
+  bool req_done(const mem_req_t* r) const { return r->ready && (timestamp - r->t_issue) >= throttle_lat_; }
 
   std::array<bool, VX_CFG_PLATFORM_MEMORY_NUM_BANKS> mem_rd_rsp_ready_;
 
