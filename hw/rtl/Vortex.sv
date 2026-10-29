@@ -372,14 +372,19 @@ module Vortex import VX_gpu_pkg::*, VX_trace_pkg::*, VX_tlb_pkg::*; (
     localparam MEM_PORTS_CTR_W = `CLOG2(VX_MEM_PORTS+1);
 
     wire [VX_MEM_PORTS-1:0] mem_req_fire, mem_rsp_fire;
-    wire [VX_MEM_PORTS-1:0] mem_rd_req_fire, mem_wr_req_fire;
+    wire [VX_MEM_PORTS-1:0] mem_rd_req_fire_w, mem_wr_req_fire_w;
+    wire [VX_MEM_PORTS-1:0] mem_rd_req_fire, mem_wr_req_fire, mem_rsp_fire_r;
 
     for (genvar i = 0; i < VX_MEM_PORTS; ++i) begin : g_perf_ctrs
         assign mem_req_fire[i] = mem_req_valid[i] & mem_req_ready[i];
         assign mem_rsp_fire[i] = mem_rsp_valid[i] & mem_rsp_ready[i];
-        assign mem_rd_req_fire[i] = mem_req_fire[i] & ~mem_req_rw[i];
-        assign mem_wr_req_fire[i] = mem_req_fire[i] & mem_req_rw[i];
+        assign mem_rd_req_fire_w[i] = mem_req_fire[i] & ~mem_req_rw[i];
+        assign mem_wr_req_fire_w[i] = mem_req_fire[i] & mem_req_rw[i];
     end
+    // count registered fires: keeps the AXI ready/valid chains off the wide perf counters (U50 timing)
+    `BUFFER(mem_rd_req_fire, mem_rd_req_fire_w);
+    `BUFFER(mem_wr_req_fire, mem_wr_req_fire_w);
+    `BUFFER(mem_rsp_fire_r, mem_rsp_fire);
 
     wire [MEM_PORTS_CTR_W-1:0] perf_mem_reads_per_cycle;
     wire [MEM_PORTS_CTR_W-1:0] perf_mem_writes_per_cycle;
@@ -387,7 +392,7 @@ module Vortex import VX_gpu_pkg::*, VX_trace_pkg::*, VX_tlb_pkg::*; (
 
     `POP_COUNT(perf_mem_reads_per_cycle, mem_rd_req_fire);
     `POP_COUNT(perf_mem_writes_per_cycle, mem_wr_req_fire);
-    `POP_COUNT(perf_mem_rsps_per_cycle, mem_rsp_fire);
+    `POP_COUNT(perf_mem_rsps_per_cycle, mem_rsp_fire_r);
 
     reg [PERF_CTR_BITS-1:0] perf_mem_pending_reads;
 

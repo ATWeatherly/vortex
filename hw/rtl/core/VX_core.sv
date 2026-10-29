@@ -501,8 +501,11 @@ module VX_core import VX_gpu_pkg::*, VX_tlb_pkg::*; #(
     reg [PERF_CTR_BITS-1:0] perf_loads;
     reg [PERF_CTR_BITS-1:0] perf_stores;
 
-    wire perf_icache_req_fire = icache_bus_if.req_valid && icache_bus_if.req_ready;
-    wire perf_icache_rsp_fire = icache_bus_if.rsp_valid && icache_bus_if.rsp_ready;
+    wire perf_icache_req_fire_w = icache_bus_if.req_valid && icache_bus_if.req_ready;
+    wire perf_icache_rsp_fire_w = icache_bus_if.rsp_valid && icache_bus_if.rsp_ready;
+    wire perf_icache_req_fire, perf_icache_rsp_fire;
+    `BUFFER(perf_icache_req_fire, perf_icache_req_fire_w);
+    `BUFFER(perf_icache_rsp_fire, perf_icache_rsp_fire_w);
 
     wire [LSU_NUM_REQS-1:0] perf_dcache_rd_req_fire, perf_dcache_rd_req_fire_r;
     wire [LSU_NUM_REQS-1:0] perf_dcache_wr_req_fire, perf_dcache_wr_req_fire_r;
