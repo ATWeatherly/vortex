@@ -220,11 +220,17 @@ module VX_bar_unit import VX_gpu_pkg::*; #(
         .rdata (store_state_rdata)
     );
 
+    // Asynchronous read at read_addr, which is the COMBINATIONAL bar_addr mux of
+    // VX_wctl_unit (wctl request vs DXA txbar release), not a register. It must
+    // stay a true async LUTRAM: with RADDR_REG(1) the 64x1 store hit FORCE_BRAM,
+    // went through VX_async_ram_patch, and xilinx_async_bram_patch.tcl (finding
+    // a LUT, not an FDRE, on raddr) grounded the BRAM address -- on silicon every
+    // phase read returned barrier address 0 (u50wg_2c250, both cores).
     VX_dp_ram #(
         .DATAW    (1),
         .SIZE     (1 << BAR_ADDR_BITS),
         .RDW_MODE ("W"),
-        .RADDR_REG(1)
+        .LUTRAM   (1)
     ) barrier_phase_store (
         .clk   (clk),
         .reset (reset),
