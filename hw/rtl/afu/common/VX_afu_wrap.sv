@@ -613,6 +613,11 @@ module VX_afu_wrap import VX_gpu_pkg::*; #(
             .DATA_WIDTH (C_M_AXI_MEM_DATA_WIDTH),
             .ID_WIDTH   (C_M_AXI_MEM_ID_WIDTH),
             .ARBITER    ("P"),          // index 0 (Vortex bank-0) > index 1 (CP)
+            // ID-routed multi-outstanding fan-in (U50, 2026-09-17): the default single-
+            // outstanding mode serialized every HBM read on one round trip (~80 MB/s
+            // regardless of core MLP or clock). The top ID bit carries the source index;
+            // both masters zero-extend their narrower tags into the platform ID, so it is free.
+            .MULTI_OUT  (1),
             .STRB_WIDTH (BANK0_STRB_W)
         ) bank0_arb (
             .clk   (clk),
@@ -942,6 +947,7 @@ module VX_afu_wrap import VX_gpu_pkg::*; #(
             .m_axi_rresp    (m_axi_mem_rresp_a)
         );
 
+`ifdef AFU_BANK0_SINGLE_OUTSTANDING
         // Bank 0 carries one read and one write at a time, the other banks
         // as many as the adapter tracks. Reads in flight cost cycles on a
         // saturated channel and save them across several, so moving this
@@ -967,6 +973,19 @@ module VX_afu_wrap import VX_gpu_pkg::*; #(
                                                 && m_axi_mem_rlast_a[0])
         );
 
+`else
+        // U50 (rtl/master-u50): bank 0 runs as many requests in flight as the
+        // adapter tracks, like the other banks. The one-read/one-write limiter
+        // above (upstream default) is the single-outstanding ceiling measured on
+        // the U50 (~80-250 MB/s streaming); bank0_arb's MULTI_OUT(1) routes the
+        // responses by ID. -DAFU_BANK0_SINGLE_OUTSTANDING restores the limiter.
+        assign pre_awvalid_a[0]      = ad_awvalid_a[0];
+        assign ad_awready_a[0]       = pre_awready_a[0];
+        assign m_axi_mem_wvalid_a[0] = ad_wvalid_a[0];
+        assign ad_wready_a[0]        = m_axi_mem_wready_a[0];
+        assign pre_arvalid_a[0]      = ad_arvalid_a[0];
+        assign ad_arready_a[0]       = pre_arready_a[0];
+`endif
         for (genvar i = 1; i < C_M_AXI_MEM_NUM_BANKS; ++i) begin : g_bank_direct
             assign pre_awvalid_a[i]      = ad_awvalid_a[i];
             assign ad_awready_a[i]       = pre_awready_a[i];
