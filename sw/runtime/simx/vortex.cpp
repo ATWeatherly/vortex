@@ -37,6 +37,9 @@
 #include <future>
 #include <map>
 #include <mutex>
+
+// Serializes processor_.run() across all simx devices of this process (see vortex_start).
+static std::mutex g_sim_run_mu;
 #include <stdint.h>
 #include <stdlib.h>
 
@@ -170,7 +173,16 @@ private:
       return v;
     };
     h.vortex_start = [this]() {
-      future_ = std::async(std::launch::async, [&] { processor_.run(); });
+      // SimPlatform is a process-wide singleton (one event wheel, one object list,
+      // reset() clears everything): two devices in one process (several ranks,
+      // VX_TP_LOCAL_N > 1) must not run their simulations concurrently, or one
+      // device's run() resets and ticks the other's in-flight state from a second
+      // thread ("channel is empty" assertion / hang). Serialize the runs; a device
+      // whose launch was issued while another runs simply starts afterwards.
+      future_ = std::async(std::launch::async, [&] {
+        std::lock_guard<std::mutex> g(g_sim_run_mu);
+        processor_.run();
+      });
     };
     h.vortex_busy = [this]() -> bool {
       if (!future_.valid()) return false;
