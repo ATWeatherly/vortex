@@ -580,7 +580,7 @@ VX_CSR_FRAG_PID     = 0xCE3  # primitive index of this lane's quad
 [dcr_mpm_class]
 VX_DCR_MPM_CLASS_BASE    = 0
 VX_DCR_MPM_CLASS_CORE    = 1
-VX_DCR_MPM_CLASS_RESERVED1= 2
+VX_DCR_MPM_CLASS_ISSUE   = 2  # issue-slot accounting + scoreboard stall attribution (PERF_STALL_ATTRIB)
 VX_DCR_MPM_CLASS_ICACHE  = 3
 VX_DCR_MPM_CLASS_DCACHE  = 4
 VX_DCR_MPM_CLASS_L2CACHE = 5
@@ -676,6 +676,39 @@ VX_CSR_MPM_STORES_H     = 0xB9E
 
 # Each cache level is its own MPM class (re-based at 0xB03), so every level
 # gets the full standard hpmcounter window with room for evictions.
+[csr_mpm_issue]
+# PERF: issue class (per-core; summed across issue slices). Needs -DPERF_STALL_ATTRIB.
+VX_CSR_MPM_SCB_ISSUED   = 0xB03  # slice-cycles an instruction left the scoreboard
+VX_CSR_MPM_SCB_ISSUED_H = 0xB83
+VX_CSR_MPM_SCB_BP       = 0xB04  # slice-cycles output valid but operand stage not ready
+VX_CSR_MPM_SCB_BP_H     = 0xB84
+VX_CSR_MPM_SCB_BLOCKED  = 0xB05  # slice-cycles staged warps exist, none has operands ready
+VX_CSR_MPM_SCB_BLOCKED_H= 0xB85
+VX_CSR_MPM_SCB_EMPTY    = 0xB06  # slice-cycles with no staged warp
+VX_CSR_MPM_SCB_EMPTY_H  = 0xB86
+VX_CSR_MPM_SCB_LOCKED   = 0xB07  # slice-cycles a ready warp is shut out by an FU sequence lock
+VX_CSR_MPM_SCB_LOCKED_H = 0xB87
+VX_CSR_MPM_SCB_WARPS    = 0xB08  # warp-cycles staged but not ready
+VX_CSR_MPM_SCB_WARPS_H  = 0xB88
+VX_CSR_MPM_SCB_C_ALU    = 0xB09  # warp-cycles waiting on a register produced by the ALU
+VX_CSR_MPM_SCB_C_ALU_H  = 0xB89
+VX_CSR_MPM_SCB_C_LSU    = 0xB0A  # ... by the LSU
+VX_CSR_MPM_SCB_C_LSU_H  = 0xB8A
+VX_CSR_MPM_SCB_C_SFU    = 0xB0B  # ... by the SFU
+VX_CSR_MPM_SCB_C_SFU_H  = 0xB8B
+VX_CSR_MPM_SCB_C_FPU    = 0xB0C  # ... by the FPU
+VX_CSR_MPM_SCB_C_FPU_H  = 0xB8C
+VX_CSR_MPM_SCB_C_TCU    = 0xB0D  # ... by the TCU
+VX_CSR_MPM_SCB_C_TCU_H  = 0xB8D
+VX_CSR_MPM_SCB_C_XREG   = 0xB0E  # warp-cycles waiting on a special register
+VX_CSR_MPM_SCB_C_XREG_H = 0xB8E
+VX_CSR_MPM_SCB_C_CREDIT = 0xB0F  # warp-cycles data-ready but target FU out of dispatch credits
+VX_CSR_MPM_SCB_C_CREDIT_H= 0xB8F
+VX_CSR_MPM_SCB_C_LAG    = 0xB10  # warp-cycles not ready with no live hazard (readiness flop lag)
+VX_CSR_MPM_SCB_C_LAG_H  = 0xB90
+VX_CSR_MPM_BAR_WARPS    = 0xB11  # warp-cycles parked at a barrier
+VX_CSR_MPM_BAR_WARPS_H  = 0xB91
+
 [csr_mpm_icache]
 VX_CSR_MPM_ICACHE_READS = 0xB03  # total reads
 VX_CSR_MPM_ICACHE_READS_H = 0xB83
@@ -787,6 +820,16 @@ VX_CSR_MPM_TCU_TBUF_CACHE_HITS= 0xB04  # B tile reuse hits from tile buffer cach
 VX_CSR_MPM_TCU_TBUF_CACHE_HITS_H = 0xB84
 VX_CSR_MPM_TCU_LMEM_READS     = 0xB05  # tile buffer local memory reads
 VX_CSR_MPM_TCU_LMEM_READS_H   = 0xB85
+VX_CSR_MPM_TCU_WGMMA_INSTRS   = 0xB06  # WGMMA uops accepted (block-summed)
+VX_CSR_MPM_TCU_WGMMA_INSTRS_H = 0xB86
+VX_CSR_MPM_TCU_WGMMA_STALLS   = 0xB07  # block-cycles a WGMMA uop is presented but not accepted
+VX_CSR_MPM_TCU_WGMMA_STALLS_H = 0xB87
+VX_CSR_MPM_TCU_UOPS           = 0xB08  # all uops accepted by the TCU cores (block-summed)
+VX_CSR_MPM_TCU_UOPS_H         = 0xB88
+VX_CSR_MPM_TCU_EXEC_STALLS    = 0xB09  # block-cycles any uop is presented but not accepted
+VX_CSR_MPM_TCU_EXEC_STALLS_H  = 0xB89
+VX_CSR_MPM_TCU_BUSY           = 0xB0A  # block-cycles with >= 1 uop in flight
+VX_CSR_MPM_TCU_BUSY_H         = 0xB8A
 
 [csr_mpm_tex]
 # PERF: texture unit (per-core; summed across blocks)

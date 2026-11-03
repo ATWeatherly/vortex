@@ -59,6 +59,9 @@ module VX_issue_slice import VX_gpu_pkg::*; #(
         .reset          (reset),
     `ifdef PERF_ENABLE
         .perf_stalls    (issue_perf.scb_stalls),
+        .perf_slots     (issue_perf.scb_slots),
+        .perf_causes    (issue_perf.scb_causes),
+        .perf_warps     (issue_perf.scb_warps),
     `endif
         .fu_release     (fu_release),
         .writeback_if   (writeback_if),

@@ -212,19 +212,31 @@ module VX_tcu_wgmma import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
         assign wgmma_stall_b[bi] = exec_valid[bi] && !exec_ready[bi] && is_wgmma_p;
     end
 
+    // Block-summed: count every block that fires/stalls in a cycle (a loop of
+    // "ctr <= ctr + 1" nonblocking updates counts at most one per cycle).
     logic [PERF_CTR_BITS-1:0] wgmma_instrs_ctr_r;
     logic [PERF_CTR_BITS-1:0] wgmma_stalls_ctr_r;
+    logic [PERF_CTR_BITS-1:0] wgmma_fire_n, wgmma_stall_n;
+    always_comb begin
+        wgmma_fire_n  = '0;
+        wgmma_stall_n = '0;
+        for (int bi = 0; bi < BLOCK_SIZE; bi++) begin
+            wgmma_fire_n  = wgmma_fire_n  + PERF_CTR_BITS'(wgmma_fire_b[bi]);
+            wgmma_stall_n = wgmma_stall_n + PERF_CTR_BITS'(wgmma_stall_b[bi]);
+        end
+    end
     always_ff @(posedge clk) begin
         if (reset) begin
             wgmma_instrs_ctr_r <= '0;
             wgmma_stalls_ctr_r <= '0;
         end else begin
-            for (int bi = 0; bi < BLOCK_SIZE; bi++) begin
-                if (wgmma_fire_b[bi])  wgmma_instrs_ctr_r <= wgmma_instrs_ctr_r + PERF_CTR_BITS'(1);
-                if (wgmma_stall_b[bi]) wgmma_stalls_ctr_r <= wgmma_stalls_ctr_r + PERF_CTR_BITS'(1);
-            end
+            wgmma_instrs_ctr_r <= wgmma_instrs_ctr_r + wgmma_fire_n;
+            wgmma_stalls_ctr_r <= wgmma_stalls_ctr_r + wgmma_stall_n;
         end
     end
+    assign tcu_perf.uops        = '0; // driven by VX_tcu_unit
+    assign tcu_perf.exec_stalls = '0;
+    assign tcu_perf.busy        = '0;
     assign tcu_perf.wgmma_instrs = wgmma_instrs_ctr_r;
     assign tcu_perf.wgmma_stalls = wgmma_stalls_ctr_r;
 `endif

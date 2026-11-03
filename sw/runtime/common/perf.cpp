@@ -703,6 +703,48 @@ extern "C" vx_result_t vx_device_dump_perf(vx_device_h hdevice, FILE *stream) {
     }
   } break;
 
+#ifdef VX_DCR_MPM_CLASS_ISSUE // headers generated from an older VX_types.toml lack it
+  case VX_DCR_MPM_CLASS_ISSUE: {
+    // Raw counts (no percentages) so per-region deltas are exact.
+    static const struct { uint32_t addr; const char* name; } kIssue[] = {
+      {VX_CSR_MPM_SCB_ISSUED, "issued"}, {VX_CSR_MPM_SCB_BP, "bp"},
+      {VX_CSR_MPM_SCB_BLOCKED, "blocked"}, {VX_CSR_MPM_SCB_EMPTY, "empty"},
+      {VX_CSR_MPM_SCB_LOCKED, "locked"}, {VX_CSR_MPM_SCB_WARPS, "warps"},
+    };
+    static const struct { uint32_t addr; const char* name; } kCause[] = {
+      {VX_CSR_MPM_SCB_C_ALU, "alu"}, {VX_CSR_MPM_SCB_C_LSU, "lsu"},
+      {VX_CSR_MPM_SCB_C_SFU, "sfu"}, {VX_CSR_MPM_SCB_C_FPU, "fpu"},
+      {VX_CSR_MPM_SCB_C_TCU, "tcu"}, {VX_CSR_MPM_SCB_C_XREG, "xreg"},
+      {VX_CSR_MPM_SCB_C_CREDIT, "credit"}, {VX_CSR_MPM_SCB_C_LAG, "lag"},
+      {VX_CSR_MPM_BAR_WARPS, "bar"},
+    };
+    constexpr size_t NI = sizeof(kIssue) / sizeof(kIssue[0]);
+    constexpr size_t NC = sizeof(kCause) / sizeof(kCause[0]);
+    uint64_t tot_i[NI] = {0}, tot_c[NC] = {0};
+    for (uint32_t core_id = 0; core_id < num_cores; ++core_id) {
+      uint64_t vi[NI] = {0}, vc[NC] = {0};
+      for (size_t k = 0; k < NI; ++k) {
+        CHECK_ERR(vx_device_mpm_query(hdevice, mpm_class, kIssue[k].addr, core_id, &vi[k]), { return err; });
+        tot_i[k] += vi[k];
+      }
+      for (size_t k = 0; k < NC; ++k) {
+        CHECK_ERR(vx_device_mpm_query(hdevice, mpm_class, kCause[k].addr, core_id, &vc[k]), { return err; });
+        tot_c[k] += vc[k];
+      }
+      std::stringstream si, sc;
+      for (size_t k = 0; k < NI; ++k) si << (k ? ", " : "") << kIssue[k].name << "=" << vi[k];
+      for (size_t k = 0; k < NC; ++k) sc << (k ? ", " : "") << kCause[k].name << "=" << vc[k];
+      perf_print_core(stream, core_id, "slots: %s", si.str().c_str());
+      perf_print_core(stream, core_id, "scrb_cause: %s", sc.str().c_str());
+    }
+    std::stringstream si, sc;
+    for (size_t k = 0; k < NI; ++k) si << (k ? ", " : "") << kIssue[k].name << "=" << tot_i[k];
+    for (size_t k = 0; k < NC; ++k) sc << (k ? ", " : "") << kCause[k].name << "=" << tot_c[k];
+    perf_print(stream, "slots: %s", si.str().c_str());
+    perf_print(stream, "scrb_cause: %s", sc.str().c_str());
+  } break;
+#endif
+
   case VX_DCR_MPM_CLASS_TCU: {
     if (!tcu_en) {
       perf_print(stream, "TCU not supported");
@@ -714,9 +756,22 @@ extern "C" vx_result_t vx_device_dump_perf(vx_device_h hdevice, FILE *stream) {
       CHECK_ERR(vx_device_mpm_query(hdevice, mpm_class, VX_CSR_MPM_TCU_TBUF_STALLS, core_id, &tbuf_stalls),  { return err; });
       CHECK_ERR(vx_device_mpm_query(hdevice, mpm_class, VX_CSR_MPM_TCU_TBUF_CACHE_HITS,  core_id, &tbuf_cache_hits), { return err; });
       CHECK_ERR(vx_device_mpm_query(hdevice, mpm_class, VX_CSR_MPM_TCU_LMEM_READS,    core_id, &lmem_reads),   { return err; });
+      uint64_t wg_instrs = 0, wg_stalls = 0, uops = 0, exec_stalls = 0, busy = 0;
+#ifdef VX_CSR_MPM_TCU_UOPS
+      CHECK_ERR(vx_device_mpm_query(hdevice, mpm_class, VX_CSR_MPM_TCU_WGMMA_INSTRS, core_id, &wg_instrs), { return err; });
+      CHECK_ERR(vx_device_mpm_query(hdevice, mpm_class, VX_CSR_MPM_TCU_WGMMA_STALLS, core_id, &wg_stalls), { return err; });
+      CHECK_ERR(vx_device_mpm_query(hdevice, mpm_class, VX_CSR_MPM_TCU_UOPS,         core_id, &uops),      { return err; });
+      CHECK_ERR(vx_device_mpm_query(hdevice, mpm_class, VX_CSR_MPM_TCU_EXEC_STALLS,  core_id, &exec_stalls), { return err; });
+      CHECK_ERR(vx_device_mpm_query(hdevice, mpm_class, VX_CSR_MPM_TCU_BUSY,         core_id, &busy),      { return err; });
       perf_print_core(stream, core_id,
         "tcu: tbuf_stalls=%" PRIu64 ", tbuf_cache_hits=%" PRIu64 ", lmem_reads=%" PRIu64,
         tbuf_stalls, tbuf_cache_hits, lmem_reads);
+      perf_print_core(stream, core_id,
+        "tcu_occ: uops=%" PRIu64 ", exec_stalls=%" PRIu64 ", busy=%" PRIu64 ", wgmma_uops=%" PRIu64 ", wgmma_stalls=%" PRIu64,
+        uops, exec_stalls, busy, wg_instrs, wg_stalls);
+#else
+      (void)wg_instrs; (void)wg_stalls; (void)uops; (void)exec_stalls; (void)busy;
+#endif
       tot_tbuf_stalls  += tbuf_stalls;
       tot_tbuf_cache_hits += tbuf_cache_hits;
       tot_lmem_reads   += lmem_reads;

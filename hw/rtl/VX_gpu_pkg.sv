@@ -1271,6 +1271,9 @@ package VX_gpu_pkg;
         logic [PERF_CTR_BITS-1:0] wgmma_stalls;      // cycles: WGMMA valid but stalled (tbuf or mdata)
         logic [PERF_CTR_BITS-1:0] wgmma_instrs;      // WGMMA µops executed
         logic [PERF_CTR_BITS-1:0] tbuf_stalls;         // cycles: WGMMA valid but stalled (uop cannot enter TCU core because tbuf data not ready)
+        logic [PERF_CTR_BITS-1:0] uops;              // block-summed: uops accepted by the TCU cores (WMMA + WGMMA)
+        logic [PERF_CTR_BITS-1:0] exec_stalls;       // block-summed: cycles a uop is presented but not accepted
+        logic [PERF_CTR_BITS-1:0] busy;              // block-summed: cycles with >= 1 uop in flight (accepted, result not yet out)
     } tcu_perf_t;
 `endif
 
@@ -1335,15 +1338,47 @@ package VX_gpu_pkg;
         logic [PERF_CTR_BITS-1:0] issued_threads;
         logic [PERF_CTR_BITS-1:0] branches;
         logic [PERF_CTR_BITS-1:0] divergence;
+        logic [PERF_CTR_BITS-1:0] bar_warps;    // warp-cycles spent waiting at a barrier
     } sched_perf_t;
 
     typedef struct packed {
         logic [PERF_CTR_BITS-1:0] stalls;
     } fetch_perf_t;
 
+    // Scoreboard stall attribution (PERF_STALL_ATTRIB): why a staged warp is not
+    // ready. Data hazards are split by the EX unit that produced the busy register.
+    localparam SCB_CAUSE_ALU    = 0;
+    localparam SCB_CAUSE_LSU    = 1;
+    localparam SCB_CAUSE_SFU    = 2;
+    localparam SCB_CAUSE_FPU    = 3;
+    localparam SCB_CAUSE_TCU    = 4;
+    localparam SCB_CAUSE_XREG   = 5; // special-register hazard
+    localparam SCB_CAUSE_CREDIT = 6; // data ready, target FU dispatch credits exhausted
+    localparam SCB_CAUSE_LAG    = 7; // ready flop lags a release that already happened
+    localparam SCB_CAUSES       = 8;
+
+    function automatic integer ex_to_scb_cause(input logic [EX_BITS-1:0] ex);
+        if (`VX_CFG_EXT_TCU_ENABLED && ex == EX_BITS'(EX_TCU)) return SCB_CAUSE_TCU;
+        if (`VX_CFG_EXT_F_ENABLED && ex == EX_BITS'(EX_FPU)) return SCB_CAUSE_FPU;
+        if (ex == EX_BITS'(EX_SFU)) return SCB_CAUSE_SFU;
+        if (ex == EX_BITS'(EX_LSU)) return SCB_CAUSE_LSU;
+        return SCB_CAUSE_ALU;
+    endfunction
+
+    // Issue-slot outcome per slice-cycle (sums to ISSUE_WIDTH x cycles).
+    localparam SCB_SLOT_ISSUED  = 0; // an instruction left the scoreboard
+    localparam SCB_SLOT_BP      = 1; // output valid, operand stage not ready
+    localparam SCB_SLOT_BLOCKED = 2; // staged warps exist, none has operands ready
+    localparam SCB_SLOT_EMPTY   = 3; // no staged warp
+    localparam SCB_SLOT_LOCKED  = 4; // a ready warp is shut out by another warp's FU sequence lock
+    localparam SCB_SLOTS        = 5;
+
     typedef struct packed {
         logic [PERF_CTR_BITS-1:0] ibf_stalls;
         logic [PERF_CTR_BITS-1:0] scb_stalls;
+        logic [SCB_SLOTS-1:0][PERF_CTR_BITS-1:0]  scb_slots;
+        logic [SCB_CAUSES-1:0][PERF_CTR_BITS-1:0] scb_causes; // warp-cycles per cause (non-exclusive)
+        logic [PERF_CTR_BITS-1:0] scb_warps;  // warp-cycles staged but not ready
         logic [PERF_CTR_BITS-1:0] opd_stalls;
         logic [NUM_EX_UNITS-1:0][PERF_CTR_BITS-1:0] dispatch_stalls;
         logic [NUM_EX_UNITS-1:0][PERF_CTR_BITS-1:0] dispatch_instrs;

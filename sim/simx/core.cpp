@@ -359,6 +359,7 @@ public:
     // profiling
     perf_stats_.active_warps += scheduler_->active_warps().count();
     perf_stats_.stalled_warps += scheduler_->stalled_warps().count();
+    perf_stats_.bar_warps += scheduler_->barrier_unit().waiting_warps();
 
     // stop when fetch_latch cannot accept
     if (fetch_latch_.full())
@@ -579,12 +580,15 @@ public:
     // issue ibuffer instructions
     for (uint32_t iw = 0; iw < VX_CFG_ISSUE_WIDTH; ++iw) {
       bool any_scrb_blocked = false;
+      bool any_staged = false;
+      bool any_locked_out = false;
       BitVector<> ready_set(PER_ISSUE_WARPS);
       for (uint32_t w = 0; w < PER_ISSUE_WARPS; ++w) {
         uint32_t wid = w * VX_CFG_ISSUE_WIDTH + iw;
         auto& ibuffer = ibuffers_.at(wid);
         if (ibuffer->empty())
           continue;
+        any_staged = true;
 
         // check scoreboard against sequencer micro-op (handles uop WAW/RAW)
         auto trace = ibuffer->peek();
@@ -616,15 +620,34 @@ public:
           // Count once per cycle per issue slice regardless of how many
           // warps are blocked.
           any_scrb_blocked = true;
+          // attribution: producer unit of each busy register
+          {
+            bool seen[8] = {false};
+            for (auto& use : uses) {
+              int c;
+              switch (use.fu_type) {
+              case FUType::LSU: c = 1; break;
+              case FUType::SFU: c = 2; break;
+              case FUType::FPU: c = 3; break;
+            #ifdef VX_CFG_EXT_TCU_ENABLE
+              case FUType::TCU: c = 4; break;
+            #endif
+              default: c = 0; break;
+              }
+              seen[c] = true;
+            }
+            bool any = false;
+            for (int c = 0; c < 8; ++c) {
+              if (seen[c]) { ++perf_stats_.scb_cause[c]; any = true; }
+            }
+            if (!any) ++perf_stats_.scb_cause[5]; // fcsr / special register
+            ++perf_stats_.scb_warps;
+          }
         } else {
           uop_trace->log_once(false);
           if (seq_starting) {
-            continue;
-          }
-          // While a warp holds the issue lock, no other warp of the slot issues,
-          // whatever its unit.
-          auto lock_owner = issue_lock_owner_.at(iw);
-          if (lock_owner != kLockOpen && lock_owner != w) {
+            ++perf_stats_.scb_cause[7]; // sequencer start delay (RTL: readiness lag)
+            ++perf_stats_.scb_warps;
             continue;
           }
           auto fu = (int)uop_trace->fu_type;
@@ -632,6 +655,15 @@ public:
           // count ops still in operand collection. The flag reaches issue through
           // two registers, so a warp sees the count as of two cycles back.
           if (fu_full_seen_.at(iw).test(fu)) {
+            ++perf_stats_.scb_cause[6];
+            ++perf_stats_.scb_warps;
+            continue;
+          }
+          // While a warp holds the issue lock, no other warp of the slot issues,
+          // whatever its unit.
+          auto lock_owner = issue_lock_owner_.at(iw);
+          if (lock_owner != kLockOpen && lock_owner != w) {
+            any_locked_out = true;
             continue;
           }
         #ifdef VX_CFG_EXT_RTU_ENABLE
@@ -660,7 +692,9 @@ public:
         auto uop_trace = seq->get(trace);
 
         // to operand stage
-        if (operands_.at(iw)->Input.try_send(uop_trace)) {
+        bool sent = operands_.at(iw)->Input.try_send(uop_trace);
+        if (sent) ++perf_stats_.slot_issued; else ++perf_stats_.slot_bp;
+        if (sent) {
           // capture register operands at issue (Operands owns regfile)
           operands_.at(iw)->fetch_operands(uop_trace);
           // spend a dispatch credit for the target FU
@@ -723,6 +757,15 @@ public:
       // track scoreboard stalls
       if (any_scrb_blocked) {
         ++perf_stats_.scrb_stalls;
+      }
+      if (!ready_set.any()) {
+        if (!any_staged) {
+          ++perf_stats_.slot_empty;
+        } else if (any_locked_out) {
+          ++perf_stats_.slot_locked;
+        } else {
+          ++perf_stats_.slot_blocked;
+        }
       }
     }
   }

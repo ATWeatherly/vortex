@@ -22,6 +22,9 @@ module VX_scoreboard import VX_gpu_pkg::*; #(
 
 `ifdef PERF_ENABLE
     output reg [PERF_CTR_BITS-1:0] perf_stalls,
+    output wire [SCB_SLOTS-1:0][PERF_CTR_BITS-1:0]  perf_slots,
+    output wire [SCB_CAUSES-1:0][PERF_CTR_BITS-1:0] perf_causes,
+    output wire [PERF_CTR_BITS-1:0] perf_warps,
 `endif
 
     input wire [NUM_EX_UNITS-1:0] fu_release,
@@ -81,6 +84,13 @@ module VX_scoreboard import VX_gpu_pkg::*; #(
         end
     end
 `endif
+`ifdef PERF_ENABLE
+`ifndef PERF_STALL_ATTRIB
+    assign perf_slots  = '0;
+    assign perf_causes = '0;
+    assign perf_warps  = '0;
+`endif
+`endif
 
     for (genvar w = 0; w < PER_ISSUE_WARPS; ++w) begin : g_stanging_bufs
         VX_pipe_buffer #(
@@ -96,6 +106,10 @@ module VX_scoreboard import VX_gpu_pkg::*; #(
             .ready_out(staging_if[w].ready)
         );
     end
+
+`ifdef PERF_STALL_ATTRIB
+    wire [PER_ISSUE_WARPS-1:0][SCB_CAUSES-1:0] perf_wcause;
+`endif
 
     for (genvar w = 0; w < PER_ISSUE_WARPS; ++w) begin : g_scoreboard
         reg [NUM_REGS-1:0] inuse_regs, inuse_regs_n;
@@ -230,6 +244,41 @@ module VX_scoreboard import VX_gpu_pkg::*; #(
         end
 
         assign operands_ready[w] = operands_ready_r;
+
+    `ifdef PERF_STALL_ATTRIB
+        // Producer EX unit of each in-flight register, recorded at reservation.
+        // The busy set behind this cycle's ~operands_ready is exactly the
+        // registered in-use state masked by the staged instruction's operands
+        // (see the hold/fire evaluation above), so attribution reads the flops.
+        reg [NUM_REGS-1:0][EX_WIDTH-1:0] inuse_units;
+        always @(posedge clk) begin
+            if (staging_fire && staging_if[w].data.wb) begin
+                inuse_units[staging_if[w].data.rd] <= EX_WIDTH'(staging_if[w].data.ex_type);
+            end
+        end
+
+        reg [SCB_CAUSES-1:0] wcause;
+        always @(*) begin
+            wcause = '0;
+            if (staging_if[w].valid && ~operands_ready[w]) begin
+                for (integer i = 0; i < NUM_OPDS; ++i) begin
+                    if (stg_used_rs[i] && inuse_regs[stg_opds[i]]) begin
+                        wcause[ex_to_scb_cause(EX_BITS'(inuse_units[stg_opds[i]]))] = 1'b1;
+                    end
+                end
+                if (| (inuse_xregs & stg_xregs_mask)) begin
+                    wcause[SCB_CAUSE_XREG] = 1'b1;
+                end
+                if (wcause == '0 && stg_goingfull) begin
+                    wcause[SCB_CAUSE_CREDIT] = 1'b1;
+                end
+                if (wcause == '0) begin
+                    wcause[SCB_CAUSE_LAG] = 1'b1;
+                end
+            end
+        end
+        assign perf_wcause[w] = wcause;
+    `endif
 
     `ifdef SIMULATION
         reg [31:0] timeout_ctr;
@@ -405,5 +454,58 @@ module VX_scoreboard import VX_gpu_pkg::*; #(
         .valid_out (scoreboard_if.valid),
         .ready_out (scoreboard_if.ready)
     );
+
+`ifdef PERF_ENABLE
+`ifdef PERF_STALL_ATTRIB
+    // Issue-slot outcome, measured at the arbiter (ahead of the skid buffer).
+    wire [PER_ISSUE_WARPS-1:0] slot_staged = stg_valid_in;
+    wire [PER_ISSUE_WARPS-1:0] slot_ready  = stg_valid_in & operands_ready;
+    wire [SCB_SLOTS-1:0] slot_w;
+    assign slot_w[SCB_SLOT_ISSUED]  = issue_fire;
+    assign slot_w[SCB_SLOT_BP]      = valid_out_w && ~ready_out_w;
+    assign slot_w[SCB_SLOT_LOCKED]  = ~valid_out_w && (| slot_ready);
+    assign slot_w[SCB_SLOT_BLOCKED] = ~valid_out_w && (| slot_staged) && ~(| slot_ready);
+    assign slot_w[SCB_SLOT_EMPTY]   = ~(| slot_staged);
+
+    wire [`CLOG2(PER_ISSUE_WARPS+1)-1:0] warps_cnt;
+    `POP_COUNT(warps_cnt, stg_valid_in & ~operands_ready);
+
+    reg [SCB_SLOTS-1:0][PERF_CTR_BITS-1:0]  slots_r;
+    reg [SCB_CAUSES-1:0][PERF_CTR_BITS-1:0] causes_r;
+    reg [PERF_CTR_BITS-1:0] warps_r;
+
+    for (genvar c = 0; c < SCB_CAUSES; ++c) begin : g_cause_ctr
+        wire [PER_ISSUE_WARPS-1:0] cw;
+        for (genvar w = 0; w < PER_ISSUE_WARPS; ++w) begin : g_w
+            assign cw[w] = perf_wcause[w][c];
+        end
+        wire [`CLOG2(PER_ISSUE_WARPS+1)-1:0] cnt;
+        `POP_COUNT(cnt, cw);
+        always @(posedge clk) begin
+            if (reset) begin
+                causes_r[c] <= '0;
+            end else begin
+                causes_r[c] <= causes_r[c] + PERF_CTR_BITS'(cnt);
+            end
+        end
+    end
+
+    always @(posedge clk) begin
+        if (reset) begin
+            slots_r <= '0;
+            warps_r <= '0;
+        end else begin
+            for (integer k = 0; k < SCB_SLOTS; ++k) begin
+                slots_r[k] <= slots_r[k] + PERF_CTR_BITS'(slot_w[k]);
+            end
+            warps_r <= warps_r + PERF_CTR_BITS'(warps_cnt);
+        end
+    end
+
+    assign perf_slots  = slots_r;
+    assign perf_causes = causes_r;
+    assign perf_warps  = warps_r;
+`endif
+`endif
 
 endmodule

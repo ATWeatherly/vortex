@@ -34,6 +34,12 @@ public:
   void global_resume(uint32_t bar_id);
   void event_attach(uint32_t bar_id, uint32_t count = 1);
   void event_release(uint32_t bar_id);
+  // warps currently suspended on any barrier (perf)
+  uint32_t waiting_warps() const {
+    uint32_t n = 0;
+    for (auto& b : barriers_) n += b.wait_mask.count();
+    return n;
+  }
 
 protected:
   void on_reset();

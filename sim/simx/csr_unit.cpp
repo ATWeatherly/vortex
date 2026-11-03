@@ -238,6 +238,27 @@ Word CsrUnit::get_csr(uint32_t addr, uint32_t wid, uint32_t tid) {
       #endif
         }
       } break;
+    #ifdef VX_DCR_MPM_CLASS_ISSUE
+      case VX_DCR_MPM_CLASS_ISSUE: {
+        switch (addr) {
+        CSR_READ_64(VX_CSR_MPM_SCB_ISSUED,   core_perf.slot_issued);
+        CSR_READ_64(VX_CSR_MPM_SCB_BP,       core_perf.slot_bp);
+        CSR_READ_64(VX_CSR_MPM_SCB_BLOCKED,  core_perf.slot_blocked);
+        CSR_READ_64(VX_CSR_MPM_SCB_EMPTY,    core_perf.slot_empty);
+        CSR_READ_64(VX_CSR_MPM_SCB_LOCKED,   core_perf.slot_locked);
+        CSR_READ_64(VX_CSR_MPM_SCB_WARPS,    core_perf.scb_warps);
+        CSR_READ_64(VX_CSR_MPM_SCB_C_ALU,    core_perf.scb_cause[0]);
+        CSR_READ_64(VX_CSR_MPM_SCB_C_LSU,    core_perf.scb_cause[1]);
+        CSR_READ_64(VX_CSR_MPM_SCB_C_SFU,    core_perf.scb_cause[2]);
+        CSR_READ_64(VX_CSR_MPM_SCB_C_FPU,    core_perf.scb_cause[3]);
+        CSR_READ_64(VX_CSR_MPM_SCB_C_TCU,    core_perf.scb_cause[4]);
+        CSR_READ_64(VX_CSR_MPM_SCB_C_XREG,   core_perf.scb_cause[5]);
+        CSR_READ_64(VX_CSR_MPM_SCB_C_CREDIT, core_perf.scb_cause[6]);
+        CSR_READ_64(VX_CSR_MPM_SCB_C_LAG,    core_perf.scb_cause[7]);
+        CSR_READ_64(VX_CSR_MPM_BAR_WARPS,    core_perf.bar_warps);
+        }
+      } break;
+    #endif
     #ifdef VX_CFG_EXT_TCU_ENABLE
       case VX_DCR_MPM_CLASS_TCU: {
         auto tcu_perf = core_->tcu_unit()->perf_stats();

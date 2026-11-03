@@ -37,6 +37,13 @@ module VX_issue import VX_gpu_pkg::*; #(
     `PERF_COUNTER_ADD (issue_perf, per_issue_perf, ibf_stalls, PERF_CTR_BITS, `VX_CFG_ISSUE_WIDTH, (`VX_CFG_ISSUE_WIDTH > 2))
     `PERF_COUNTER_ADD (issue_perf, per_issue_perf, scb_stalls, PERF_CTR_BITS, `VX_CFG_ISSUE_WIDTH, (`VX_CFG_ISSUE_WIDTH > 2))
     `PERF_COUNTER_ADD (issue_perf, per_issue_perf, opd_stalls, PERF_CTR_BITS, `VX_CFG_ISSUE_WIDTH, (`VX_CFG_ISSUE_WIDTH > 2))
+    `PERF_COUNTER_ADD (issue_perf, per_issue_perf, scb_warps, PERF_CTR_BITS, `VX_CFG_ISSUE_WIDTH, (`VX_CFG_ISSUE_WIDTH > 2))
+    for (genvar i = 0; i < SCB_SLOTS; ++i) begin : g_issue_perf_slots
+        `PERF_COUNTER_ADD (issue_perf, per_issue_perf, scb_slots[i], PERF_CTR_BITS, `VX_CFG_ISSUE_WIDTH, (`VX_CFG_ISSUE_WIDTH > 2))
+    end
+    for (genvar i = 0; i < SCB_CAUSES; ++i) begin : g_issue_perf_causes
+        `PERF_COUNTER_ADD (issue_perf, per_issue_perf, scb_causes[i], PERF_CTR_BITS, `VX_CFG_ISSUE_WIDTH, (`VX_CFG_ISSUE_WIDTH > 2))
+    end
     for (genvar i = 0; i < NUM_EX_UNITS; ++i) begin : g_issue_perf_units_uses
         `PERF_COUNTER_ADD (issue_perf, per_issue_perf, dispatch_stalls[i], PERF_CTR_BITS, `VX_CFG_ISSUE_WIDTH, (`VX_CFG_ISSUE_WIDTH > 2))
         `PERF_COUNTER_ADD (issue_perf, per_issue_perf, dispatch_instrs[i], PERF_CTR_BITS, `VX_CFG_ISSUE_WIDTH, (`VX_CFG_ISSUE_WIDTH > 2))

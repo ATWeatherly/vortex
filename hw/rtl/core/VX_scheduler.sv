@@ -650,6 +650,36 @@ module VX_scheduler import VX_gpu_pkg::*; #(
     assign sched_perf.issued_threads= perf_issued_threads;
     assign sched_perf.branches      = perf_branches;
     assign sched_perf.divergence    = perf_divergence;
+
+`ifdef PERF_STALL_ATTRIB
+    // Warps parked at a barrier: set on arrival, cleared by the release mask.
+    reg [`VX_CFG_NUM_WARPS-1:0] bar_waiting;
+    reg [`VX_CFG_NUM_WARPS-1:0] bar_waiting_n;
+    always @(*) begin
+        bar_waiting_n = bar_waiting;
+        if (warp_ctl_if.bar_valid) begin
+            bar_waiting_n[warp_ctl_if.wid] = 1'b1;
+        end
+        if (bar_unlock_valid) begin
+            bar_waiting_n &= ~bar_unlock_mask;
+        end
+    end
+    wire [`CLOG2(`VX_CFG_NUM_WARPS+1)-1:0] bar_waiting_cnt;
+    `POP_COUNT(bar_waiting_cnt, bar_waiting);
+    reg [PERF_CTR_BITS-1:0] perf_bar_warps;
+    always @(posedge clk) begin
+        if (reset) begin
+            bar_waiting    <= '0;
+            perf_bar_warps <= '0;
+        end else begin
+            bar_waiting    <= bar_waiting_n;
+            perf_bar_warps <= perf_bar_warps + PERF_CTR_BITS'(bar_waiting_cnt);
+        end
+    end
+    assign sched_perf.bar_warps = perf_bar_warps;
+`else
+    assign sched_perf.bar_warps = '0;
+`endif
 `endif
 
 `ifdef DBG_TRACE_PIPELINE

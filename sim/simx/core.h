@@ -70,6 +70,16 @@ public:
     uint64_t stores = 0;
     uint64_t ifetch_latency = 0;
     uint64_t load_latency = 0;
+    // issue class (VX_DCR_MPM_CLASS_ISSUE): slot outcome per slice-cycle,
+    // blocked warp-cycles by cause, barrier-parked warp-cycles
+    uint64_t slot_issued = 0;
+    uint64_t slot_bp = 0;
+    uint64_t slot_blocked = 0;
+    uint64_t slot_empty = 0;
+    uint64_t slot_locked = 0;
+    uint64_t scb_warps = 0;
+    uint64_t scb_cause[8] = {0}; // alu lsu sfu fpu tcu xreg credit lag
+    uint64_t bar_warps = 0;
   };
 
   std::vector<SimChannel<MemReq>> icache_req_out;

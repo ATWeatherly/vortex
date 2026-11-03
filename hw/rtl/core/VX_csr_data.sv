@@ -438,6 +438,28 @@ import VX_fpu_pkg::*;
                         default:;
                         endcase
                     end
+                `ifdef VX_DCR_MPM_CLASS_ISSUE
+                    `VX_DCR_MPM_CLASS_ISSUE: begin
+                        case (dcr_addr)
+                        `CSR_READ_64(`VX_CSR_MPM_SCB_ISSUED,   dcr_data_w, pipeline_perf.issue.scb_slots[SCB_SLOT_ISSUED]);
+                        `CSR_READ_64(`VX_CSR_MPM_SCB_BP,       dcr_data_w, pipeline_perf.issue.scb_slots[SCB_SLOT_BP]);
+                        `CSR_READ_64(`VX_CSR_MPM_SCB_BLOCKED,  dcr_data_w, pipeline_perf.issue.scb_slots[SCB_SLOT_BLOCKED]);
+                        `CSR_READ_64(`VX_CSR_MPM_SCB_EMPTY,    dcr_data_w, pipeline_perf.issue.scb_slots[SCB_SLOT_EMPTY]);
+                        `CSR_READ_64(`VX_CSR_MPM_SCB_LOCKED,   dcr_data_w, pipeline_perf.issue.scb_slots[SCB_SLOT_LOCKED]);
+                        `CSR_READ_64(`VX_CSR_MPM_SCB_WARPS,    dcr_data_w, pipeline_perf.issue.scb_warps);
+                        `CSR_READ_64(`VX_CSR_MPM_SCB_C_ALU,    dcr_data_w, pipeline_perf.issue.scb_causes[SCB_CAUSE_ALU]);
+                        `CSR_READ_64(`VX_CSR_MPM_SCB_C_LSU,    dcr_data_w, pipeline_perf.issue.scb_causes[SCB_CAUSE_LSU]);
+                        `CSR_READ_64(`VX_CSR_MPM_SCB_C_SFU,    dcr_data_w, pipeline_perf.issue.scb_causes[SCB_CAUSE_SFU]);
+                        `CSR_READ_64(`VX_CSR_MPM_SCB_C_FPU,    dcr_data_w, pipeline_perf.issue.scb_causes[SCB_CAUSE_FPU]);
+                        `CSR_READ_64(`VX_CSR_MPM_SCB_C_TCU,    dcr_data_w, pipeline_perf.issue.scb_causes[SCB_CAUSE_TCU]);
+                        `CSR_READ_64(`VX_CSR_MPM_SCB_C_XREG,   dcr_data_w, pipeline_perf.issue.scb_causes[SCB_CAUSE_XREG]);
+                        `CSR_READ_64(`VX_CSR_MPM_SCB_C_CREDIT, dcr_data_w, pipeline_perf.issue.scb_causes[SCB_CAUSE_CREDIT]);
+                        `CSR_READ_64(`VX_CSR_MPM_SCB_C_LAG,    dcr_data_w, pipeline_perf.issue.scb_causes[SCB_CAUSE_LAG]);
+                        `CSR_READ_64(`VX_CSR_MPM_BAR_WARPS,    dcr_data_w, pipeline_perf.sched.bar_warps);
+                        default:;
+                        endcase
+                    end
+                `endif
                     `VX_DCR_MPM_CLASS_ICACHE: begin
                         case (dcr_addr)
                         `CSR_READ_64(`VX_CSR_MPM_ICACHE_READS, dcr_data_w, sysmem_perf.icache.reads);
@@ -525,6 +547,13 @@ import VX_fpu_pkg::*;
                         `CSR_READ_64(`VX_CSR_MPM_TCU_TBUF_STALLS,      dcr_data_w, pipeline_perf.tcu.tbuf_stalls);
                         `CSR_READ_64(`VX_CSR_MPM_TCU_TBUF_CACHE_HITS, dcr_data_w, pipeline_perf.tcu.tbuf_cache_hits);
                         `CSR_READ_64(`VX_CSR_MPM_TCU_LMEM_READS,     dcr_data_w, pipeline_perf.tcu.lmem_reads);
+                    `ifdef VX_CSR_MPM_TCU_UOPS
+                        `CSR_READ_64(`VX_CSR_MPM_TCU_WGMMA_INSTRS,   dcr_data_w, pipeline_perf.tcu.wgmma_instrs);
+                        `CSR_READ_64(`VX_CSR_MPM_TCU_WGMMA_STALLS,   dcr_data_w, pipeline_perf.tcu.wgmma_stalls);
+                        `CSR_READ_64(`VX_CSR_MPM_TCU_UOPS,           dcr_data_w, pipeline_perf.tcu.uops);
+                        `CSR_READ_64(`VX_CSR_MPM_TCU_EXEC_STALLS,    dcr_data_w, pipeline_perf.tcu.exec_stalls);
+                        `CSR_READ_64(`VX_CSR_MPM_TCU_BUSY,           dcr_data_w, pipeline_perf.tcu.busy);
+                    `endif
                         default:;
                         endcase
                     end

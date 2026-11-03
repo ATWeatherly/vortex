@@ -155,6 +155,16 @@ module VX_tcu_unit import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
     wire [BLOCK_SIZE-1:0][TCU_WG_RS2_WIDTH-1:0][`VX_CFG_XLEN-1:0] tbuf_rs2_data;
     wire [BLOCK_SIZE-1:0]                                         tbuf_ready_eff;
 
+`ifdef PERF_ENABLE
+    tcu_perf_t wg_perf;
+    assign tcu_perf.tbuf_stalls     = wg_perf.tbuf_stalls;
+    assign tcu_perf.tbuf_cache_hits = wg_perf.tbuf_cache_hits;
+    assign tcu_perf.lmem_reads      = wg_perf.lmem_reads;
+    assign tcu_perf.wgmma_instrs    = wg_perf.wgmma_instrs;
+    assign tcu_perf.wgmma_stalls    = wg_perf.wgmma_stalls;
+    `UNUSED_VAR ({wg_perf.uops, wg_perf.exec_stalls, wg_perf.busy})
+`endif
+
     VX_tcu_wgmma #(
         .INSTANCE_ID (`SFORMATF(("%s-wgmma", INSTANCE_ID))),
         .BLOCK_SIZE  (BLOCK_SIZE)
@@ -162,7 +172,7 @@ module VX_tcu_unit import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
         .clk            (clk),
         .reset          (reset),
     `ifdef PERF_ENABLE
-        .tcu_perf       (tcu_perf),
+        .tcu_perf       (wg_perf),
     `endif
         .exec_valid     (exec_valid_w),
         .exec_ready     (exec_ready_w),
@@ -263,5 +273,44 @@ module VX_tcu_unit import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
         .result_if (per_block_result_if),
         .commit_if (commit_if)
     );
+
+`ifdef PERF_ENABLE
+    // Block-summed TCU core occupancy: one uop per cycle per block at peak.
+    wire [BLOCK_SIZE-1:0] perf_exe_fire, perf_exe_stall, perf_res_fire, perf_busy;
+    for (genvar bi = 0; bi < BLOCK_SIZE; ++bi) begin : g_perf_occ
+        assign perf_exe_fire[bi]  = core_execute_if[bi].valid && core_execute_if[bi].ready;
+        assign perf_exe_stall[bi] = core_execute_if[bi].valid && ~core_execute_if[bi].ready;
+        assign perf_res_fire[bi]  = core_result_if[bi].valid && core_result_if[bi].ready;
+        reg [7:0] inflight;
+        always @(posedge clk) begin
+            if (reset) begin
+                inflight <= '0;
+            end else begin
+                inflight <= inflight + 8'(perf_exe_fire[bi])
+                          - 8'(perf_res_fire[bi] && (inflight != 0 || perf_exe_fire[bi]));
+            end
+        end
+        assign perf_busy[bi] = (inflight != 0) || perf_exe_fire[bi];
+    end
+    wire [`CLOG2(BLOCK_SIZE+1)-1:0] perf_fire_cnt, perf_stall_cnt, perf_busy_cnt;
+    `POP_COUNT(perf_fire_cnt, perf_exe_fire);
+    `POP_COUNT(perf_stall_cnt, perf_exe_stall);
+    `POP_COUNT(perf_busy_cnt, perf_busy);
+    reg [PERF_CTR_BITS-1:0] perf_uops_r, perf_stalls_r, perf_busy_r;
+    always @(posedge clk) begin
+        if (reset) begin
+            perf_uops_r   <= '0;
+            perf_stalls_r <= '0;
+            perf_busy_r   <= '0;
+        end else begin
+            perf_uops_r   <= perf_uops_r   + PERF_CTR_BITS'(perf_fire_cnt);
+            perf_stalls_r <= perf_stalls_r + PERF_CTR_BITS'(perf_stall_cnt);
+            perf_busy_r   <= perf_busy_r   + PERF_CTR_BITS'(perf_busy_cnt);
+        end
+    end
+    assign tcu_perf.uops        = perf_uops_r;
+    assign tcu_perf.exec_stalls = perf_stalls_r;
+    assign tcu_perf.busy        = perf_busy_r;
+`endif
 
 endmodule
