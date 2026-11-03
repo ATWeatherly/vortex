@@ -324,11 +324,31 @@ module VX_scoreboard import VX_gpu_pkg::*; #(
     // fu_locked ('1 = open, one-hot = locked) gates arb_valid_in so only the lock
     // holder is requested while it holds the lock.
     reg [PER_ISSUE_WARPS-1:0] fu_locked;
+    wire [PER_ISSUE_WARPS-1:0] lock_gate;
+
+`ifdef ISSUE_LOCK_HOLDER_PRIORITY
+    // Holder-priority (docs/proposals/scoreboard_fu_lock_holder_priority.md):
+    // while a sequence holds the slice, the holder is the only requester when
+    // it has a ready uop; in cycles it has none, other warps may issue, except
+    // a new sequence start or anything bound for the locked FU, so the
+    // sequence still reaches its FU contiguous. All terms are flop-sourced.
+    reg [EX_BITS-1:0] locked_ex;
+    wire [PER_ISSUE_WARPS-1:0] hp_req, hp_other_ok;
+    for (genvar w = 0; w < PER_ISSUE_WARPS; ++w) begin : g_hp
+        assign hp_req[w] = staging_if[w].valid && operands_ready[w];
+        assign hp_other_ok[w] = ~(staging_if[w].data.fu_lock && ~staging_if[w].data.fu_unlock)
+                             && (staging_if[w].data.ex_type != locked_ex);
+    end
+    wire holder_req = | (hp_req & fu_locked); // fu_locked is one-hot while locked
+    assign lock_gate = fu_locked | ({PER_ISSUE_WARPS{~holder_req}} & hp_other_ok);
+`else
+    assign lock_gate = fu_locked;
+`endif
 
     for (genvar w = 0; w < PER_ISSUE_WARPS; ++w) begin : g_arb_data_in
         // operands_ready carries data-hazard + FU-congestion; fu_locked adds the
         // FU-lock gate so only the lock holder is requested during a sequence.
-        assign arb_valid_in[w] = staging_if[w].valid && operands_ready[w] && fu_locked[w];
+        assign arb_valid_in[w] = staging_if[w].valid && operands_ready[w] && lock_gate[w];
 
         assign arb_data_in[w] = {
             staging_if[w].data.uuid,
@@ -416,7 +436,10 @@ module VX_scoreboard import VX_gpu_pkg::*; #(
         end else if (issue_fire) begin
             if (issue_fu_lock && ~issue_fu_unlock) begin
                 fu_locked <= arb_onehot;
-            end else if (issue_fu_unlock) begin
+            `ifdef ISSUE_LOCK_HOLDER_PRIORITY
+                locked_ex <= issue_ex;
+            `endif
+            end else if (issue_fu_unlock && (| (arb_onehot & fu_locked))) begin
                 fu_locked <= '1;
             end
         end

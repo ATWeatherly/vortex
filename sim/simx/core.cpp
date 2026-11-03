@@ -71,6 +71,7 @@ public:
     , pending_icache_(VX_CFG_NUM_WARPS)
     , ibuffer_arbs_(VX_CFG_ISSUE_WIDTH, {ArbiterType::GreedyRR, PER_ISSUE_WARPS})
     , issue_lock_owner_(VX_CFG_ISSUE_WIDTH, kLockOpen)
+    , issue_lock_fu_(VX_CFG_ISSUE_WIDTH, -1)
     , fu_credits_(VX_CFG_ISSUE_WIDTH, std::vector<uint32_t>((uint32_t)FUType::Count, 0))
     , fu_full_(VX_CFG_ISSUE_WIDTH, BitVector<>((uint32_t)FUType::Count, 0))
     , fu_full_seen_(VX_CFG_ISSUE_WIDTH, BitVector<>((uint32_t)FUType::Count, 0))
@@ -583,6 +584,7 @@ public:
       bool any_staged = false;
       bool any_locked_out = false;
       BitVector<> ready_set(PER_ISSUE_WARPS);
+      BitVector<> hp_deferred(PER_ISSUE_WARPS);
       for (uint32_t w = 0; w < PER_ISSUE_WARPS; ++w) {
         uint32_t wid = w * VX_CFG_ISSUE_WIDTH + iw;
         auto& ibuffer = ibuffers_.at(wid);
@@ -664,6 +666,14 @@ public:
           auto lock_owner = issue_lock_owner_.at(iw);
           if (lock_owner != kLockOpen && lock_owner != w) {
             any_locked_out = true;
+          #if defined(ISSUE_LOCK_HOLDER_PRIORITY) && !defined(VX_CFG_EXT_RTU_ENABLE)
+            // Holder-priority: admissible in the holder's bubbles unless it
+            // starts a sequence or targets the locked FU (RTL VX_scoreboard).
+            bool seq_start = uop_trace->instr_ptr->get_fu_lock() && !uop_trace->instr_ptr->get_fu_unlock();
+            if (!seq_start && fu != issue_lock_fu_.at(iw)) {
+              hp_deferred.set(w);
+            }
+          #endif
             continue;
           }
         #ifdef VX_CFG_EXT_RTU_ENABLE
@@ -680,6 +690,13 @@ public:
         }
       }
 
+    #if defined(ISSUE_LOCK_HOLDER_PRIORITY) && !defined(VX_CFG_EXT_RTU_ENABLE)
+      if (issue_lock_owner_.at(iw) != kLockOpen && !ready_set.test(issue_lock_owner_.at(iw)) && hp_deferred.any()) {
+        for (uint32_t w = 0; w < PER_ISSUE_WARPS; ++w) {
+          if (hp_deferred.test(w)) ready_set.set(w);
+        }
+      }
+    #endif
       if (ready_set.any()) {
         // select one instruction from ready set
         auto w = ibuffer_arbs_.at(iw).grant(ready_set);
@@ -718,7 +735,8 @@ public:
             bool ful = uop_trace->instr_ptr->get_fu_unlock();
             if (fl && !ful) {
               issue_lock_owner_.at(iw) = w;
-            } else if (ful) {
+              issue_lock_fu_.at(iw) = (int)uop_trace->fu_type;
+            } else if (ful && (issue_lock_owner_.at(iw) == kLockOpen || issue_lock_owner_.at(iw) == w)) {
               issue_lock_owner_.at(iw) = kLockOpen;
             }
           }
@@ -1153,6 +1171,7 @@ private:
 
   static constexpr uint32_t kLockOpen = ~0u;
   std::vector<uint32_t> issue_lock_owner_; // [iw] slot-local warp holding the issue lock
+  std::vector<int> issue_lock_fu_;         // [iw] FU of the sequence holding the lock
   std::vector<std::vector<uint32_t>> fu_credits_; // [iw][fu] in-flight dispatch credits
   std::vector<BitVector<>> fu_full_;      // [iw] credits at or past the near-full mark
   std::vector<BitVector<>> fu_full_seen_; // [iw] that flag one cycle later, as issue sees it
