@@ -277,6 +277,25 @@ module VX_local_mem import VX_gpu_pkg::*; #(
             assign dma_bus_if.rsp_data.data[i*WORD_WIDTH +: WORD_WIDTH] =
                 dma_rsp_hold_valid_r ? dma_rsp_hold_data_r[i] : per_bank_rsp_data[i];
         end
+`ifdef DBG_TRACE_LMEM_DMA
+        // Debug: every DMA write (addr/byteen/data) and every DMA read request/response at the bank SRAM boundary.
+        reg [31:0] dbg_rd_addr_r;
+        always @(posedge clk) begin
+            if (~reset) begin
+                if (dma_bus_if.req_valid && dma_bus_if.req_ready && dma_bus_if.req_data.rw)
+                    $write("LMEM_DMA,%0d,%s,WR,addr=0x%0h,be=0x%0h,data=0x%0h\n", $time, INSTANCE_ID,
+                        dma_bus_if.req_data.addr, dma_bus_if.req_data.byteen, dma_bus_if.req_data.data);
+                if (dma_rd_fire) begin
+                    dbg_rd_addr_r <= 32'(dma_bus_if.req_data.addr);
+                    $write("LMEM_DMA,%0d,%s,RD,addr=0x%0h,tag=0x%0h\n", $time, INSTANCE_ID,
+                        dma_bus_if.req_data.addr, dma_bus_if.req_data.tag);
+                end
+                if (dma_rsp_consumed)
+                    $write("LMEM_DMA,%0d,%s,RSP,addr=0x%0h,tag=0x%0h,hold=%0d,data=0x%0h\n", $time, INSTANCE_ID,
+                        dbg_rd_addr_r, dma_bus_if.rsp_data.tag, dma_rsp_hold_valid_r, dma_bus_if.rsp_data.data);
+            end
+        end
+`endif
 
     end else begin : g_no_dma
         assign dma_rsp_buf_ready    = 1'b0;
