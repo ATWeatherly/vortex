@@ -163,6 +163,10 @@ module VX_tcu_unit import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
     assign tcu_perf.wgmma_instrs    = wg_perf.wgmma_instrs;
     assign tcu_perf.wgmma_stalls    = wg_perf.wgmma_stalls;
     `UNUSED_VAR ({wg_perf.uops, wg_perf.exec_stalls, wg_perf.busy})
+    `UNUSED_VAR ({wg_perf.wg_lockstep_stalls, wg_perf.wg_tbuf_stalls, wg_perf.wg_credit_stalls,
+                  wg_perf.wg_commit_stalls, wg_perf.wg_starve, wg_perf.wg_idle})
+    wire [BLOCK_SIZE-1:0] perf_cta_conflict_w;
+    wire [BLOCK_SIZE-1:0] perf_in_expansion_w;
 `endif
 
     VX_tcu_wgmma #(
@@ -172,7 +176,9 @@ module VX_tcu_unit import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
         .clk            (clk),
         .reset          (reset),
     `ifdef PERF_ENABLE
-        .tcu_perf       (wg_perf),
+        .tcu_perf          (wg_perf),
+        .perf_cta_conflict (perf_cta_conflict_w),
+        .perf_in_expansion (perf_in_expansion_w),
     `endif
         .exec_valid     (exec_valid_w),
         .exec_ready     (exec_ready_w),
@@ -191,9 +197,19 @@ module VX_tcu_unit import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
     assign tcu_perf.lmem_reads      = '0;
     assign tcu_perf.wgmma_instrs    = '0;
     assign tcu_perf.wgmma_stalls    = '0;
+    assign tcu_perf.wg_lockstep_stalls = '0;
+    assign tcu_perf.wg_tbuf_stalls     = '0;
+    assign tcu_perf.wg_credit_stalls   = '0;
+    assign tcu_perf.wg_commit_stalls   = '0;
+    assign tcu_perf.wg_starve          = '0;
+    assign tcu_perf.wg_idle            = '0;
 `endif
 
 `endif // VX_CFG_TCU_WGMMA_ENABLE
+
+`ifdef PERF_ENABLE
+    wire [BLOCK_SIZE-1:0] perf_credit_full_w;   // per block, from VX_tcu_core
+`endif
 
     // -----------------------------------------------------------------------
     // VX_tcu_agu — warp-level AGU for TCU_LD instructions.
@@ -256,6 +272,9 @@ module VX_tcu_unit import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
         `endif
             .execute_if (core_execute_if[block_idx]),
             .result_if  (core_result_if[block_idx])
+        `ifdef PERF_ENABLE
+            , .perf_credit_full (perf_credit_full_w[block_idx])
+        `endif
         );
     end
 
@@ -311,6 +330,64 @@ module VX_tcu_unit import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
     assign tcu_perf.uops        = perf_uops_r;
     assign tcu_perf.exec_stalls = perf_stalls_r;
     assign tcu_perf.busy        = perf_busy_r;
+
+`ifdef VX_CFG_TCU_WGMMA_ENABLE
+    // WGMMA stall attribution (block-cycles, block-summed). The four stall causes are mutually exclusive with
+    // priority lockstep > tile buffer > credit > commit, so they sum exactly to wgmma_stalls:
+    //   lockstep: tbuf_ready_eff low because another block holds a different CTA
+    //   tbuf    : tbuf_ready_eff low because the A/B tile buffers have not delivered (incl. block key mismatch)
+    //   credit  : operands ready but the core's header queue / landing-queue credits are full
+    //   commit  : operands ready, credits free, result back-pressure (fedp_done && !result ready, setup pending)
+    // starve / idle: no uop presented while the block is mid-WGMMA-expansion / between instructions.
+    wire [BLOCK_SIZE-1:0] wgp_lock, wgp_tbuf, wgp_cred, wgp_comm, wgp_starve, wgp_idle;
+    for (genvar bi = 0; bi < BLOCK_SIZE; ++bi) begin : g_perf_wg
+        wire is_wg = (core_execute_if[bi].data.op_type == INST_TCU_WGMMA)
+                `ifdef VX_CFG_TCU_SPARSE_ENABLE
+                   || (core_execute_if[bi].data.op_type == INST_TCU_WGMMA_SP)
+                `endif
+                   ;
+        wire stall = core_execute_if[bi].valid && ~core_execute_if[bi].ready && is_wg;
+        assign wgp_lock[bi]   = stall && ~tbuf_ready_eff[bi] && perf_cta_conflict_w[bi];
+        assign wgp_tbuf[bi]   = stall && ~tbuf_ready_eff[bi] && ~perf_cta_conflict_w[bi];
+        assign wgp_cred[bi]   = stall && tbuf_ready_eff[bi] && perf_credit_full_w[bi];
+        assign wgp_comm[bi]   = stall && tbuf_ready_eff[bi] && ~perf_credit_full_w[bi];
+        assign wgp_starve[bi] = ~core_execute_if[bi].valid && perf_in_expansion_w[bi];
+        assign wgp_idle[bi]   = ~core_execute_if[bi].valid && ~perf_in_expansion_w[bi];
+    end
+    wire [`CLOG2(BLOCK_SIZE+1)-1:0] wgp_lock_c, wgp_tbuf_c, wgp_cred_c, wgp_comm_c, wgp_starve_c, wgp_idle_c;
+    `POP_COUNT(wgp_lock_c,   wgp_lock);
+    `POP_COUNT(wgp_tbuf_c,   wgp_tbuf);
+    `POP_COUNT(wgp_cred_c,   wgp_cred);
+    `POP_COUNT(wgp_comm_c,   wgp_comm);
+    `POP_COUNT(wgp_starve_c, wgp_starve);
+    `POP_COUNT(wgp_idle_c,   wgp_idle);
+    reg [PERF_CTR_BITS-1:0] wgp_lock_r, wgp_tbuf_r, wgp_cred_r, wgp_comm_r, wgp_starve_r, wgp_idle_r;
+    always @(posedge clk) begin
+        if (reset) begin
+            wgp_lock_r   <= '0;
+            wgp_tbuf_r   <= '0;
+            wgp_cred_r   <= '0;
+            wgp_comm_r   <= '0;
+            wgp_starve_r <= '0;
+            wgp_idle_r   <= '0;
+        end else begin
+            wgp_lock_r   <= wgp_lock_r   + PERF_CTR_BITS'(wgp_lock_c);
+            wgp_tbuf_r   <= wgp_tbuf_r   + PERF_CTR_BITS'(wgp_tbuf_c);
+            wgp_cred_r   <= wgp_cred_r   + PERF_CTR_BITS'(wgp_cred_c);
+            wgp_comm_r   <= wgp_comm_r   + PERF_CTR_BITS'(wgp_comm_c);
+            wgp_starve_r <= wgp_starve_r + PERF_CTR_BITS'(wgp_starve_c);
+            wgp_idle_r   <= wgp_idle_r   + PERF_CTR_BITS'(wgp_idle_c);
+        end
+    end
+    assign tcu_perf.wg_lockstep_stalls = wgp_lock_r;
+    assign tcu_perf.wg_tbuf_stalls     = wgp_tbuf_r;
+    assign tcu_perf.wg_credit_stalls   = wgp_cred_r;
+    assign tcu_perf.wg_commit_stalls   = wgp_comm_r;
+    assign tcu_perf.wg_starve          = wgp_starve_r;
+    assign tcu_perf.wg_idle            = wgp_idle_r;
+`else
+    `UNUSED_VAR (perf_credit_full_w)
+`endif
 `endif
 
 endmodule

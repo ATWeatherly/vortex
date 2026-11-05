@@ -1274,6 +1274,13 @@ package VX_gpu_pkg;
         logic [PERF_CTR_BITS-1:0] uops;              // block-summed: uops accepted by the TCU cores (WMMA + WGMMA)
         logic [PERF_CTR_BITS-1:0] exec_stalls;       // block-summed: cycles a uop is presented but not accepted
         logic [PERF_CTR_BITS-1:0] busy;              // block-summed: cycles with >= 1 uop in flight (accepted, result not yet out)
+        // WGMMA stall attribution (block-cycles, block-summed; the 4 stall causes sum to wgmma_stalls)
+        logic [PERF_CTR_BITS-1:0] wg_lockstep_stalls; // CTA lockstep gate (another block holds a different CTA)
+        logic [PERF_CTR_BITS-1:0] wg_tbuf_stalls;     // A/B tile buffer not ready (block-accurate, incl. key mismatch)
+        logic [PERF_CTR_BITS-1:0] wg_credit_stalls;   // core header queue / landing-queue credits full
+        logic [PERF_CTR_BITS-1:0] wg_commit_stalls;   // result/commit back-pressure
+        logic [PERF_CTR_BITS-1:0] wg_starve;          // no uop presented, block mid-WGMMA expansion
+        logic [PERF_CTR_BITS-1:0] wg_idle;            // no uop presented, block between instructions
     } tcu_perf_t;
 `endif
 

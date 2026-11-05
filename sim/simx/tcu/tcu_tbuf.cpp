@@ -39,13 +39,15 @@ struct Buffer {
   bool     rsp_seen_ = false;   // a response arrived this cycle
   uint32_t next_tag_ = 0;
   uint64_t reads_ = 0;
+  bool     stream_ = false;     // whole-tile fill: issue back to back, several in flight
 
   bool filling() const {
     return !pending_.empty() || !inflight_.empty();
   }
 
-  void fill(std::vector<TcuTbuf::LmemRead>&& reads) {
+  void fill(std::vector<TcuTbuf::LmemRead>&& reads, bool stream = false) {
     this->invalidate();
+    stream_ = stream;
     for (auto& r : reads) {
       pending_.push_back(std::move(r));
     }
@@ -146,13 +148,13 @@ public:
     uint64_t cycle = SimPlatform::instance().cycles();
     for (uint32_t s = 0; s < kNumBuffers; ++s) {
       auto& b = bufs_.at(s);
-      if (b.pending_.empty() || !b.inflight_.empty()) {
+      if (b.pending_.empty() || (!b.stream_ && !b.inflight_.empty())) {
         continue;
       }
       if (cycle <= b.fill_cycle_) {
         continue;
       }
-      if (s == kBOffset && b.rsp_seen_) {
+      if (s == kBOffset && b.rsp_seen_ && !b.stream_) {
         continue;
       }
       this->issue(s, b);
@@ -218,6 +220,9 @@ void TcuTbuf::fill_a(uint32_t b, std::vector<LmemRead> reads) {
 }
 void TcuTbuf::fill_b(std::vector<LmemRead> reads) {
   impl_->buf(kBOffset).fill(std::move(reads));
+}
+void TcuTbuf::fill_b_stream(std::vector<LmemRead> reads) {
+  impl_->buf(kBOffset).fill(std::move(reads), true);
 }
 
 bool TcuTbuf::filling_a(uint32_t b) const { return impl_->buf(kAOffset + b).filling(); }

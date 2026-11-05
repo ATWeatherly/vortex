@@ -403,6 +403,9 @@ public:
   #ifdef VX_CFG_TCU_WGMMA_ENABLE
     abuf_.fill(abuf_slot_t{});
     bbuf_ = bbuf_slot_t{};
+  #ifdef VX_CFG_TCU_BBUF_TILE
+    tile_armed_ = false;
+  #endif
   #endif
     cur_block_ = 0;
   #ifdef TCU_META_ENABLE
@@ -854,6 +857,28 @@ public:
     if (rep >= 0) {
       auto& r = reqs.at(rep);
       bbuf_slot_t key = this->bbuf_key(r);
+#ifdef VX_CFG_TCU_BBUF_TILE
+      // Whole-tile streaming B buffer (dense block-major): the wgmma's first uop (re)loads every row of its B
+      // tile; a uop is ready once its row has landed (RTL VX_tcu_bbuf tile path).
+      if (!key.kmajor && !key.sparse) {
+        uint64_t b_base = lmem_desc_[r.wid][1].base;
+        if (r.is_first_uop && !(tile_armed_ && tile_armed_base_ == b_base)) {
+          tbuf->fill_b_stream(this->b_tile_reads(r));
+          tile_armed_      = true;
+          tile_armed_base_ = b_base;
+          bbuf_         = bbuf_slot_t{};
+        } else if (!r.is_first_uop) {
+          tile_armed_ = false;
+        }
+        if (tbuf->read_b(key.row) != nullptr) {
+          ++perf_stats_.tbuf_cache_hits;
+        } else {
+          bbuf_ready = false;
+          ++perf_stats_.tbuf_stalls;
+        }
+      } else
+#endif
+      {
       bool resident = bbuf_.valid && bbuf_.same_row(key)
                    && (!key.kmajor || !r.is_first_uop || bbuf_.first_refetched);
       if (resident) {
@@ -872,6 +897,7 @@ public:
                 << std::dec << ", wid=" << r.wid);
           tbuf->fill_b(this->b_refill(r));
         }
+      }
       }
     }
 
@@ -1019,6 +1045,29 @@ public:
                        : (req.is_sparse && kBSparseTwoFetch) ? 2 : 1;
     return split_reads(std::move(lines), num_reads);
   }
+
+#ifdef VX_CFG_TCU_BBUF_TILE
+  // Whole-tile B reads: every bank row of the (k, n) block-major tile from the descriptor base, in row order
+  // (one line read per distinct line; K-outer uops consume rows in this order).
+  std::vector<TcuTbuf::LmemRead> b_tile_reads(const tbuf_req_t& req) {
+    const auto& sd_b = lmem_desc_[req.wid][1];
+    uint32_t n_steps = xtile_n_of(req.cd_nregs) / cfg::tcN;
+    uint32_t k_steps = (2 * cfg::tcK) / kFedpWords;
+    uint32_t blks    = k_steps * n_steps;
+    uint32_t rows    = (blks + kBSubBlocks - 1) / kBSubBlocks;
+    uint32_t row_bytes = kBSubBlocks * kBBlockWords * 4;
+    std::vector<TcuTbuf::LmemRead> reads;
+    uint64_t last = ~uint64_t(0);
+    for (uint32_t i = 0; i < rows; ++i) {
+      uint64_t line = (sd_b.base + uint64_t(i) * row_bytes) & kLineMask;
+      if (line != last) {
+        reads.push_back(TcuTbuf::LmemRead{line});
+        last = line;
+      }
+    }
+    return reads;
+  }
+#endif
 
   // LMEM reads that refill a block's A buffer with the k-stripe of `req`:
   // one per bank row of a block-major stripe, one per row in row-major.
@@ -1580,6 +1629,10 @@ private:
 #ifdef VX_CFG_TCU_WGMMA_ENABLE
   std::array<abuf_slot_t, VX_CFG_NUM_TCU_BLOCKS> abuf_;
   bbuf_slot_t bbuf_;
+#ifdef VX_CFG_TCU_BBUF_TILE
+  bool tile_armed_ = false;   // whole-tile B fill started for the current wgmma
+  uint64_t tile_armed_base_ = 0;
+#endif
 #endif
 };
 

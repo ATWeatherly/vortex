@@ -266,10 +266,21 @@ module VX_tcu_bbuf import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
     wire bank_row_resident = req_wants_kmajor
         ? bank_row_resident_kmajor
         : (req_is_sparse ? bank_row_resident_sparse : bank_row_resident_dense);
+`ifdef VX_CFG_TCU_BBUF_TILE
+    // Whole-tile path (dense block-major only; K-major and sparse keep the slot FSM below).
+    wire use_tile = !req_is_sparse && !req_wants_kmajor;
+    wire tile_quiet;                     // tile path has nothing in flight (defined with the tile logic)
+    wire tile_ready_w;                   // requested tile row is resident
+    wire need_fetch        = req_valid && !use_tile && !bank_row_resident && tile_quiet;
+    wire alloc_en          = need_fetch && !slot_fetching_r;
+
+    assign bbuf_ready = !req_valid || (use_tile ? tile_ready_w : bank_row_resident);
+`else
     wire need_fetch        = req_valid && !bank_row_resident;
     wire alloc_en          = need_fetch && !slot_fetching_r;
 
     assign bbuf_ready = !req_valid || bank_row_resident;
+`endif
     wire fire = req_valid && bbuf_ready;
 
     // -----------------------------------------------------------------------
@@ -352,9 +363,124 @@ module VX_tcu_bbuf import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
         slot_row_major_r ? km_lmem_addr
                          : (in_fetch_b ? slot_b_addr_r : slot_a_addr_r);
 
+`ifdef VX_CFG_TCU_BBUF_TILE
+    // -----------------------------------------------------------------------
+    // Whole-tile streaming B buffer (dense block-major).
+    //   The legacy dense path keeps ONE bank row and refills it synchronously (one LMEM request in flight, the
+    //   tensor core stalled meanwhile), i.e. ~16 serialized refills per NRC-32 wgmma. Here the whole per-wgmma B
+    //   tile (rows 0..rows-1 from the descriptor base, contiguous bank rows) streams in one request per cycle on
+    //   the wgmma's first compute uop, and a uop is ready as soon as its row has landed (K-outer uop order consumes
+    //   rows in fill order). Re-filling on every first uop also gives block-major B a per-wgmma generation: a tile
+    //   rewritten in place is never served stale.
+    //   A new fill starts only after the previous one's responses have drained (tile_os_r == 0). The legacy slot
+    //   FSM (K-major / sparse) and the tile fill never have requests in flight together (tile_quiet / !in_fetch).
+    // -----------------------------------------------------------------------
+    `STATIC_ASSERT (XLEN_RATIO == 1, ("VX_CFG_TCU_BBUF_TILE assumes XLEN 32"))
+    localparam TILE_ROWS = (TCU_WG_K_STEPS * 16) >> TOTAL_SHIFT;   // NRC 32 (N_STEPS 16) is the largest tile
+    localparam TROW_W    = (TILE_ROWS > 1) ? $clog2(TILE_ROWS) : 1;
+    localparam TCNT_W    = $clog2(TILE_ROWS + 1);
+
+    logic                       tile_live_r, tile_pend_r, first_armed_r;
+    logic [BANK_ADDR_WIDTH-1:0] tile_base_r, pend_base_r;
+    logic [TCNT_W-1:0]          tile_rows_r, pend_rows_r, tile_req_ptr_r, tile_rsp_ptr_r, tile_os_r;
+    logic [TILE_ROWS-1:0]       tile_row_valid_r;
+
+    logic [TCNT_W-1:0] rows_for_cd;
+    always_comb begin
+        case (req_cd_nregs)
+            2'd0:    rows_for_cd = TCNT_W'((TCU_WG_K_STEPS * 4)  >> TOTAL_SHIFT);
+            2'd1:    rows_for_cd = TCNT_W'((TCU_WG_K_STEPS * 8)  >> TOTAL_SHIFT);
+            default: rows_for_cd = TCNT_W'((TCU_WG_K_STEPS * 16) >> TOTAL_SHIFT);
+        endcase
+    end
+
+    // new wgmma on the tile path: (re)load the tile once per first compute uop. Re-armed when the representative
+    // first uop's base differs from the armed one: with Q blocks the lowest valid block is the representative,
+    // so a lower block's first uop (another CTA's tile) can replace the one that armed the fill before it fired.
+    logic [BANK_ADDR_WIDTH-1:0] armed_base_r;
+    wire tile_inv   = req_valid && use_tile && req_is_first_uop
+                   && !(first_armed_r && (armed_base_r == desc_b_row_base));
+    wire tile_issue = tile_live_r && !tile_pend_r && (tile_req_ptr_r < tile_rows_r) && !in_fetch;
+    wire tile_fire  = tile_issue && tcu_lmem_if.req_ready;
+    wire tile_rsp   = tcu_lmem_if.rsp_valid && (tile_os_r != '0);
+    assign tile_quiet = (tile_os_r == '0) && !tile_pend_r && (!tile_live_r || (tile_req_ptr_r == tile_rows_r));
+
+    wire [TROW_W-1:0] tile_row = TROW_W'(dense_offset);
+    assign tile_ready_w = tile_live_r && !tile_pend_r && !tile_inv
+                       && (tile_base_r == effective_desc_b_row_base)
+                       && tile_row_valid_r[tile_row];
+
+    always_ff @(posedge clk) begin
+        if (reset) begin
+            tile_live_r      <= 1'b0;
+            tile_pend_r      <= 1'b0;
+            first_armed_r    <= 1'b0;
+            armed_base_r     <= '0;
+            tile_base_r      <= '0;
+            pend_base_r      <= '0;
+            tile_rows_r      <= '0;
+            pend_rows_r      <= '0;
+            tile_req_ptr_r   <= '0;
+            tile_rsp_ptr_r   <= '0;
+            tile_os_r        <= '0;
+            tile_row_valid_r <= '0;
+        end else begin
+            if (tile_fire)
+                tile_req_ptr_r <= tile_req_ptr_r + TCNT_W'(1);
+            if (tile_rsp) begin
+                tile_row_valid_r[TROW_W'(tile_rsp_ptr_r)] <= 1'b1;
+                tile_rsp_ptr_r <= tile_rsp_ptr_r + TCNT_W'(1);
+            end
+            tile_os_r <= tile_os_r + TCNT_W'(tile_fire) - TCNT_W'(tile_rsp);
+            if (fire && req_is_first_uop)
+                first_armed_r <= 1'b0;
+            if (tile_inv) begin
+                tile_pend_r   <= 1'b1;
+                tile_live_r   <= 1'b0;
+                pend_base_r   <= desc_b_row_base;
+                pend_rows_r   <= rows_for_cd;
+                first_armed_r <= 1'b1;
+                armed_base_r  <= desc_b_row_base;
+            end else if (tile_pend_r && (tile_os_r == '0)) begin
+                tile_pend_r      <= 1'b0;
+                tile_live_r      <= 1'b1;
+                tile_base_r      <= pend_base_r;
+                tile_rows_r      <= pend_rows_r;
+                tile_req_ptr_r   <= '0;
+                tile_rsp_ptr_r   <= '0;
+                tile_row_valid_r <= '0;
+            end
+        end
+    end
+
+    wire [B_BUF_WORDS-1:0][31:0] tile_rdata;
+    VX_dp_ram #(
+        .DATAW   (B_BUF_WORDS * 32),
+        .SIZE    (TILE_ROWS),
+        .LUTRAM  (1),
+        .OUT_REG (0),
+        .RDW_MODE("W")
+    ) tile_ram (
+        .clk   (clk),
+        .reset (reset),
+        .read  (1'b1),
+        .write (tile_rsp),
+        .wren  (1'b1),
+        .waddr (TROW_W'(tile_rsp_ptr_r)),
+        .wdata (tcu_lmem_if.rsp_data.data[B_BUF_WORDS*32-1:0]),
+        .raddr (tile_row),
+        .rdata (tile_rdata)
+    );
+
+    assign tcu_lmem_if.req_valid       = can_issue || tile_issue;
+    assign tcu_lmem_if.req_data.rw     = 1'b0;
+    assign tcu_lmem_if.req_data.addr   = tile_issue ? (tile_base_r + BANK_ADDR_WIDTH'(tile_req_ptr_r))
+                                                    : active_lmem_addr;
+`else
     assign tcu_lmem_if.req_valid       = can_issue;
     assign tcu_lmem_if.req_data.rw     = 1'b0;
     assign tcu_lmem_if.req_data.addr   = active_lmem_addr;
+`endif
     assign tcu_lmem_if.req_data.data   = '0;
     assign tcu_lmem_if.req_data.byteen = '0;
     assign tcu_lmem_if.req_data.attr   = '0;
@@ -661,7 +787,19 @@ module VX_tcu_bbuf import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
             end
         end
     end
+`ifdef VX_CFG_TCU_BBUF_TILE
+    logic [TCU_WG_RS2_WIDTH-1:0][`VX_CFG_XLEN-1:0] tile_rs2;
+    always_comb begin
+        tile_rs2 = '0;
+        for (int lane = 0; lane < TCU_WG_RS2_WIDTH; ++lane) begin
+            if (lane < int'(B_BUF_WORDS))
+                tile_rs2[lane] = `VX_CFG_XLEN'(tile_rdata[lane]);
+        end
+    end
+    assign bbuf_rs2_data = use_tile ? tile_rs2 : rs2_mux;
+`else
     assign bbuf_rs2_data = rs2_mux;
+`endif
 
     // -----------------------------------------------------------------------
     // Performance counters

@@ -47,7 +47,9 @@ module VX_tcu_lockstep import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
     input  wire [BLOCK_SIZE-1:0]                 is_last_uop_b,
 
     // gating output
-    output wire [BLOCK_SIZE-1:0]                 cta_conflict
+    output wire [BLOCK_SIZE-1:0]                 cta_conflict,
+    // block b is between the first and last uop of a WGMMA expansion (perf: starve vs idle attribution)
+    output wire [BLOCK_SIZE-1:0]                 in_expansion
 );
     `UNUSED_SPARAM (INSTANCE_ID)
 
@@ -115,6 +117,8 @@ module VX_tcu_lockstep import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
     // cta_conflict held low. If a downstream consumer forgets to AND
     // cta_conflict into the gating ready, this fires.
     // -----------------------------------------------------------------------
+    assign in_expansion = in_expansion_r;
+
     wire [BLOCK_SIZE-1:0] lockstep_violation;
     for (genvar bi = 0; bi < BLOCK_SIZE; ++bi) begin : g_lockstep_violation
         assign lockstep_violation[bi] = exec_fire_b[bi] && is_wgmma_b[bi] && cta_conflict[bi];

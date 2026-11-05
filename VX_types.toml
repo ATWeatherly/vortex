@@ -830,6 +830,19 @@ VX_CSR_MPM_TCU_EXEC_STALLS    = 0xB09  # block-cycles any uop is presented but n
 VX_CSR_MPM_TCU_EXEC_STALLS_H  = 0xB89
 VX_CSR_MPM_TCU_BUSY           = 0xB0A  # block-cycles with >= 1 uop in flight
 VX_CSR_MPM_TCU_BUSY_H         = 0xB8A
+# WGMMA stall attribution (block-cycles, block-summed); LOCKSTEP+TBUF+CREDIT+COMMIT == WGMMA_STALLS
+VX_CSR_MPM_TCU_WG_LOCKSTEP    = 0xB0B  # WGMMA uop held by the CTA lockstep gate
+VX_CSR_MPM_TCU_WG_LOCKSTEP_H  = 0xB8B
+VX_CSR_MPM_TCU_WG_TBUF        = 0xB0C  # WGMMA uop held because the A/B tile buffers are not ready
+VX_CSR_MPM_TCU_WG_TBUF_H      = 0xB8C
+VX_CSR_MPM_TCU_WG_CREDIT      = 0xB0D  # WGMMA uop held by header-queue / landing-queue credits
+VX_CSR_MPM_TCU_WG_CREDIT_H    = 0xB8D
+VX_CSR_MPM_TCU_WG_COMMIT      = 0xB0E  # WGMMA uop held by result/commit back-pressure
+VX_CSR_MPM_TCU_WG_COMMIT_H    = 0xB8E
+VX_CSR_MPM_TCU_WG_STARVE      = 0xB0F  # no uop presented while the block is mid-WGMMA expansion
+VX_CSR_MPM_TCU_WG_STARVE_H    = 0xB8F
+VX_CSR_MPM_TCU_WG_IDLE        = 0xB10  # no uop presented, block between instructions
+VX_CSR_MPM_TCU_WG_IDLE_H      = 0xB90
 
 [csr_mpm_tex]
 # PERF: texture unit (per-core; summed across blocks)

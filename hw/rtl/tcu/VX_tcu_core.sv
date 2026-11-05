@@ -40,6 +40,10 @@ module VX_tcu_core import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
 
     // Outputs
     VX_result_if.master result_if
+`ifdef PERF_ENABLE
+    // stall attribution: admission blocked by the header queue / landing-queue credits
+    , output wire       perf_credit_full
+`endif
 );
     `UNUSED_SPARAM (INSTANCE_ID);
 
@@ -253,6 +257,9 @@ module VX_tcu_core import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
                            && (~fedp_done || result_if.ready)
                            && (~is_wgmma_setup || ~setup_valid_r || result_if.ready)
                            && exe_ready_extra;
+`ifdef PERF_ENABLE
+    assign perf_credit_full = mdata_queue_full || landq_credits_full;
+`endif
 
     wire mdata_push = fedp_enqueue;
 

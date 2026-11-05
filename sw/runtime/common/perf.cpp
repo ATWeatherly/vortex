@@ -769,6 +769,21 @@ extern "C" vx_result_t vx_device_dump_perf(vx_device_h hdevice, FILE *stream) {
       perf_print_core(stream, core_id,
         "tcu_occ: uops=%" PRIu64 ", exec_stalls=%" PRIu64 ", busy=%" PRIu64 ", wgmma_uops=%" PRIu64 ", wgmma_stalls=%" PRIu64,
         uops, exec_stalls, busy, wg_instrs, wg_stalls);
+#ifdef VX_CSR_MPM_TCU_WG_LOCKSTEP
+      {   // WGMMA stall attribution: lockstep + tbuf + credit + commit == wgmma_stalls
+        uint64_t lk = 0, tb = 0, cr = 0, cm = 0, sv = 0, id = 0;
+        CHECK_ERR(vx_device_mpm_query(hdevice, mpm_class, VX_CSR_MPM_TCU_WG_LOCKSTEP, core_id, &lk), { return err; });
+        CHECK_ERR(vx_device_mpm_query(hdevice, mpm_class, VX_CSR_MPM_TCU_WG_TBUF,     core_id, &tb), { return err; });
+        CHECK_ERR(vx_device_mpm_query(hdevice, mpm_class, VX_CSR_MPM_TCU_WG_CREDIT,   core_id, &cr), { return err; });
+        CHECK_ERR(vx_device_mpm_query(hdevice, mpm_class, VX_CSR_MPM_TCU_WG_COMMIT,   core_id, &cm), { return err; });
+        CHECK_ERR(vx_device_mpm_query(hdevice, mpm_class, VX_CSR_MPM_TCU_WG_STARVE,   core_id, &sv), { return err; });
+        CHECK_ERR(vx_device_mpm_query(hdevice, mpm_class, VX_CSR_MPM_TCU_WG_IDLE,     core_id, &id), { return err; });
+        perf_print_core(stream, core_id,
+          "tcu_wg_stall: lockstep=%" PRIu64 ", tbuf=%" PRIu64 ", credit=%" PRIu64 ", commit=%" PRIu64
+          ", starve=%" PRIu64 ", idle=%" PRIu64,
+          lk, tb, cr, cm, sv, id);
+      }
+#endif
 #else
       (void)wg_instrs; (void)wg_stalls; (void)uops; (void)exec_stalls; (void)busy;
 #endif

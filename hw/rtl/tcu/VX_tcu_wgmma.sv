@@ -35,6 +35,9 @@ module VX_tcu_wgmma import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
 
 `ifdef PERF_ENABLE
     output tcu_perf_t                                                    tcu_perf,
+    // per-block stall-attribution observations for VX_tcu_unit
+    output wire [BLOCK_SIZE-1:0]                                         perf_cta_conflict,
+    output wire [BLOCK_SIZE-1:0]                                         perf_in_expansion,
 `endif
 
     // Observation of dispatch path (read-only; does not drive .ready).
@@ -57,6 +60,7 @@ module VX_tcu_wgmma import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
     // set by VX_tcu_uops alongside fu_lock/fu_unlock.
     // -----------------------------------------------------------------------
     wire [BLOCK_SIZE-1:0]                  cta_conflict;
+    wire [BLOCK_SIZE-1:0]                  in_expansion_w;
     wire [BLOCK_SIZE-1:0]                  is_wgmma_b_w;
     wire [BLOCK_SIZE-1:0][NCTA_WIDTH-1:0]  new_cta_b_w;
     wire [BLOCK_SIZE-1:0]                  exec_fire_b_w;
@@ -120,8 +124,15 @@ module VX_tcu_wgmma import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
         .exec_fire_b    (exec_fire_b_w),
         .is_first_uop_b (is_first_uop_b_w),
         .is_last_uop_b  (is_last_uop_b_w),
-        .cta_conflict   (cta_conflict)
+        .cta_conflict   (cta_conflict),
+        .in_expansion   (in_expansion_w)
     );
+`ifdef PERF_ENABLE
+    assign perf_cta_conflict = cta_conflict;
+    assign perf_in_expansion = in_expansion_w;
+`else
+    `UNUSED_VAR (in_expansion_w)
+`endif
 
     // -----------------------------------------------------------------------
     // Per-block uop observation → VX_tcu_tbuf request.
@@ -237,6 +248,12 @@ module VX_tcu_wgmma import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
     assign tcu_perf.uops        = '0; // driven by VX_tcu_unit
     assign tcu_perf.exec_stalls = '0;
     assign tcu_perf.busy        = '0;
+    assign tcu_perf.wg_lockstep_stalls = '0; // stall attribution: driven by VX_tcu_unit
+    assign tcu_perf.wg_tbuf_stalls     = '0;
+    assign tcu_perf.wg_credit_stalls   = '0;
+    assign tcu_perf.wg_commit_stalls   = '0;
+    assign tcu_perf.wg_starve          = '0;
+    assign tcu_perf.wg_idle            = '0;
     assign tcu_perf.wgmma_instrs = wgmma_instrs_ctr_r;
     assign tcu_perf.wgmma_stalls = wgmma_stalls_ctr_r;
 `endif

@@ -55,6 +55,8 @@ public:
   // per-block A buffer.
   void fill_a(uint32_t b, std::vector<LmemRead> reads);
   void fill_b(std::vector<LmemRead> reads);
+  // Whole-tile B fill (VX_CFG_TCU_BBUF_TILE): reads issue back to back, several in flight.
+  void fill_b_stream(std::vector<LmemRead> reads);
 
   bool filling_a(uint32_t b) const;
   bool filling_b() const;
