@@ -266,6 +266,21 @@ Word CsrUnit::get_csr(uint32_t addr, uint32_t wid, uint32_t tid) {
         CSR_READ_64(VX_CSR_MPM_TCU_TBUF_STALLS,     tcu_perf.tbuf_stalls);
         CSR_READ_64(VX_CSR_MPM_TCU_TBUF_CACHE_HITS, tcu_perf.tbuf_cache_hits);
         CSR_READ_64(VX_CSR_MPM_TCU_LMEM_READS,    tcu_perf.lmem_reads);
+      #ifdef VX_CSR_MPM_TCU_UOPS
+        CSR_READ_64(VX_CSR_MPM_TCU_WGMMA_INSTRS,  tcu_perf.wgmma_instrs);
+        CSR_READ_64(VX_CSR_MPM_TCU_WGMMA_STALLS,  tcu_perf.wgmma_stalls);
+        CSR_READ_64(VX_CSR_MPM_TCU_UOPS,          tcu_perf.uops);
+        CSR_READ_64(VX_CSR_MPM_TCU_EXEC_STALLS,   tcu_perf.exec_stalls);
+        CSR_READ_64(VX_CSR_MPM_TCU_BUSY,          tcu_perf.busy);
+      #endif
+      #ifdef VX_CSR_MPM_TCU_WG_LOCKSTEP
+        CSR_READ_64(VX_CSR_MPM_TCU_WG_LOCKSTEP,   tcu_perf.wg_lockstep);
+        CSR_READ_64(VX_CSR_MPM_TCU_WG_TBUF,       tcu_perf.wg_tbuf);
+        CSR_READ_64(VX_CSR_MPM_TCU_WG_CREDIT,     tcu_perf.wg_credit);
+        CSR_READ_64(VX_CSR_MPM_TCU_WG_COMMIT,     tcu_perf.wg_commit);
+        CSR_READ_64(VX_CSR_MPM_TCU_WG_STARVE,     tcu_perf.wg_starve);
+        CSR_READ_64(VX_CSR_MPM_TCU_WG_IDLE,       tcu_perf.wg_idle);
+      #endif
         }
       } break;
     #endif

@@ -63,12 +63,35 @@ public:
 		uint64_t tbuf_stalls = 0;      // cycles a WGMMA uop waits on its A stripe or the B row, summed over buffers
 		uint64_t tbuf_cache_hits = 0;  // cycles the resident B row serves the representative block
 		uint64_t lmem_reads = 0;       // bank-row reads issued by the A and B buffers
+		// Block-summed occupancy / WGMMA stall attribution, same definitions as RTL VX_tcu_unit (MPM class 11):
+		uint64_t uops = 0;             // uops accepted
+		uint64_t exec_stalls = 0;      // block-cycles a uop is presented but not accepted
+		uint64_t busy = 0;             // block-cycles with a uop accepted or a result not yet taken
+		uint64_t wgmma_instrs = 0;     // WGMMA uops accepted
+		uint64_t wgmma_stalls = 0;     // WGMMA uops presented but not accepted (= lockstep+tbuf+credit+commit)
+		uint64_t wg_lockstep = 0;      // ... held by the CTA lockstep gate
+		uint64_t wg_tbuf = 0;          // ... A/B tile buffers not ready (incl. B key mismatch)
+		uint64_t wg_credit = 0;        // ... result channel full (SimX analog of the header/landing credits)
+		uint64_t wg_commit = 0;        // ... a completing result is waiting behind an untaken one
+		uint64_t wg_starve = 0;        // no uop presented, block mid-WGMMA
+		uint64_t wg_idle = 0;          // no uop presented, block between instructions
 
 		PerfStats& operator+=(const PerfStats& rhs) {
 			this->latency          += rhs.latency;
 			this->tbuf_stalls      += rhs.tbuf_stalls;
 			this->tbuf_cache_hits  += rhs.tbuf_cache_hits;
 			this->lmem_reads       += rhs.lmem_reads;
+			this->uops             += rhs.uops;
+			this->exec_stalls      += rhs.exec_stalls;
+			this->busy             += rhs.busy;
+			this->wgmma_instrs     += rhs.wgmma_instrs;
+			this->wgmma_stalls     += rhs.wgmma_stalls;
+			this->wg_lockstep      += rhs.wg_lockstep;
+			this->wg_tbuf          += rhs.wg_tbuf;
+			this->wg_credit        += rhs.wg_credit;
+			this->wg_commit        += rhs.wg_commit;
+			this->wg_starve        += rhs.wg_starve;
+			this->wg_idle          += rhs.wg_idle;
 			return *this;
 		}
 	};

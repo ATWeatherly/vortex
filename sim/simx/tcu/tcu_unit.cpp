@@ -567,6 +567,12 @@ public:
   #endif
 
     uint64_t now = SimPlatform::instance().cycles();
+    // Per-block outcome of this cycle for the perf counters (accounted after the loop).
+    enum : uint8_t { PS_NONE, PS_FIRE, PS_LOCK, PS_TBUF, PS_CREDIT, PS_COMMIT, PS_OTHER };
+    std::array<uint8_t, VX_CFG_NUM_TCU_BLOCKS> pstat;
+    std::array<bool, VX_CFG_NUM_TCU_BLOCKS> pwg;
+    pstat.fill(PS_NONE);
+    pwg.fill(false);
     for (uint32_t b = 0; b < VX_CFG_NUM_TCU_BLOCKS; ++b) {
       // A result completing while an earlier one still waits for the commit
       // side holds admission for the cycle. Results already visible but not
@@ -578,12 +584,23 @@ public:
       auto& input = simobject_->Inputs.at(b);
       if (input.empty())
         continue;
-      if (completing && backed_up) {
-        continue;
-      }
       auto trace = input.peek();
       auto tcu_type = std::get<TcuType>(trace->op_type);
       auto tpuArgs = std::get<IntrTcuArgs>(trace->instr_ptr->get_args());
+      pwg.at(b) = tcu_is_wgmma(tcu_type);
+      pstat.at(b) = PS_OTHER;
+    #ifdef VX_CFG_TCU_WGMMA_ENABLE
+      // RTL priority: lockstep > tile buffer > credit > commit.
+      bool wg_unready = tcu_is_wgmma(tcu_type) && !tpuArgs.is_setup_uop
+                     && !exec_done_.at(b) && !((wgmma_ready >> b) & 1u);
+      if (wg_unready) {
+        pstat.at(b) = ((lock_mask_ >> b) & 1u) ? PS_LOCK : PS_TBUF;
+      }
+    #endif
+      if (completing && backed_up) {
+        if (pstat.at(b) == PS_OTHER) pstat.at(b) = PS_COMMIT;
+        continue;
+      }
 
     #ifdef VX_CFG_TCU_WGMMA_ENABLE
       // A WGMMA compute uop fires once its tile-buffer operands are ready.
@@ -698,7 +715,10 @@ public:
         }
       }
     #endif
-      if (simobject_->Outputs.at(b).try_send(trace, delay)) {
+      if (!simobject_->Outputs.at(b).try_send(trace, delay)) {
+        pstat.at(b) = PS_CREDIT;
+      } else {
+        pstat.at(b) = PS_FIRE;
         due.push_back(now + delay);
         exec_done_.at(b) = false;
       #ifdef TCU_META_ENABLE
@@ -709,6 +729,34 @@ public:
       #endif
         DT(3, simobject_->name() << " execute: op=" << tcu_type << ", " << *trace);
         input.pop();
+      }
+    }
+
+    for (uint32_t b = 0; b < VX_CFG_NUM_TCU_BLOCKS; ++b) {
+      auto st = pstat.at(b);
+      bool fire = (st == PS_FIRE);
+      if (fire || !simobject_->Outputs.at(b).empty()) ++perf_stats_.busy;
+      if (st == PS_NONE) {
+      #ifdef VX_CFG_TCU_WGMMA_ENABLE
+        if (in_wgmma_.at(b)) ++perf_stats_.wg_starve; else ++perf_stats_.wg_idle;
+      #else
+        ++perf_stats_.wg_idle;
+      #endif
+        continue;
+      }
+      if (fire) {
+        ++perf_stats_.uops;
+        if (pwg.at(b)) ++perf_stats_.wgmma_instrs;
+        continue;
+      }
+      ++perf_stats_.exec_stalls;
+      if (!pwg.at(b)) continue;
+      ++perf_stats_.wgmma_stalls;
+      switch (st) {
+      case PS_LOCK:   ++perf_stats_.wg_lockstep; break;
+      case PS_TBUF:   ++perf_stats_.wg_tbuf; break;
+      case PS_CREDIT: ++perf_stats_.wg_credit; break;
+      default:        ++perf_stats_.wg_commit; break;   // commit back-pressure / setup pending
       }
     }
 
@@ -795,6 +843,7 @@ public:
 
     std::array<tbuf_req_t, VX_CFG_NUM_TCU_BLOCKS> reqs;
     int32_t rep = -1;
+    lock_mask_ = 0;
     for (uint32_t b = 0; b < VX_CFG_NUM_TCU_BLOCKS; ++b) {
       auto& input = simobject_->Inputs.at(b);
       if (input.empty() || exec_done_.at(b)) {
@@ -820,6 +869,7 @@ public:
         }
       }
       if (cta_conflict) {
+        lock_mask_ |= (1u << b);
         continue;
       }
 
@@ -1617,6 +1667,7 @@ private:
   std::array<std::vector<uint64_t>, VX_CFG_NUM_TCU_BLOCKS> result_due_;
   // True while a block is between its first and last WGMMA uop.
   std::array<bool, VX_CFG_NUM_TCU_BLOCKS> in_wgmma_;
+  uint32_t lock_mask_ = 0;   // blocks held by the CTA lockstep gate this cycle (perf attribution)
   // Current block index, set before delegating to wgmma().
   uint32_t cur_block_ = 0;
   // A-descriptor base for the current wgmma(); distinguishes A from B in load_lmem_word.
