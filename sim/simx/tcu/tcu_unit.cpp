@@ -402,9 +402,10 @@ public:
     cta_owner_a_.fill(-1);
   #ifdef VX_CFG_TCU_WGMMA_ENABLE
     abuf_.fill(abuf_slot_t{});
-    bbuf_ = bbuf_slot_t{};
+    bbuf_.fill(bbuf_slot_t{});
   #ifdef VX_CFG_TCU_BBUF_TILE
-    tile_armed_ = false;
+    tile_armed_.fill(false);
+    tile_armed_base_.fill(0);
   #endif
   #endif
     cur_block_ = 0;
@@ -771,8 +772,13 @@ public:
           tbuf->invalidate_a(b);
         }
       }
-      bbuf_ = bbuf_slot_t{};
-      tbuf->invalidate_b();
+      // Shared bbuf: any block's setup drops the row. Per-block: only the setting-up block's own bbuf.
+      for (uint32_t i = 0; i < TcuTbuf::NUM_BBUFS; ++i) {
+        if (TcuTbuf::NUM_BBUFS == 1 || ((setup_fired >> i) & 1u)) {
+          bbuf_.at(i) = bbuf_slot_t{};
+          tbuf->invalidate_b(i);
+        }
+      }
     }
   #endif
   }
@@ -902,50 +908,59 @@ public:
       }
     }
 
-    // Shared B buffer, keyed by the lowest block with a uop.
-    bool bbuf_ready = true;
-    if (rep >= 0) {
-      auto& r = reqs.at(rep);
+    // B buffers. Shared (NUM_BBUFS == 1): one bbuf keyed by the lowest block with a uop (rep), the other
+    // blocks gated by the key match below. Per-block (VX_CFG_TCU_BBUF_PER_BLOCK): bbuf i serves block i only.
+    std::array<bool, TcuTbuf::NUM_BBUFS> bbuf_ready;
+    std::array<int32_t, TcuTbuf::NUM_BBUFS> bbuf_owner;
+    for (uint32_t i = 0; i < TcuTbuf::NUM_BBUFS; ++i) {
+      bbuf_ready.at(i) = true;
+      int32_t owner = (TcuTbuf::NUM_BBUFS == 1) ? rep : (reqs.at(i).valid ? (int32_t)i : -1);
+      bbuf_owner.at(i) = owner;
+      if (owner < 0) {
+        continue;
+      }
+      auto& r = reqs.at(owner);
+      auto& slot = bbuf_.at(i);
       bbuf_slot_t key = this->bbuf_key(r);
 #ifdef VX_CFG_TCU_BBUF_TILE
       // Whole-tile streaming B buffer (dense block-major): the wgmma's first uop (re)loads every row of its B
       // tile; a uop is ready once its row has landed (RTL VX_tcu_bbuf tile path).
       if (!key.kmajor && !key.sparse) {
         uint64_t b_base = lmem_desc_[r.wid][1].base;
-        if (r.is_first_uop && !(tile_armed_ && tile_armed_base_ == b_base)) {
-          tbuf->fill_b_stream(this->b_tile_reads(r));
-          tile_armed_      = true;
-          tile_armed_base_ = b_base;
-          bbuf_         = bbuf_slot_t{};
+        if (r.is_first_uop && !(tile_armed_.at(i) && tile_armed_base_.at(i) == b_base)) {
+          tbuf->fill_b_stream(i, this->b_tile_reads(r));
+          tile_armed_.at(i)      = true;
+          tile_armed_base_.at(i) = b_base;
+          slot = bbuf_slot_t{};
         } else if (!r.is_first_uop) {
-          tile_armed_ = false;
+          tile_armed_.at(i) = false;
         }
-        if (tbuf->read_b(key.row) != nullptr) {
+        if (tbuf->read_b(i, key.row) != nullptr) {
           ++perf_stats_.tbuf_cache_hits;
         } else {
-          bbuf_ready = false;
+          bbuf_ready.at(i) = false;
           ++perf_stats_.tbuf_stalls;
         }
       } else
 #endif
       {
-      bool resident = bbuf_.valid && bbuf_.same_row(key)
-                   && (!key.kmajor || !r.is_first_uop || bbuf_.first_refetched);
+      bool resident = slot.valid && slot.same_row(key)
+                   && (!key.kmajor || !r.is_first_uop || slot.first_refetched);
       if (resident) {
         ++perf_stats_.tbuf_cache_hits;
       } else {
-        bbuf_ready = false;
+        bbuf_ready.at(i) = false;
         ++perf_stats_.tbuf_stalls;
-        if (!bbuf_.fetching) {
-          bool first_refetched = bbuf_.first_refetched;
-          bbuf_ = key;
-          bbuf_.fetching = true;
-          bbuf_.first_refetched = first_refetched;
-          DT(3, simobject_->name() << " bbuf: alloc desc_b=0x" << std::hex << r.desc_b
+        if (!slot.fetching) {
+          bool first_refetched = slot.first_refetched;
+          slot = key;
+          slot.fetching = true;
+          slot.first_refetched = first_refetched;
+          DT(3, simobject_->name() << " bbuf" << i << ": alloc desc_b=0x" << std::hex << r.desc_b
                 << std::dec << ", sparse=" << r.is_sparse << ", step_k=" << r.step_k
                 << ", step_n=" << r.step_n << ", row=0x" << std::hex << key.row
                 << std::dec << ", wid=" << r.wid);
-          tbuf->fill_b(this->b_refill(r));
+          tbuf->fill_b(i, this->b_refill(r));
         }
       }
       }
@@ -981,25 +996,33 @@ public:
       if (!r.valid) {
         continue;
       }
-      auto& p = reqs.at(rep);
-      bool key_match = ((r.desc_b & 0xffff) == (p.desc_b & 0xffff))
-                    && r.step_k == p.step_k
-                    && r.step_n == p.step_n
-                    && r.cd_nregs == p.cd_nregs;
-      if (abuf_ready.at(b) && bbuf_ready && key_match) {
+      // Shared bbuf: a block whose key differs from the representative's waits (RTL block_key_match).
+      bool key_match = true;
+      if (TcuTbuf::NUM_BBUFS == 1) {
+        auto& p = reqs.at(rep);
+        key_match = ((r.desc_b & 0xffff) == (p.desc_b & 0xffff))
+                 && r.step_k == p.step_k
+                 && r.step_n == p.step_n
+                 && r.cd_nregs == p.cd_nregs;
+      }
+      if (abuf_ready.at(b) && bbuf_ready.at(TcuTbuf::bbuf_of(b)) && key_match) {
         ready_mask |= (1u << b);
       }
     }
 
     // Buffer state for the next cycle.
-    if (bbuf_.fetching && !tbuf->filling_b()) {
-      bbuf_.fetching = false;
-      bbuf_.valid = true;
-      if (rep >= 0 && reqs.at(rep).is_first_uop) {
-        bbuf_.first_refetched = true;
+    for (uint32_t i = 0; i < TcuTbuf::NUM_BBUFS; ++i) {
+      auto& slot = bbuf_.at(i);
+      int32_t owner = bbuf_owner.at(i);
+      if (slot.fetching && !tbuf->filling_b(i)) {
+        slot.fetching = false;
+        slot.valid = true;
+        if (owner >= 0 && reqs.at(owner).is_first_uop) {
+          slot.first_refetched = true;
+        }
+      } else if (owner >= 0 && bbuf_ready.at(i) && !reqs.at(owner).is_first_uop) {
+        slot.first_refetched = false;
       }
-    } else if (rep >= 0 && bbuf_ready && !reqs.at(rep).is_first_uop) {
-      bbuf_.first_refetched = false;
     }
     for (uint32_t b = 0; b < VX_CFG_NUM_TCU_BLOCKS; ++b) {
       auto& r = reqs.at(b);
@@ -1602,7 +1625,8 @@ private:
       return gather_word([&](uint64_t addr) { return tbuf->read_a(b, addr); },
                          desc, row, col, fmt_s, pack_along_row, false, cur_is_sparse_);
     }
-    return gather_word([&](uint64_t addr) { return tbuf->read_b(addr); },
+    uint32_t bi = TcuTbuf::bbuf_of(cur_block_);
+    return gather_word([&](uint64_t addr) { return tbuf->read_b(bi, addr); },
                        desc, row, col, fmt_s, pack_along_row, sparse_b, false);
   }
 
@@ -1679,10 +1703,10 @@ private:
   std::array<int32_t, VX_CFG_NUM_TCU_BLOCKS> cta_owner_a_{};
 #ifdef VX_CFG_TCU_WGMMA_ENABLE
   std::array<abuf_slot_t, VX_CFG_NUM_TCU_BLOCKS> abuf_;
-  bbuf_slot_t bbuf_;
+  std::array<bbuf_slot_t, TcuTbuf::NUM_BBUFS> bbuf_;   // one shared, or one per block (VX_CFG_TCU_BBUF_PER_BLOCK)
 #ifdef VX_CFG_TCU_BBUF_TILE
-  bool tile_armed_ = false;   // whole-tile B fill started for the current wgmma
-  uint64_t tile_armed_base_ = 0;
+  std::array<bool, TcuTbuf::NUM_BBUFS> tile_armed_{};   // whole-tile B fill started for the current wgmma
+  std::array<uint64_t, TcuTbuf::NUM_BBUFS> tile_armed_base_{};
 #endif
 #endif
 };

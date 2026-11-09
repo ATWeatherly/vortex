@@ -42,6 +42,15 @@ public:
   // adjacent LMEM DMA channels.
   static constexpr uint32_t LMEM_PORTS = LocalMem::DMA_PORTS;
 
+  // B buffers: one shared by all blocks, or one per block (VX_CFG_TCU_BBUF_PER_BLOCK, RTL VX_tcu_tbuf g_bbufs).
+#ifdef VX_CFG_TCU_BBUF_PER_BLOCK
+  static constexpr uint32_t NUM_BBUFS = VX_CFG_NUM_TCU_BLOCKS;
+#else
+  static constexpr uint32_t NUM_BBUFS = 1;
+#endif
+  // The B buffer serving block `b`.
+  static constexpr uint32_t bbuf_of(uint32_t b) { return (NUM_BBUFS == 1) ? 0 : b; }
+
   // Lines of one bank-row read.
   using LmemRead = std::vector<uint64_t>;
 
@@ -52,21 +61,21 @@ public:
   virtual ~TcuTbuf();
 
   // Drop the buffer's contents and fetch `reads` in order. `b` indexes the
-  // per-block A buffer.
+  // per-block A buffer, `i` the B buffer (0 when shared).
   void fill_a(uint32_t b, std::vector<LmemRead> reads);
-  void fill_b(std::vector<LmemRead> reads);
+  void fill_b(uint32_t i, std::vector<LmemRead> reads);
   // Whole-tile B fill (VX_CFG_TCU_BBUF_TILE): reads issue back to back, several in flight.
-  void fill_b_stream(std::vector<LmemRead> reads);
+  void fill_b_stream(uint32_t i, std::vector<LmemRead> reads);
 
   bool filling_a(uint32_t b) const;
-  bool filling_b() const;
+  bool filling_b(uint32_t i) const;
 
   std::shared_ptr<mem_block_t> read_a(uint32_t b, uint64_t line_addr) const;
-  std::shared_ptr<mem_block_t> read_b(uint64_t line_addr) const;
+  std::shared_ptr<mem_block_t> read_b(uint32_t i, uint64_t line_addr) const;
 
   // Drop the buffer's contents and abandon a fill in progress.
   void invalidate_a(uint32_t b);
-  void invalidate_b();
+  void invalidate_b(uint32_t i);
 
   // Bank-row reads issued since the last reset (perf counter).
   uint64_t reads() const;

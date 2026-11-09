@@ -66,8 +66,16 @@ module VX_tcu_tbuf import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
 );
     `UNUSED_SPARAM (INSTANCE_ID)
 
+    // VX_CFG_TCU_BBUF_PER_BLOCK: one VX_tcu_bbuf per tensor block instead of the TB-shared one. Blocks on
+    // different B tiles (CTA DXA stages with KP > 1, warps of a group drifting apart) then keep their own
+    // resident row / tile instead of evicting each other's and serializing on the representative's key.
+`ifdef VX_CFG_TCU_BBUF_PER_BLOCK
+    localparam NUM_BBUFS        = BLOCK_SIZE;
+`else
+    localparam NUM_BBUFS        = 1;
+`endif
     localparam BBUF_IDX         = BLOCK_SIZE;
-    localparam NUM_LMEM_MASTERS = BLOCK_SIZE + 1;
+    localparam NUM_LMEM_MASTERS = BLOCK_SIZE + NUM_BBUFS;
 
     // -----------------------------------------------------------------------
     // LMEM master fan-in interface array (BLOCK_SIZE abufs + 1 bbuf)
@@ -124,6 +132,53 @@ module VX_tcu_tbuf import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
         );
     end
 
+`ifdef PERF_ENABLE
+    wire [NUM_BBUFS-1:0][PERF_CTR_BITS-1:0] bbuf_stalls_w;
+    wire [NUM_BBUFS-1:0][PERF_CTR_BITS-1:0] bbuf_cache_hits_w;
+    wire [NUM_BBUFS-1:0][PERF_CTR_BITS-1:0] bbuf_lmem_reads_w;
+`endif
+    // Per-block B operand bus / ready (PER_BLOCK: block b's own bbuf; shared: the one bbuf replicated).
+    wire [BLOCK_SIZE-1:0][TCU_WG_RS2_WIDTH-1:0][`VX_CFG_XLEN-1:0] bbuf_rs2_data_b;
+    wire [BLOCK_SIZE-1:0]                                         bbuf_ready_b;
+
+`ifdef VX_CFG_TCU_BBUF_PER_BLOCK
+    // -----------------------------------------------------------------------
+    // Per-block bbufs: block b's own uop stream drives bbuf b; no representative, no key gate.
+    // -----------------------------------------------------------------------
+    for (genvar b = 0; b < BLOCK_SIZE; ++b) begin : g_bbufs
+        VX_tcu_bbuf #(
+            .INSTANCE_ID    (`SFORMATF(("%s-bbuf%0d", INSTANCE_ID, b))),
+            .NUM_BANKS      (NUM_BANKS),
+            .BANK_ADDR_WIDTH(BANK_ADDR_WIDTH)
+        ) bbuf (
+            .clk              (clk),
+            .reset            (reset),
+        `ifdef PERF_ENABLE
+            .bbuf_stalls      (bbuf_stalls_w[b]),
+            .bbuf_cache_hits  (bbuf_cache_hits_w[b]),
+            .lmem_reads       (bbuf_lmem_reads_w[b]),
+        `endif
+            .req_valid        (req[b].valid),
+            .req_setup        (req[b].setup_fire),
+            .req_is_first_uop (req[b].is_first_uop),
+        `ifdef VX_CFG_TCU_SPARSE_ENABLE
+            .req_is_sparse    (req[b].is_sparse),
+        `else
+            .req_is_sparse    (1'b0),
+        `endif
+            .req_step_m       (req[b].step_m),
+            .req_step_k       (req[b].step_k),
+            .req_step_n       (req[b].step_n),
+            .req_cd_nregs     (req[b].cd_nregs),
+            .req_cta_id       (req[b].cta_id),
+            .req_desc_b       (req[b].desc_b),
+            .req_uuid         (req[b].uuid),
+            .tcu_lmem_if      (lmem_masters[BBUF_IDX + b]),
+            .bbuf_ready       (bbuf_ready_b[b]),
+            .bbuf_rs2_data    (bbuf_rs2_data_b[b])
+        );
+    end
+`else
     // -----------------------------------------------------------------------
     // TB-shared bbuf — first-active-block representative.
     //
@@ -134,12 +189,6 @@ module VX_tcu_tbuf import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
 
     wire                                              bbuf_ready_w;
     wire [TCU_WG_RS2_WIDTH-1:0][`VX_CFG_XLEN-1:0]     bbuf_rs2_data_w;
-
-`ifdef PERF_ENABLE
-    wire [PERF_CTR_BITS-1:0] bbuf_stalls_w;
-    wire [PERF_CTR_BITS-1:0] bbuf_cache_hits_w;
-    wire [PERF_CTR_BITS-1:0] bbuf_lmem_reads_w;
-`endif
 
     wire                          bbuf_req_valid;
     wire                          bbuf_req_setup;
@@ -247,9 +296,9 @@ module VX_tcu_tbuf import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
         .clk              (clk),
         .reset            (reset),
     `ifdef PERF_ENABLE
-        .bbuf_stalls      (bbuf_stalls_w),
-        .bbuf_cache_hits  (bbuf_cache_hits_w),
-        .lmem_reads       (bbuf_lmem_reads_w),
+        .bbuf_stalls      (bbuf_stalls_w[0]),
+        .bbuf_cache_hits  (bbuf_cache_hits_w[0]),
+        .lmem_reads       (bbuf_lmem_reads_w[0]),
     `endif
         .req_valid        (bbuf_req_valid),
         .req_setup        (bbuf_req_setup),
@@ -266,6 +315,30 @@ module VX_tcu_tbuf import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
         .bbuf_ready       (bbuf_ready_w),
         .bbuf_rs2_data    (bbuf_rs2_data_w)
     );
+
+    // -----------------------------------------------------------------------
+    // Per-block bbuf-key match.
+    //
+    // Gates tbuf_ready for any block whose (desc_b, step_k, step_n, cd_nregs)
+    // key differs from the representative's. Inactive blocks always match.
+    // When all active blocks share the key (normal case), the gate is a no-op;
+    // otherwise execution serializes.
+    // -----------------------------------------------------------------------
+
+    wire [BLOCK_SIZE-1:0] block_key_match;
+    for (genvar b = 0; b < BLOCK_SIZE; ++b) begin : g_block_match
+        wire same_desc_b = (req[b].desc_b[15:0] == bbuf_req_desc_b[15:0]);
+        wire same_step_k = (req[b].step_k       == bbuf_req_step_k);
+        wire same_step_n = (req[b].step_n       == bbuf_req_step_n);
+        wire same_cd_n   = (req[b].cd_nregs     == bbuf_req_cd_nregs);
+        // Inactive blocks always "match" (they don't consume bbuf data).
+        // Active blocks must match the representative's key.
+        assign block_key_match[b] = !req[b].valid
+                                  || (same_desc_b && same_step_k && same_step_n && same_cd_n);
+        assign bbuf_rs2_data_b[b] = bbuf_rs2_data_w;
+        assign bbuf_ready_b[b]    = bbuf_ready_w && block_key_match[b];
+    end
+`endif // VX_CFG_TCU_BBUF_PER_BLOCK
 
     // -----------------------------------------------------------------------
     // LMEM port arbitration (NUM_LMEM_MASTERS → 1)
@@ -296,37 +369,16 @@ module VX_tcu_tbuf import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
     `ASSIGN_VX_MEM_BUS_IF (tcu_lmem_if, lmem_arb_out_if[0]);
 
     // -----------------------------------------------------------------------
-    // Per-block bbuf-key match.
-    //
-    // Gates tbuf_ready for any block whose (desc_b, step_k, step_n, cd_nregs)
-    // key differs from the representative's. Inactive blocks always match.
-    // When all active blocks share the key (normal case), the gate is a no-op;
-    // otherwise execution serializes.
-    // -----------------------------------------------------------------------
-
-    wire [BLOCK_SIZE-1:0] block_key_match;
-    for (genvar b = 0; b < BLOCK_SIZE; ++b) begin : g_block_match
-        wire same_desc_b = (req[b].desc_b[15:0] == bbuf_req_desc_b[15:0]);
-        wire same_step_k = (req[b].step_k       == bbuf_req_step_k);
-        wire same_step_n = (req[b].step_n       == bbuf_req_step_n);
-        wire same_cd_n   = (req[b].cd_nregs     == bbuf_req_cd_nregs);
-        // Inactive blocks always "match" (they don't consume bbuf data).
-        // Active blocks must match the representative's key.
-        assign block_key_match[b] = !req[b].valid
-                                  || (same_desc_b && same_step_k && same_step_n && same_cd_n);
-    end
-
-    // -----------------------------------------------------------------------
     // Per-block operand outputs.
     //   rs1_data: per-block abuf
-    //   rs2_data: broadcast from shared bbuf
-    //   ready:    abuf_ready[b] AND bbuf_ready AND key_match[b]
+    //   rs2_data: block's bbuf (PER_BLOCK) or the shared bbuf broadcast
+    //   ready:    abuf_ready[b] AND bbuf_ready_b[b] (shared: includes the key gate)
     // -----------------------------------------------------------------------
 
     for (genvar b = 0; b < BLOCK_SIZE; ++b) begin : g_outs
         assign tbuf_rs1_data[b] = abuf_rs1_data_w[b];
-        assign tbuf_rs2_data[b] = bbuf_rs2_data_w;
-        assign tbuf_ready[b]    = abuf_ready_w[b] && bbuf_ready_w && block_key_match[b];
+        assign tbuf_rs2_data[b] = bbuf_rs2_data_b[b];
+        assign tbuf_ready[b]    = abuf_ready_w[b] && bbuf_ready_b[b];
     end
 
     // -----------------------------------------------------------------------
@@ -336,16 +388,23 @@ module VX_tcu_tbuf import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
 `ifdef PERF_ENABLE
     logic [PERF_CTR_BITS-1:0] stalls_sum;
     logic [PERF_CTR_BITS-1:0] reads_sum;
+    logic [PERF_CTR_BITS-1:0] hits_sum;
     always_comb begin
-        stalls_sum = bbuf_stalls_w;
-        reads_sum  = bbuf_lmem_reads_w;
+        stalls_sum = '0;
+        reads_sum  = '0;
+        hits_sum   = '0;
+        for (int bi = 0; bi < NUM_BBUFS; bi++) begin
+            stalls_sum += bbuf_stalls_w[bi];
+            reads_sum  += bbuf_lmem_reads_w[bi];
+            hits_sum   += bbuf_cache_hits_w[bi];
+        end
         for (int bi = 0; bi < BLOCK_SIZE; bi++) begin
             stalls_sum += abuf_stalls_w[bi];
             reads_sum  += abuf_lmem_reads_w[bi];
         end
     end
     assign tbuf_stalls     = stalls_sum;
-    assign tbuf_cache_hits = bbuf_cache_hits_w;  // cycles of resident bbuf reuse
+    assign tbuf_cache_hits = hits_sum;  // cycles of resident bbuf reuse (summed over bbufs)
     assign lmem_reads      = reads_sum;
 `endif
 

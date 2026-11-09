@@ -1494,7 +1494,11 @@ package VX_gpu_pkg;
     // VX_tcu_sp_meta SRAM via TCU_LD ahead of the MMA dispatch.)
     localparam TCU_LMEM_ATTR_W = 1;
     localparam TCU_LMEM_BLK_TAG_W = UUID_WIDTH + 1;
+`ifdef VX_CFG_TCU_BBUF_PER_BLOCK
+    localparam TCU_LMEM_NUM_MASTERS = 2 * `VX_CFG_NUM_TCU_BLOCKS;   // per-block abufs + per-block bbufs
+`else
     localparam TCU_LMEM_NUM_MASTERS = `VX_CFG_NUM_TCU_BLOCKS + 1;
+`endif
     localparam TCU_LMEM_TAG_W = TCU_LMEM_BLK_TAG_W + `ARB_SEL_BITS(TCU_LMEM_NUM_MASTERS, 1);
 
     // LMEM DMA port parameters. (The raster FWD needs no LMEM DMA agent —
