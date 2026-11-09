@@ -80,6 +80,9 @@ public:
     uint64_t scb_warps = 0;
     uint64_t scb_cause[8] = {0}; // alu lsu sfu fpu tcu xreg credit lag
     uint64_t bar_warps = 0;
+    // FU-lock holder attribution (RTL VX_scoreboard LK_*): held issued bp lost busy_tcu busy_credit busy_other empty other.
+    // SimX has no issue-slot lock model: reported as 0 (RTL-only counters).
+    uint64_t lk_slots[9] = {0};
   };
 
   std::vector<SimChannel<MemReq>> icache_req_out;

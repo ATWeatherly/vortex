@@ -24,6 +24,7 @@ module VX_scoreboard import VX_gpu_pkg::*; #(
     output reg [PERF_CTR_BITS-1:0] perf_stalls,
     output wire [SCB_SLOTS-1:0][PERF_CTR_BITS-1:0]  perf_slots,
     output wire [SCB_CAUSES-1:0][PERF_CTR_BITS-1:0] perf_causes,
+    output wire [LK_SLOTS-1:0][PERF_CTR_BITS-1:0]   perf_lk,
     output wire [PERF_CTR_BITS-1:0] perf_warps,
 `endif
 
@@ -44,12 +45,21 @@ module VX_scoreboard import VX_gpu_pkg::*; #(
     // Per-FU dispatch credits: spent at issue, reclaimed on FU accept, so a
     // credit covers ops still in operand collection (not yet at the queue).
     wire [NUM_EX_UNITS-1:0] fu_issue;
-    wire [NUM_EX_UNITS-1:0] fu_goingfull;
+    wire [NUM_EX_UNITS-1:0] fu_goingfull;     // credit threshold for plain instructions
+    wire [NUM_EX_UNITS-1:0] fu_goingfull_seq; // credit threshold for FU-sequence uops (fu_lock .. fu_unlock)
 
     // going-full (not full): a 1-slot guard band keeps outstanding <= queue
     // depth despite the registered suppress lag, so an issued op never stalls
     // in the shared operand-collection path and HoL-blocks another FU.
+    //
+    // -DDISPATCH_SEQ_CREDITS=<n>: lock-aware credits. Plain instructions (and WMMA uops,
+    // which lock and unlock in the same uop) keep a guard band of <n> outstanding ops, so
+    // their interleaving is unchanged when VX_CFG_DISPATCH_QUEUE_SIZE is raised; the uops
+    // of an FU sequence (a WGMMA burst, one warp holding the issue lock) may fill the whole
+    // queue. The 3-credit window of a 4-deep queue is shorter than the issue -> dispatch-accept
+    // round trip (~7 cycles), which capped a WGMMA burst at ~0.43 uop/cycle (TCU "starve").
     for (genvar e = 0; e < NUM_EX_UNITS; ++e) begin : g_fu_goingfull
+        wire [`CLOG2(DISPATCH_QSIZE+1)-1:0] fu_size;
         VX_pending_size #(
             .SIZE (DISPATCH_QSIZE)
         ) fu_pending (
@@ -60,9 +70,15 @@ module VX_scoreboard import VX_gpu_pkg::*; #(
             `UNUSED_PIN (empty),
             `UNUSED_PIN (alm_empty),
             `UNUSED_PIN (full),
-            .alm_full   (fu_goingfull[e]),
-            `UNUSED_PIN (size)
+            .alm_full   (fu_goingfull_seq[e]),
+            .size       (fu_size)
         );
+    `ifdef DISPATCH_SEQ_CREDITS
+        assign fu_goingfull[e] = (fu_size >= `CLOG2(DISPATCH_QSIZE+1)'(`DISPATCH_SEQ_CREDITS));
+    `else
+        assign fu_goingfull[e] = fu_goingfull_seq[e];
+        `UNUSED_VAR (fu_size)
+    `endif
     end
 
     VX_ibuffer_if staging_if [PER_ISSUE_WARPS]();
@@ -88,6 +104,7 @@ module VX_scoreboard import VX_gpu_pkg::*; #(
 `ifndef PERF_STALL_ATTRIB
     assign perf_slots  = '0;
     assign perf_causes = '0;
+    assign perf_lk     = '0;
     assign perf_warps  = '0;
 `endif
 `endif
@@ -208,8 +225,16 @@ module VX_scoreboard import VX_gpu_pkg::*; #(
         wire fire_busy = fire_ibf ? (ibf_busy || ibf_xbusy || ibf_rsv)
                                   : (stg_busy || stg_xbusy || stg_rsv);
 
+    `ifdef DISPATCH_SEQ_CREDITS
+        // a uop of an FU sequence locks, stays locked, or unlocks; a plain instruction does both at once
+        wire ibf_seq = ~(ibuffer_if[w].data.fu_lock && ibuffer_if[w].data.fu_unlock);
+        wire stg_seq = ~(staging_if[w].data.fu_lock && staging_if[w].data.fu_unlock);
+        wire ibf_goingfull = ibf_seq ? fu_goingfull_seq[ibuffer_if[w].data.ex_type] : fu_goingfull[ibuffer_if[w].data.ex_type];
+        wire stg_goingfull = stg_seq ? fu_goingfull_seq[staging_if[w].data.ex_type] : fu_goingfull[staging_if[w].data.ex_type];
+    `else
         wire ibf_goingfull = fu_goingfull[ibuffer_if[w].data.ex_type];
         wire stg_goingfull = fu_goingfull[staging_if[w].data.ex_type];
+    `endif
 
         wire hold_ready = ~hold_busy && ~(hold_ibf ? ibf_goingfull : stg_goingfull);
         wire fire_ready = ~fire_busy && ~(fire_ibf ? ibf_goingfull : stg_goingfull);
@@ -525,8 +550,45 @@ module VX_scoreboard import VX_gpu_pkg::*; #(
         end
     end
 
+    // FU-lock holder attribution: while a warp holds the sequence lock (fu_locked is one-hot),
+    // what did the holder do this cycle? Measured at the arbiter like slot_w.
+    wire lock_held      = ~(& fu_locked);
+    wire holder_staged  = | (fu_locked & stg_valid_in);
+    wire holder_ready   = | (fu_locked & slot_ready);
+    wire holder_granted = valid_out_w && (| (arb_onehot & fu_locked));
+    wire [SCB_CAUSES-1:0] holder_cause;
+    for (genvar c = 0; c < SCB_CAUSES; ++c) begin : g_holder_cause
+        wire [PER_ISSUE_WARPS-1:0] cw;
+        for (genvar w = 0; w < PER_ISSUE_WARPS; ++w) begin : g_w
+            assign cw[w] = perf_wcause[w][c] && fu_locked[w];
+        end
+        assign holder_cause[c] = lock_held && (| cw);
+    end
+    wire [LK_SLOTS-1:0] lk_w;
+    assign lk_w[LK_HELD]        = lock_held;
+    assign lk_w[LK_ISSUED]      = lock_held && issue_fire && holder_granted;
+    assign lk_w[LK_BP]          = lock_held && holder_granted && ~ready_out_w;
+    assign lk_w[LK_LOST]        = lock_held && holder_ready && ~holder_granted;
+    assign lk_w[LK_BUSY_TCU]    = lock_held && holder_staged && ~holder_ready && holder_cause[SCB_CAUSE_TCU];
+    assign lk_w[LK_BUSY_CREDIT] = lock_held && holder_staged && ~holder_ready && ~holder_cause[SCB_CAUSE_TCU] && holder_cause[SCB_CAUSE_CREDIT];
+    assign lk_w[LK_BUSY_OTHER]  = lock_held && holder_staged && ~holder_ready && ~holder_cause[SCB_CAUSE_TCU] && ~holder_cause[SCB_CAUSE_CREDIT];
+    assign lk_w[LK_EMPTY]       = lock_held && ~holder_staged;
+    assign lk_w[LK_OTHER]       = lock_held && issue_fire && ~holder_granted;
+
+    reg [LK_SLOTS-1:0][PERF_CTR_BITS-1:0] lk_r;
+    always @(posedge clk) begin
+        if (reset) begin
+            lk_r <= '0;
+        end else begin
+            for (integer k = 0; k < LK_SLOTS; ++k) begin
+                lk_r[k] <= lk_r[k] + PERF_CTR_BITS'(lk_w[k]);
+            end
+        end
+    end
+
     assign perf_slots  = slots_r;
     assign perf_causes = causes_r;
+    assign perf_lk     = lk_r;
     assign perf_warps  = warps_r;
 `endif
 `endif

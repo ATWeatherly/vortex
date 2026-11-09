@@ -708,6 +708,25 @@ VX_CSR_MPM_SCB_C_LAG    = 0xB10  # warp-cycles not ready with no live hazard (re
 VX_CSR_MPM_SCB_C_LAG_H  = 0xB90
 VX_CSR_MPM_BAR_WARPS    = 0xB11  # warp-cycles parked at a barrier
 VX_CSR_MPM_BAR_WARPS_H  = 0xB91
+# FU-lock holder attribution (slice-cycles while a WGMMA/WMMA uop burst holds the issue lock)
+VX_CSR_MPM_LK_HELD      = 0xB12  # a sequence lock is held
+VX_CSR_MPM_LK_HELD_H    = 0xB92
+VX_CSR_MPM_LK_ISSUED    = 0xB13  # the holder issued a uop
+VX_CSR_MPM_LK_ISSUED_H  = 0xB93
+VX_CSR_MPM_LK_BP        = 0xB14  # holder granted, operand stage not ready
+VX_CSR_MPM_LK_BP_H      = 0xB94
+VX_CSR_MPM_LK_LOST      = 0xB15  # holder ready, another warp granted
+VX_CSR_MPM_LK_LOST_H    = 0xB95
+VX_CSR_MPM_LK_BUSY_TCU  = 0xB16  # holder staged, waiting on a TCU-produced register
+VX_CSR_MPM_LK_BUSY_TCU_H= 0xB96
+VX_CSR_MPM_LK_BUSY_CREDIT = 0xB17  # holder staged, data ready, FU dispatch credits exhausted
+VX_CSR_MPM_LK_BUSY_CREDIT_H = 0xB97
+VX_CSR_MPM_LK_BUSY_OTHER = 0xB18 # holder staged, other scoreboard cause
+VX_CSR_MPM_LK_BUSY_OTHER_H = 0xB98
+VX_CSR_MPM_LK_EMPTY     = 0xB19  # holder has nothing staged (sequencer / ibuffer gap)
+VX_CSR_MPM_LK_EMPTY_H   = 0xB99
+VX_CSR_MPM_LK_OTHER     = 0xB1A  # another warp issued while the lock was held
+VX_CSR_MPM_LK_OTHER_H   = 0xB9A
 
 [csr_mpm_icache]
 VX_CSR_MPM_ICACHE_READS = 0xB03  # total reads

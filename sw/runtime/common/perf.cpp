@@ -718,11 +718,23 @@ extern "C" vx_result_t vx_device_dump_perf(vx_device_h hdevice, FILE *stream) {
       {VX_CSR_MPM_SCB_C_CREDIT, "credit"}, {VX_CSR_MPM_SCB_C_LAG, "lag"},
       {VX_CSR_MPM_BAR_WARPS, "bar"},
     };
+    // FU-lock holder attribution (slice-cycles while a WGMMA/WMMA uop burst holds the issue lock):
+    // held = issued + bp + lost + busy_tcu + busy_credit + busy_other + empty; other overlaps.
+    static const struct { uint32_t addr; const char* name; } kLock[] = {
+    #ifdef VX_CSR_MPM_LK_HELD
+      {VX_CSR_MPM_LK_HELD, "held"}, {VX_CSR_MPM_LK_ISSUED, "issued"},
+      {VX_CSR_MPM_LK_BP, "bp"}, {VX_CSR_MPM_LK_LOST, "lost"},
+      {VX_CSR_MPM_LK_BUSY_TCU, "busy_tcu"}, {VX_CSR_MPM_LK_BUSY_CREDIT, "busy_credit"},
+      {VX_CSR_MPM_LK_BUSY_OTHER, "busy_other"}, {VX_CSR_MPM_LK_EMPTY, "empty"},
+      {VX_CSR_MPM_LK_OTHER, "other"},
+    #endif
+    };
     constexpr size_t NI = sizeof(kIssue) / sizeof(kIssue[0]);
     constexpr size_t NC = sizeof(kCause) / sizeof(kCause[0]);
-    uint64_t tot_i[NI] = {0}, tot_c[NC] = {0};
+    constexpr size_t NL = sizeof(kLock) / sizeof(kLock[0]);
+    uint64_t tot_i[NI] = {0}, tot_c[NC] = {0}, tot_l[NL + 1] = {0};
     for (uint32_t core_id = 0; core_id < num_cores; ++core_id) {
-      uint64_t vi[NI] = {0}, vc[NC] = {0};
+      uint64_t vi[NI] = {0}, vc[NC] = {0}, vl[NL + 1] = {0};
       for (size_t k = 0; k < NI; ++k) {
         CHECK_ERR(vx_device_mpm_query(hdevice, mpm_class, kIssue[k].addr, core_id, &vi[k]), { return err; });
         tot_i[k] += vi[k];
@@ -731,17 +743,25 @@ extern "C" vx_result_t vx_device_dump_perf(vx_device_h hdevice, FILE *stream) {
         CHECK_ERR(vx_device_mpm_query(hdevice, mpm_class, kCause[k].addr, core_id, &vc[k]), { return err; });
         tot_c[k] += vc[k];
       }
-      std::stringstream si, sc;
+      for (size_t k = 0; k < NL; ++k) {
+        CHECK_ERR(vx_device_mpm_query(hdevice, mpm_class, kLock[k].addr, core_id, &vl[k]), { return err; });
+        tot_l[k] += vl[k];
+      }
+      std::stringstream si, sc, sl;
       for (size_t k = 0; k < NI; ++k) si << (k ? ", " : "") << kIssue[k].name << "=" << vi[k];
       for (size_t k = 0; k < NC; ++k) sc << (k ? ", " : "") << kCause[k].name << "=" << vc[k];
+      for (size_t k = 0; k < NL; ++k) sl << (k ? ", " : "") << kLock[k].name << "=" << vl[k];
       perf_print_core(stream, core_id, "slots: %s", si.str().c_str());
       perf_print_core(stream, core_id, "scrb_cause: %s", sc.str().c_str());
+      if (NL) perf_print_core(stream, core_id, "fu_lock: %s", sl.str().c_str());
     }
-    std::stringstream si, sc;
+    std::stringstream si, sc, sl;
     for (size_t k = 0; k < NI; ++k) si << (k ? ", " : "") << kIssue[k].name << "=" << tot_i[k];
     for (size_t k = 0; k < NC; ++k) sc << (k ? ", " : "") << kCause[k].name << "=" << tot_c[k];
+    for (size_t k = 0; k < NL; ++k) sl << (k ? ", " : "") << kLock[k].name << "=" << tot_l[k];
     perf_print(stream, "slots: %s", si.str().c_str());
     perf_print(stream, "scrb_cause: %s", sc.str().c_str());
+    if (NL) perf_print(stream, "fu_lock: %s", sl.str().c_str());
   } break;
 #endif
 

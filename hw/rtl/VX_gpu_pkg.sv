@@ -1380,11 +1380,28 @@ package VX_gpu_pkg;
     localparam SCB_SLOT_LOCKED  = 4; // a ready warp is shut out by another warp's FU sequence lock
     localparam SCB_SLOTS        = 5;
 
+    // FU-lock holder attribution (PERF_STALL_ATTRIB): slice-cycles while a warp holds the FU
+    // sequence lock (a WGMMA/WMMA uop burst), split by what the HOLDER did that cycle. HELD is
+    // the total; ISSUED + BP + LOST + BUSY_* + EMPTY == HELD. OTHER (another warp issued in a
+    // holder gap) overlaps BUSY_* / EMPTY. The TCU's "starve" (block mid-expansion, no uop
+    // presented) is the downstream image of HELD - ISSUED.
+    localparam LK_HELD        = 0; // a lock is held
+    localparam LK_ISSUED      = 1; // the holder issued a uop
+    localparam LK_BP          = 2; // holder ready and granted, operand stage not ready (skid full)
+    localparam LK_LOST        = 3; // holder ready, arbiter granted another warp (no holder priority)
+    localparam LK_BUSY_TCU    = 4; // holder staged, waiting on a TCU-produced register (accumulator RAW)
+    localparam LK_BUSY_CREDIT = 5; // holder staged, data ready, FU dispatch credits exhausted
+    localparam LK_BUSY_OTHER  = 6; // holder staged, other scoreboard cause (alu/lsu/xreg/lag)
+    localparam LK_EMPTY       = 7; // holder has nothing staged (uop sequencer / ibuffer gap)
+    localparam LK_OTHER       = 8; // another warp issued while the lock was held
+    localparam LK_SLOTS       = 9;
+
     typedef struct packed {
         logic [PERF_CTR_BITS-1:0] ibf_stalls;
         logic [PERF_CTR_BITS-1:0] scb_stalls;
         logic [SCB_SLOTS-1:0][PERF_CTR_BITS-1:0]  scb_slots;
         logic [SCB_CAUSES-1:0][PERF_CTR_BITS-1:0] scb_causes; // warp-cycles per cause (non-exclusive)
+        logic [LK_SLOTS-1:0][PERF_CTR_BITS-1:0]   lk_slots;   // FU-lock holder attribution
         logic [PERF_CTR_BITS-1:0] scb_warps;  // warp-cycles staged but not ready
         logic [PERF_CTR_BITS-1:0] opd_stalls;
         logic [NUM_EX_UNITS-1:0][PERF_CTR_BITS-1:0] dispatch_stalls;
