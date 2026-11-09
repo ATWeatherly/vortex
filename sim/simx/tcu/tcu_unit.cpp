@@ -867,14 +867,17 @@ public:
       }
       uint32_t wid = trace->wid;
       int32_t cta = (int32_t)core_->scheduler().warp(wid).cta_csrs.cta_id;
-      // CTA lockstep: wait while another block is mid-WGMMA for another CTA.
+      // CTA lockstep: wait while another block is mid-WGMMA for another CTA (the shared bbuf's single-CTA
+      // assumption; VX_CFG_TCU_WG_NO_LOCKSTEP drops the gate together with per-block B buffers).
       bool cta_conflict = false;
+#ifndef VX_CFG_TCU_WG_NO_LOCKSTEP
       for (uint32_t k = 0; k < VX_CFG_NUM_TCU_BLOCKS; ++k) {
         if (k != b && in_wgmma_.at(k) && cta_owner_a_.at(k) != cta) {
           cta_conflict = true;
           break;
         }
       }
+#endif
       if (cta_conflict) {
         lock_mask_ |= (1u << b);
         continue;

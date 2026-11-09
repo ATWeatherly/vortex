@@ -52,6 +52,11 @@ module VX_tcu_lockstep import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
     output wire [BLOCK_SIZE-1:0]                 in_expansion
 );
     `UNUSED_SPARAM (INSTANCE_ID)
+`ifdef VX_CFG_TCU_WG_NO_LOCKSTEP
+`ifndef VX_CFG_TCU_BBUF_PER_BLOCK
+    `STATIC_ASSERT (0, ("VX_CFG_TCU_WG_NO_LOCKSTEP requires VX_CFG_TCU_BBUF_PER_BLOCK (the shared bbuf needs the gate)"))
+`endif
+`endif
 
     // -----------------------------------------------------------------------
     // State
@@ -109,7 +114,15 @@ module VX_tcu_lockstep import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
                 end
             end
         end
+`ifdef VX_CFG_TCU_WG_NO_LOCKSTEP
+        // Per-block B buffers (VX_CFG_TCU_BBUF_PER_BLOCK) remove the shared-bbuf single-CTA assumption this gate
+        // protects; opt-in: let blocks run WGMMAs of different CTAs concurrently. in_expansion is still tracked
+        // for the starve / idle attribution.
+        `UNUSED_VAR (cta_conflict_r)
+        assign cta_conflict[bi] = 1'b0;
+`else
         assign cta_conflict[bi] = is_wgmma_b[bi] && cta_conflict_r;
+`endif
     end
 
     // -----------------------------------------------------------------------
