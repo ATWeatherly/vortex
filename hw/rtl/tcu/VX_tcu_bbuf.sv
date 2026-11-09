@@ -401,8 +401,16 @@ module VX_tcu_bbuf import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
     // first uop's base differs from the armed one: with Q blocks the lowest valid block is the representative,
     // so a lower block's first uop (another CTA's tile) can replace the one that armed the fill before it fired.
     logic [BANK_ADDR_WIDTH-1:0] armed_base_r;
-    wire tile_inv   = req_valid && use_tile && req_is_first_uop
-                   && !(first_armed_r && (armed_base_r == desc_b_row_base));
+    wire tile_first_inv = req_valid && use_tile && req_is_first_uop
+                       && !(first_armed_r && (armed_base_r == desc_b_row_base));
+    // A NON-first uop whose tile is neither resident nor pending also re-arms. Without this the shared tile
+    // deadlocks once two blocks of a CTA work on different B tiles (CTA DXA with KP > 1): the lower block re-arms
+    // for its own tiles, finishes and parks at the stage barrier; the other block, now the representative, holds
+    // non-first uops of a tile that nothing can reload (2026-11-09: rtlsim KP2/KP4 scoreboard timeout).
+    wire tile_miss_inv  = req_valid && use_tile && !req_is_first_uop
+                       && !(tile_live_r && (tile_base_r == desc_b_row_base))
+                       && !(tile_pend_r && (pend_base_r == desc_b_row_base));
+    wire tile_inv   = tile_first_inv || tile_miss_inv;
     wire tile_issue = tile_live_r && !tile_pend_r && (tile_req_ptr_r < tile_rows_r) && !in_fetch;
     wire tile_fire  = tile_issue && tcu_lmem_if.req_ready;
     wire tile_rsp   = tcu_lmem_if.rsp_valid && (tile_os_r != '0);
@@ -442,7 +450,7 @@ module VX_tcu_bbuf import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
                 tile_live_r   <= 1'b0;
                 pend_base_r   <= desc_b_row_base;
                 pend_rows_r   <= rows_for_cd;
-                first_armed_r <= 1'b1;
+                first_armed_r <= req_is_first_uop;   // a miss re-arm must not suppress the next first uop's reload
                 armed_base_r  <= desc_b_row_base;
             end else if (tile_pend_r && (tile_os_r == '0)) begin
                 tile_pend_r      <= 1'b0;

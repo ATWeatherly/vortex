@@ -406,6 +406,7 @@ public:
   #ifdef VX_CFG_TCU_BBUF_TILE
     tile_armed_.fill(false);
     tile_armed_base_.fill(0);
+    tile_base_.fill(0);
   #endif
   #endif
     cur_block_ = 0;
@@ -931,9 +932,17 @@ public:
           tbuf->fill_b_stream(i, this->b_tile_reads(r));
           tile_armed_.at(i)      = true;
           tile_armed_base_.at(i) = b_base;
+          tile_base_.at(i)       = b_base;
           slot = bbuf_slot_t{};
         } else if (!r.is_first_uop) {
           tile_armed_.at(i) = false;
+          // A non-first uop of another tile re-arms (RTL tile_miss_inv): the shared tile otherwise deadlocks once
+          // two blocks of a CTA sit on different B tiles (CTA DXA KP > 1).
+          if (tile_base_.at(i) != b_base) {
+            tbuf->fill_b_stream(i, this->b_tile_reads(r));
+            tile_base_.at(i) = b_base;
+            slot = bbuf_slot_t{};
+          }
         }
         if (tbuf->read_b(i, key.row) != nullptr) {
           ++perf_stats_.tbuf_cache_hits;
@@ -1707,6 +1716,7 @@ private:
 #ifdef VX_CFG_TCU_BBUF_TILE
   std::array<bool, TcuTbuf::NUM_BBUFS> tile_armed_{};   // whole-tile B fill started for the current wgmma
   std::array<uint64_t, TcuTbuf::NUM_BBUFS> tile_armed_base_{};
+  std::array<uint64_t, TcuTbuf::NUM_BBUFS> tile_base_{};   // base of the tile the buffer holds / is loading
 #endif
 #endif
 };
