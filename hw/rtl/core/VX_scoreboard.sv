@@ -45,12 +45,21 @@ module VX_scoreboard import VX_gpu_pkg::*; #(
     // Per-FU dispatch credits: spent at issue, reclaimed on FU accept, so a
     // credit covers ops still in operand collection (not yet at the queue).
     wire [NUM_EX_UNITS-1:0] fu_issue;
-    wire [NUM_EX_UNITS-1:0] fu_goingfull;
+    wire [NUM_EX_UNITS-1:0] fu_goingfull;     // credit threshold for plain instructions
+    wire [NUM_EX_UNITS-1:0] fu_goingfull_seq; // credit threshold for FU-sequence uops (fu_lock .. fu_unlock)
 
     // going-full (not full): a 1-slot guard band keeps outstanding <= queue
     // depth despite the registered suppress lag, so an issued op never stalls
     // in the shared operand-collection path and HoL-blocks another FU.
+    //
+    // -DDISPATCH_SEQ_CREDITS=<n>: lock-aware credits. Plain instructions (and WMMA uops,
+    // which lock and unlock in the same uop) keep a guard band of <n> outstanding ops, so
+    // their interleaving is unchanged when VX_CFG_DISPATCH_QUEUE_SIZE is raised; the uops
+    // of an FU sequence (a WGMMA burst, one warp holding the issue lock) may fill the whole
+    // queue. The 3-credit window of a 4-deep queue is shorter than the issue -> dispatch-accept
+    // round trip (~7 cycles), which capped a WGMMA burst at ~0.43 uop/cycle (TCU "starve").
     for (genvar e = 0; e < NUM_EX_UNITS; ++e) begin : g_fu_goingfull
+        wire [`CLOG2(DISPATCH_QSIZE+1)-1:0] fu_size;
         VX_pending_size #(
             .SIZE (DISPATCH_QSIZE)
         ) fu_pending (
@@ -61,9 +70,15 @@ module VX_scoreboard import VX_gpu_pkg::*; #(
             `UNUSED_PIN (empty),
             `UNUSED_PIN (alm_empty),
             `UNUSED_PIN (full),
-            .alm_full   (fu_goingfull[e]),
-            `UNUSED_PIN (size)
+            .alm_full   (fu_goingfull_seq[e]),
+            .size       (fu_size)
         );
+    `ifdef DISPATCH_SEQ_CREDITS
+        assign fu_goingfull[e] = (fu_size >= `CLOG2(DISPATCH_QSIZE+1)'(`DISPATCH_SEQ_CREDITS));
+    `else
+        assign fu_goingfull[e] = fu_goingfull_seq[e];
+        `UNUSED_VAR (fu_size)
+    `endif
     end
 
     VX_ibuffer_if staging_if [PER_ISSUE_WARPS]();
@@ -210,8 +225,16 @@ module VX_scoreboard import VX_gpu_pkg::*; #(
         wire fire_busy = fire_ibf ? (ibf_busy || ibf_xbusy || ibf_rsv)
                                   : (stg_busy || stg_xbusy || stg_rsv);
 
+    `ifdef DISPATCH_SEQ_CREDITS
+        // a uop of an FU sequence locks, stays locked, or unlocks; a plain instruction does both at once
+        wire ibf_seq = ~(ibuffer_if[w].data.fu_lock && ibuffer_if[w].data.fu_unlock);
+        wire stg_seq = ~(staging_if[w].data.fu_lock && staging_if[w].data.fu_unlock);
+        wire ibf_goingfull = ibf_seq ? fu_goingfull_seq[ibuffer_if[w].data.ex_type] : fu_goingfull[ibuffer_if[w].data.ex_type];
+        wire stg_goingfull = stg_seq ? fu_goingfull_seq[staging_if[w].data.ex_type] : fu_goingfull[staging_if[w].data.ex_type];
+    `else
         wire ibf_goingfull = fu_goingfull[ibuffer_if[w].data.ex_type];
         wire stg_goingfull = fu_goingfull[staging_if[w].data.ex_type];
+    `endif
 
         wire hold_ready = ~hold_busy && ~(hold_ibf ? ibf_goingfull : stg_goingfull);
         wire fire_ready = ~fire_busy && ~(fire_ibf ? ibf_goingfull : stg_goingfull);
