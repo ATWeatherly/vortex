@@ -456,6 +456,15 @@ import VX_fpu_pkg::*;
                         `CSR_READ_64(`VX_CSR_MPM_SCB_C_CREDIT, dcr_data_w, pipeline_perf.issue.scb_causes[SCB_CAUSE_CREDIT]);
                         `CSR_READ_64(`VX_CSR_MPM_SCB_C_LAG,    dcr_data_w, pipeline_perf.issue.scb_causes[SCB_CAUSE_LAG]);
                         `CSR_READ_64(`VX_CSR_MPM_BAR_WARPS,    dcr_data_w, pipeline_perf.sched.bar_warps);
+                        `CSR_READ_64(`VX_CSR_MPM_LK_HELD,      dcr_data_w, pipeline_perf.issue.lk_slots[LK_HELD]);
+                        `CSR_READ_64(`VX_CSR_MPM_LK_ISSUED,    dcr_data_w, pipeline_perf.issue.lk_slots[LK_ISSUED]);
+                        `CSR_READ_64(`VX_CSR_MPM_LK_BP,        dcr_data_w, pipeline_perf.issue.lk_slots[LK_BP]);
+                        `CSR_READ_64(`VX_CSR_MPM_LK_LOST,      dcr_data_w, pipeline_perf.issue.lk_slots[LK_LOST]);
+                        `CSR_READ_64(`VX_CSR_MPM_LK_BUSY_TCU,  dcr_data_w, pipeline_perf.issue.lk_slots[LK_BUSY_TCU]);
+                        `CSR_READ_64(`VX_CSR_MPM_LK_BUSY_CREDIT, dcr_data_w, pipeline_perf.issue.lk_slots[LK_BUSY_CREDIT]);
+                        `CSR_READ_64(`VX_CSR_MPM_LK_BUSY_OTHER, dcr_data_w, pipeline_perf.issue.lk_slots[LK_BUSY_OTHER]);
+                        `CSR_READ_64(`VX_CSR_MPM_LK_EMPTY,     dcr_data_w, pipeline_perf.issue.lk_slots[LK_EMPTY]);
+                        `CSR_READ_64(`VX_CSR_MPM_LK_OTHER,     dcr_data_w, pipeline_perf.issue.lk_slots[LK_OTHER]);
                         default:;
                         endcase
                     end

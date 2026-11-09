@@ -61,6 +61,7 @@ module VX_issue_slice import VX_gpu_pkg::*; #(
         .perf_stalls    (issue_perf.scb_stalls),
         .perf_slots     (issue_perf.scb_slots),
         .perf_causes    (issue_perf.scb_causes),
+        .perf_lk        (issue_perf.lk_slots),
         .perf_warps     (issue_perf.scb_warps),
     `endif
         .fu_release     (fu_release),

@@ -24,6 +24,7 @@ module VX_scoreboard import VX_gpu_pkg::*; #(
     output reg [PERF_CTR_BITS-1:0] perf_stalls,
     output wire [SCB_SLOTS-1:0][PERF_CTR_BITS-1:0]  perf_slots,
     output wire [SCB_CAUSES-1:0][PERF_CTR_BITS-1:0] perf_causes,
+    output wire [LK_SLOTS-1:0][PERF_CTR_BITS-1:0]   perf_lk,
     output wire [PERF_CTR_BITS-1:0] perf_warps,
 `endif
 
@@ -88,6 +89,7 @@ module VX_scoreboard import VX_gpu_pkg::*; #(
 `ifndef PERF_STALL_ATTRIB
     assign perf_slots  = '0;
     assign perf_causes = '0;
+    assign perf_lk     = '0;
     assign perf_warps  = '0;
 `endif
 `endif
@@ -525,8 +527,45 @@ module VX_scoreboard import VX_gpu_pkg::*; #(
         end
     end
 
+    // FU-lock holder attribution: while a warp holds the sequence lock (fu_locked is one-hot),
+    // what did the holder do this cycle? Measured at the arbiter like slot_w.
+    wire lock_held      = ~(& fu_locked);
+    wire holder_staged  = | (fu_locked & stg_valid_in);
+    wire holder_ready   = | (fu_locked & slot_ready);
+    wire holder_granted = valid_out_w && (| (arb_onehot & fu_locked));
+    wire [SCB_CAUSES-1:0] holder_cause;
+    for (genvar c = 0; c < SCB_CAUSES; ++c) begin : g_holder_cause
+        wire [PER_ISSUE_WARPS-1:0] cw;
+        for (genvar w = 0; w < PER_ISSUE_WARPS; ++w) begin : g_w
+            assign cw[w] = perf_wcause[w][c] && fu_locked[w];
+        end
+        assign holder_cause[c] = lock_held && (| cw);
+    end
+    wire [LK_SLOTS-1:0] lk_w;
+    assign lk_w[LK_HELD]        = lock_held;
+    assign lk_w[LK_ISSUED]      = lock_held && issue_fire && holder_granted;
+    assign lk_w[LK_BP]          = lock_held && holder_granted && ~ready_out_w;
+    assign lk_w[LK_LOST]        = lock_held && holder_ready && ~holder_granted;
+    assign lk_w[LK_BUSY_TCU]    = lock_held && holder_staged && ~holder_ready && holder_cause[SCB_CAUSE_TCU];
+    assign lk_w[LK_BUSY_CREDIT] = lock_held && holder_staged && ~holder_ready && ~holder_cause[SCB_CAUSE_TCU] && holder_cause[SCB_CAUSE_CREDIT];
+    assign lk_w[LK_BUSY_OTHER]  = lock_held && holder_staged && ~holder_ready && ~holder_cause[SCB_CAUSE_TCU] && ~holder_cause[SCB_CAUSE_CREDIT];
+    assign lk_w[LK_EMPTY]       = lock_held && ~holder_staged;
+    assign lk_w[LK_OTHER]       = lock_held && issue_fire && ~holder_granted;
+
+    reg [LK_SLOTS-1:0][PERF_CTR_BITS-1:0] lk_r;
+    always @(posedge clk) begin
+        if (reset) begin
+            lk_r <= '0;
+        end else begin
+            for (integer k = 0; k < LK_SLOTS; ++k) begin
+                lk_r[k] <= lk_r[k] + PERF_CTR_BITS'(lk_w[k]);
+            end
+        end
+    end
+
     assign perf_slots  = slots_r;
     assign perf_causes = causes_r;
+    assign perf_lk     = lk_r;
     assign perf_warps  = warps_r;
 `endif
 `endif

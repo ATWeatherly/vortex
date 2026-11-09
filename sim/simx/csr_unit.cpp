@@ -256,6 +256,17 @@ Word CsrUnit::get_csr(uint32_t addr, uint32_t wid, uint32_t tid) {
         CSR_READ_64(VX_CSR_MPM_SCB_C_CREDIT, core_perf.scb_cause[6]);
         CSR_READ_64(VX_CSR_MPM_SCB_C_LAG,    core_perf.scb_cause[7]);
         CSR_READ_64(VX_CSR_MPM_BAR_WARPS,    core_perf.bar_warps);
+      #ifdef VX_CSR_MPM_LK_HELD
+        CSR_READ_64(VX_CSR_MPM_LK_HELD,        core_perf.lk_slots[0]);
+        CSR_READ_64(VX_CSR_MPM_LK_ISSUED,      core_perf.lk_slots[1]);
+        CSR_READ_64(VX_CSR_MPM_LK_BP,          core_perf.lk_slots[2]);
+        CSR_READ_64(VX_CSR_MPM_LK_LOST,        core_perf.lk_slots[3]);
+        CSR_READ_64(VX_CSR_MPM_LK_BUSY_TCU,    core_perf.lk_slots[4]);
+        CSR_READ_64(VX_CSR_MPM_LK_BUSY_CREDIT, core_perf.lk_slots[5]);
+        CSR_READ_64(VX_CSR_MPM_LK_BUSY_OTHER,  core_perf.lk_slots[6]);
+        CSR_READ_64(VX_CSR_MPM_LK_EMPTY,       core_perf.lk_slots[7]);
+        CSR_READ_64(VX_CSR_MPM_LK_OTHER,       core_perf.lk_slots[8]);
+      #endif
         }
       } break;
     #endif
