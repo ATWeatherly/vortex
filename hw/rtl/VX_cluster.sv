@@ -34,6 +34,9 @@ module VX_cluster import VX_gpu_pkg::*, VX_tlb_pkg::*;
     // Memory
     VX_mem_bus_if.master        mem_bus_if [L2_MEM_PORTS],
 
+    // Tile-stream masters (one dummy per socket when the TSU is off)
+    VX_stream_bus_if.master     str_bus_if [`UP(SOCKET_STR_PORTS) * NUM_SOCKETS],
+
     // KMU bus
     VX_kmu_bus_if.slave         kmu_bus_if[1],
 
@@ -383,6 +386,8 @@ module VX_cluster import VX_gpu_pkg::*, VX_tlb_pkg::*;
             .dcr_bus_if     (per_socket_dcr_bus_if[socket_id]),
 
             .mem_bus_if     (socket_mem_bus_if[socket_id * L1_MEM_PORTS +: L1_MEM_PORTS]),
+
+            .str_bus_if     (str_bus_if[socket_id * `UP(SOCKET_STR_PORTS) +: `UP(SOCKET_STR_PORTS)]),
 
         `ifdef VX_CFG_VM_ENABLE
             .cluster_tlb_bus_if (per_socket_tlb_bus_if[socket_id]),
