@@ -49,6 +49,39 @@ package VX_dxa_pkg;
     // encoder packs it into the 32-bit meta ABI word, checked in VX_dxa_setup.
     localparam DXA_DESC_META_TOTAL_BITS     = DXA_DESC_META_L2PROMO_LSB + DXA_DESC_META_L2PROMO_BITS;
 
+    // Tile-stream-unit fields, placed above the running-sum budget so the
+    // existing encoder/decoder pairs are untouched (mirrored in sw/common/
+    // dxa_meta.h and sim/simx/dxa/dxa_core.cpp):
+    //   DEST_KIND [14:13]: 0 = LMEM (the only destination in phase 1),
+    //                      1 = TILEBUF_B, 2 = TILEBUF_A (reserved for phase 4)
+    //   SLOT      [18:15]: tile-buffer slot (phase 4)
+    //   ENGINE    [19]   : 0 = DXA line engine, 1 = TSU burst engine
+    localparam DXA_DESC_META_DEST_KIND_BITS = 2;
+    localparam DXA_DESC_META_SLOT_BITS      = 4;
+    localparam DXA_DESC_META_ENGINE_BITS    = 1;
+    localparam DXA_DESC_META_DEST_KIND_LSB  = DXA_DESC_META_TOTAL_BITS;
+    localparam DXA_DESC_META_SLOT_LSB       = DXA_DESC_META_DEST_KIND_LSB + DXA_DESC_META_DEST_KIND_BITS;
+    localparam DXA_DESC_META_ENGINE_LSB     = DXA_DESC_META_SLOT_LSB + DXA_DESC_META_SLOT_BITS;
+    localparam DXA_DEST_KIND_LMEM      = 2'd0;
+    localparam DXA_DEST_KIND_TILEBUF_B = 2'd1;
+    localparam DXA_DEST_KIND_TILEBUF_A = 2'd2;
+    localparam DXA_ENGINE_DXA = 1'b0;
+    localparam DXA_ENGINE_TSU = 1'b1;
+
+    // TSU geometry (see VX_config.toml [dxa]).
+    localparam TSU_BURST_BYTES  = `VX_CFG_TSU_BURST_BYTES;
+    localparam TSU_BEAT_BYTES   = `VX_CFG_PLATFORM_MEMORY_DATA_SIZE;
+    localparam TSU_NUM_BEATS    = TSU_BURST_BYTES / TSU_BEAT_BYTES;
+    localparam TSU_MAX_INFLIGHT = `VX_CFG_TSU_MAX_INFLIGHT;
+    localparam TSU_TAG_W        = `CLOG2(TSU_MAX_INFLIGHT);
+    localparam TSU_STR_TAG_W    = UUID_WIDTH + TSU_TAG_W;
+    localparam TSU_STR_ADDR_W   = `VX_CFG_MEM_ADDR_WIDTH - `CLOG2(TSU_BURST_BYTES);
+    localparam TSU_NUM_WORKERS  = `VX_CFG_NUM_TSU_CORES;
+    localparam TSU_MASTERS_PER_WORKER = `VX_CFG_TSU_MASTERS_PER_WORKER;
+    // Master select inside a worker: byte-address bits [SEL_LSB +: log2(M)],
+    // expressed in granule-address units.
+    localparam TSU_SEL_LSB_GRANULE = `VX_CFG_TSU_SEL_LSB - `CLOG2(TSU_BURST_BYTES);
+
     // DXA request data — core → DXA control path.
     typedef struct packed {
         logic [NC_WIDTH-1:0]      core_id;

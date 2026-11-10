@@ -17,10 +17,19 @@
 
 `include "VX_define.vh"
 
+// STREAM=1 turns the worker into a tile-stream (TSU) worker: the address
+// generator runs at TSU_BURST_BYTES granules, VX_tsu_burst_req issues one
+// stream request per granule over NUM_STR_PORTS stream masters (selected by
+// the pseudo-channel address bits) and hands the returning 64 B beats to the
+// unchanged smem_wr, which lands them in LMEM and raises the same completion.
+
 module VX_dxa_worker import VX_gpu_pkg::*, VX_dxa_pkg::*; #(
     parameter `STRING INSTANCE_ID = "",
     parameter WORKER_ID = 0,
-    parameter GMEM_TAG_WIDTH = SOCKET_MEM_TAG_WIDTH
+    parameter GMEM_TAG_WIDTH = SOCKET_MEM_TAG_WIDTH,
+    parameter STREAM        = 0,                    // 1: TSU burst worker (stream bus), 0: DXA line worker (socket memory port)
+    parameter NUM_STR_PORTS = 1,                    // stream masters owned by this worker (STREAM=1)
+    parameter STR_SEL_LSB   = TSU_SEL_LSB_GRANULE   // granule-address bit selecting the master
 ) (
     input wire clk,
     input wire reset,
@@ -29,20 +38,28 @@ module VX_dxa_worker import VX_gpu_pkg::*, VX_dxa_pkg::*; #(
 `endif
     VX_dxa_worker_req_if.slave req_if,
     VX_mem_bus_if.master gmem_bus_if,
+    VX_stream_bus_if.master str_bus_if [NUM_STR_PORTS],
     VX_mem_bus_if.master smem_bus_if
 );
     `UNUSED_SPARAM (INSTANCE_ID)
     `UNUSED_SPARAM (WORKER_ID)
 
-    localparam GMEM_BYTES      = `VX_CFG_L1_LINE_SIZE;
+    // Address-generator granule: an L1 line for the line engine, a burst for
+    // the stream engine.
+    localparam GMEM_BYTES      = STREAM ? TSU_BURST_BYTES : `VX_CFG_L1_LINE_SIZE;
     localparam GMEM_DATAW      = GMEM_BYTES * 8;
     localparam GMEM_OFF_BITS   = `CLOG2(GMEM_BYTES);
     localparam GMEM_ADDR_WIDTH = `VX_CFG_MEM_ADDR_WIDTH - GMEM_OFF_BITS;
 
+    // What smem_wr sees per delivery: a whole line, or one burst beat.
+    localparam CL_BYTES        = STREAM ? TSU_BEAT_BYTES : GMEM_BYTES;
+    localparam CL_DATAW        = CL_BYTES * 8;
+    localparam CL_OFF_BITS     = `CLOG2(CL_BYTES);
+
     localparam SMEM_BYTES      = DXA_LMEM_WORD_SIZE;
     localparam SMEM_ADDR_WIDTH = DXA_LMEM_ADDR_W;
 
-    localparam MAX_OUTSTANDING = `VX_CFG_DXA_MAX_INFLIGHT;
+    localparam MAX_OUTSTANDING = STREAM ? TSU_MAX_INFLIGHT : `VX_CFG_DXA_MAX_INFLIGHT;
     localparam TAG_W = `CLOG2(MAX_OUTSTANDING);
     localparam SEQ_W = `CLOG2(MAX_OUTSTANDING + 1);
 
@@ -85,14 +102,14 @@ module VX_dxa_worker import VX_gpu_pkg::*, VX_dxa_pkg::*; #(
     wire [15:0]                 ag_n_base;
     wire [DXA_SMEM_ADDR_W-1:0]  ag_smem_base;
 
-    // gmem_req → smem_wr (direct-drain channel).
+    // gmem_req / burst_req → smem_wr (direct-drain channel, CL_BYTES per delivery).
     wire                        sw_valid;
     wire                        sw_ready;
     wire [TAG_W-1:0]            sw_tag;
-    wire [GMEM_DATAW-1:0]       sw_data;
+    wire [CL_DATAW-1:0]         sw_data;
     wire [DXA_SMEM_ADDR_W-1:0]  sw_smem_byte_addr;
-    wire [GMEM_OFF_BITS-1:0]    sw_byte_offset;
-    wire [GMEM_OFF_BITS:0]      sw_valid_length;
+    wire [CL_OFF_BITS-1:0]      sw_byte_offset;
+    wire [CL_OFF_BITS:0]        sw_valid_length;
     wire                        sw_oob;
     wire                        sw_last;
     wire [15:0]                 sw_k_row;
@@ -116,6 +133,7 @@ module VX_dxa_worker import VX_gpu_pkg::*, VX_dxa_pkg::*; #(
     wire [31:0]                 perf_gmem_reqs;
     wire [31:0]                 perf_gmem_span_cycles;
     wire [31:0]                 perf_lmem_writes;
+    wire [31:0]                 perf_str_bytes;   // STREAM: bytes requested by the transfer's bursts
 `endif
 
     // ════════════════════════════════════════════════════════════════════
@@ -181,52 +199,154 @@ module VX_dxa_worker import VX_gpu_pkg::*, VX_dxa_pkg::*; #(
     // Stage 3: GMEM Request Issuer
     // ════════════════════════════════════════════════════════════════════
 
-    // The request issuer registers its own gmem output (VX_mem_bus_slice), so
-    // gmem_bus_if is already a clean flopped producer boundary here.
-    VX_dxa_gmem_req #(
-        .MAX_OUTSTANDING (MAX_OUTSTANDING),
-        .GMEM_ADDR_WIDTH (GMEM_ADDR_WIDTH),
-        .GMEM_TAG_WIDTH  (GMEM_TAG_WIDTH),
-        .CL_OFF_BITS     (GMEM_OFF_BITS),
-        .SMEM_ADDR_W     (DXA_SMEM_ADDR_W)
-    ) gmem_req (
-        .clk                (clk),
-        .reset              (reset),
+    if (STREAM != 0) begin : g_stream_req
+        // Tile-stream engine: one burst request per granule on the stream bus,
+        // steered to this worker's master by the pseudo-channel address bits;
+        // beats come back 64 B at a time and go to smem_wr as lines.
+        VX_stream_bus_if #(
+            .BURST_SIZE (TSU_BURST_BYTES),
+            .BEAT_SIZE  (TSU_BEAT_BYTES),
+            .TAG_WIDTH  (TSU_STR_TAG_W)
+        ) str_w ();
+
+        VX_tsu_burst_req #(
+            .MAX_OUTSTANDING (MAX_OUTSTANDING),
+            .BURST_SIZE      (TSU_BURST_BYTES),
+            .BEAT_SIZE       (TSU_BEAT_BYTES),
+            .GMEM_ADDR_WIDTH (GMEM_ADDR_WIDTH),
+            .STR_TAG_WIDTH   (TSU_STR_TAG_W),
+            .SMEM_ADDR_W     (DXA_SMEM_ADDR_W)
+        ) burst_req (
+            .clk                (clk),
+            .reset              (reset),
+        `ifdef PERF_ENABLE
+            .perf_gmem_reqs       (perf_gmem_reqs),
+            .perf_gmem_span_cycles(perf_gmem_span_cycles),
+            .perf_bytes           (perf_str_bytes),
+        `endif
+            .transfer_active    (transfer_active),
+            .transfer_start     (pipeline_start),
+            .active_uuid        (active_uuid),
+            .elem_bytes         (ag_elem_bytes),
+            .ag_valid           (ag_valid),
+            .ag_ready           (ag_ready),
+            .ag_cl_addr         (ag_cl_addr),
+            .ag_smem_byte_addr  (ag_smem_byte_addr),
+            .ag_byte_offset     (ag_byte_offset),
+            .ag_valid_length    (ag_valid_length),
+            .ag_oob             (ag_oob),
+            .ag_last            (ag_last),
+            .ag_k_row           (ag_k_row),
+            .ag_n_base          (ag_n_base),
+            .str_bus_if         (str_w),
+            .sw_valid           (sw_valid),
+            .sw_ready           (sw_ready),
+            .sw_tag             (sw_tag),
+            .sw_data            (sw_data),
+            .sw_smem_byte_addr  (sw_smem_byte_addr),
+            .sw_byte_offset     (sw_byte_offset),
+            .sw_valid_length    (sw_valid_length),
+            .sw_oob             (sw_oob),
+            .sw_last            (sw_last),
+            .sw_k_row           (sw_k_row),
+            .sw_n_base          (sw_n_base),
+            .sw_outstanding     (sw_outstanding),
+            .release_en         (sw_release_en),
+            .release_tag        (sw_release_tag),
+            .gmem_req_fire      (gmem_req_fire),
+            .stall_no_slot      (stall_no_slot)
+        );
+
+        localparam STR_SEL_W = `UP(`CLOG2(NUM_STR_PORTS));
+        wire [STR_SEL_W-1:0] str_sel;
+        if (NUM_STR_PORTS > 1) begin : g_sel
+            assign str_sel = str_w.req_data.addr[STR_SEL_LSB +: STR_SEL_W];
+        end else begin : g_nosel
+            assign str_sel = '0;
+        end
+
+        VX_stream_bus_switch #(
+            .NUM_OUTPUTS (NUM_STR_PORTS),
+            .BURST_SIZE  (TSU_BURST_BYTES),
+            .BEAT_SIZE   (TSU_BEAT_BYTES),
+            .TAG_WIDTH   (TSU_STR_TAG_W),
+            .REQ_OUT_BUF ((NUM_STR_PORTS > 1) ? 3 : 0),
+            .RSP_OUT_BUF ((NUM_STR_PORTS > 1) ? 3 : 0)
+        ) str_switch (
+            .clk        (clk),
+            .reset      (reset),
+            .bus_sel    (str_sel),
+            .bus_in_if  (str_w),
+            .bus_out_if (str_bus_if)
+        );
+
+        // No socket memory port traffic from a stream worker.
+        assign gmem_bus_if.req_valid = 1'b0;
+        assign gmem_bus_if.req_data  = '0;
+        assign gmem_bus_if.rsp_ready = 1'b0;
+        `UNUSED_VAR (gmem_bus_if.req_ready)
+        `UNUSED_VAR (gmem_bus_if.rsp_valid)
+        `UNUSED_VAR (gmem_bus_if.rsp_data)
+    end else begin : g_line_req
+        // The request issuer registers its own gmem output (VX_mem_bus_slice), so
+        // gmem_bus_if is already a clean flopped producer boundary here.
+        VX_dxa_gmem_req #(
+            .MAX_OUTSTANDING (MAX_OUTSTANDING),
+            .GMEM_ADDR_WIDTH (GMEM_ADDR_WIDTH),
+            .GMEM_TAG_WIDTH  (GMEM_TAG_WIDTH),
+            .CL_OFF_BITS     (GMEM_OFF_BITS),
+            .SMEM_ADDR_W     (DXA_SMEM_ADDR_W)
+        ) gmem_req (
+            .clk                (clk),
+            .reset              (reset),
+        `ifdef PERF_ENABLE
+            .perf_gmem_reqs       (perf_gmem_reqs),
+            .perf_gmem_span_cycles(perf_gmem_span_cycles),
+        `endif
+            .transfer_active    (transfer_active),
+            .transfer_start     (pipeline_start),
+            .active_uuid        (active_uuid),
+            .ag_valid           (ag_valid),
+            .ag_ready           (ag_ready),
+            .ag_cl_addr         (ag_cl_addr),
+            .ag_smem_byte_addr  (ag_smem_byte_addr),
+            .ag_byte_offset     (ag_byte_offset),
+            .ag_valid_length    (ag_valid_length),
+            .ag_oob             (ag_oob),
+            .ag_last            (ag_last),
+            .ag_k_row           (ag_k_row),
+            .ag_n_base          (ag_n_base),
+            .gmem_bus_if        (gmem_bus_if),
+            .sw_valid           (sw_valid),
+            .sw_ready           (sw_ready),
+            .sw_tag             (sw_tag),
+            .sw_data            (sw_data),
+            .sw_smem_byte_addr  (sw_smem_byte_addr),
+            .sw_byte_offset     (sw_byte_offset),
+            .sw_valid_length    (sw_valid_length),
+            .sw_oob             (sw_oob),
+            .sw_last            (sw_last),
+            .sw_k_row           (sw_k_row),
+            .sw_n_base          (sw_n_base),
+            .sw_outstanding     (sw_outstanding),
+            .release_en         (sw_release_en),
+            .release_tag        (sw_release_tag),
+            .gmem_req_fire      (gmem_req_fire),
+            .stall_no_slot      (stall_no_slot)
+        );
     `ifdef PERF_ENABLE
-        .perf_gmem_reqs       (perf_gmem_reqs),
-        .perf_gmem_span_cycles(perf_gmem_span_cycles),
+        assign perf_str_bytes = '0;
     `endif
-        .transfer_active    (transfer_active),
-        .transfer_start     (pipeline_start),
-        .active_uuid        (active_uuid),
-        .ag_valid           (ag_valid),
-        .ag_ready           (ag_ready),
-        .ag_cl_addr         (ag_cl_addr),
-        .ag_smem_byte_addr  (ag_smem_byte_addr),
-        .ag_byte_offset     (ag_byte_offset),
-        .ag_valid_length    (ag_valid_length),
-        .ag_oob             (ag_oob),
-        .ag_last            (ag_last),
-        .ag_k_row           (ag_k_row),
-        .ag_n_base          (ag_n_base),
-        .gmem_bus_if        (gmem_bus_if),
-        .sw_valid           (sw_valid),
-        .sw_ready           (sw_ready),
-        .sw_tag             (sw_tag),
-        .sw_data            (sw_data),
-        .sw_smem_byte_addr  (sw_smem_byte_addr),
-        .sw_byte_offset     (sw_byte_offset),
-        .sw_valid_length    (sw_valid_length),
-        .sw_oob             (sw_oob),
-        .sw_last            (sw_last),
-        .sw_k_row           (sw_k_row),
-        .sw_n_base          (sw_n_base),
-        .sw_outstanding     (sw_outstanding),
-        .release_en         (sw_release_en),
-        .release_tag        (sw_release_tag),
-        .gmem_req_fire      (gmem_req_fire),
-        .stall_no_slot      (stall_no_slot)
-    );
+        // No stream traffic from a line worker.
+        for (genvar i = 0; i < NUM_STR_PORTS; ++i) begin : g_str_tieoff
+            assign str_bus_if[i].req_valid = 1'b0;
+            assign str_bus_if[i].req_data  = '0;
+            assign str_bus_if[i].rsp_ready = 1'b0;
+            `UNUSED_VAR (str_bus_if[i].req_ready)
+            `UNUSED_VAR (str_bus_if[i].rsp_valid)
+            `UNUSED_VAR (str_bus_if[i].rsp_data)
+        end
+    end
 
     // ════════════════════════════════════════════════════════════════════
     // Stage 4: SMEM Writer (gmem_req drives smem_wr directly via the
@@ -236,10 +356,10 @@ module VX_dxa_worker import VX_gpu_pkg::*, VX_dxa_pkg::*; #(
 
     VX_dxa_smem_wr #(
         .MAX_OUTSTANDING (MAX_OUTSTANDING),
-        .CL_SIZE         (GMEM_BYTES),
+        .CL_SIZE         (CL_BYTES),
         .SMEM_WORD_SIZE  (SMEM_BYTES),
         .SMEM_ADDR_WIDTH (SMEM_ADDR_WIDTH),
-        .GMEM_DATAW      (GMEM_DATAW)
+        .GMEM_DATAW      (CL_DATAW)
     ) smem_wr (
         .clk                   (clk),
         .reset                 (reset),
@@ -314,6 +434,8 @@ module VX_dxa_worker import VX_gpu_pkg::*, VX_dxa_pkg::*; #(
     reg [PERF_CTR_BITS-1:0] perf_lmem_writes_r;
     reg [PERF_CTR_BITS-1:0] perf_gmem_lt_r;
     reg [PERF_CTR_BITS-1:0] perf_noslot_r;
+    reg [PERF_CTR_BITS-1:0] perf_tsu_bursts_r;
+    reg [PERF_CTR_BITS-1:0] perf_tsu_bytes_r;
     always @(posedge clk) begin
         if (reset) begin
             perf_transfers_r   <= '0;
@@ -322,6 +444,8 @@ module VX_dxa_worker import VX_gpu_pkg::*, VX_dxa_pkg::*; #(
             perf_lmem_writes_r <= '0;
             perf_gmem_lt_r     <= '0;
             perf_noslot_r      <= '0;
+            perf_tsu_bursts_r  <= '0;
+            perf_tsu_bytes_r   <= '0;
         end else begin
             if (stall_no_slot) begin
                 perf_noslot_r <= perf_noslot_r + PERF_CTR_BITS'(1);
@@ -331,6 +455,10 @@ module VX_dxa_worker import VX_gpu_pkg::*, VX_dxa_pkg::*; #(
                 perf_gmem_reads_r  <= perf_gmem_reads_r + PERF_CTR_BITS'(perf_gmem_reqs);
                 perf_lmem_writes_r <= perf_lmem_writes_r + PERF_CTR_BITS'(perf_lmem_writes);
                 perf_gmem_lt_r     <= perf_gmem_lt_r + PERF_CTR_BITS'(perf_gmem_span_cycles);
+                if (STREAM != 0) begin
+                    perf_tsu_bursts_r <= perf_tsu_bursts_r + PERF_CTR_BITS'(perf_gmem_reqs);
+                    perf_tsu_bytes_r  <= perf_tsu_bytes_r + PERF_CTR_BITS'(perf_str_bytes);
+                end
             end
         end
     end
@@ -340,6 +468,8 @@ module VX_dxa_worker import VX_gpu_pkg::*, VX_dxa_pkg::*; #(
     assign dxa_perf.lmem_writes  = perf_lmem_writes_r;
     assign dxa_perf.gmem_latency = perf_gmem_lt_r;
     assign dxa_perf.noslot_stalls = perf_noslot_r;
+    assign dxa_perf.tsu_bursts   = perf_tsu_bursts_r;
+    assign dxa_perf.tsu_bytes    = perf_tsu_bytes_r;
 `else
     `UNUSED_VAR (stall_no_slot)
 `endif
