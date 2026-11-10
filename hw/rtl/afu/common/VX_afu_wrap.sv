@@ -807,6 +807,20 @@ module VX_afu_wrap import VX_gpu_pkg::*; #(
             .mem_rsp_tag    (vx_mem_rsp_tag),
             .mem_rsp_ready  (vx_mem_rsp_ready),
 
+        `ifdef VX_CFG_TSU_ENABLE
+            // unreachable (static assert above): TSU needs the merged interface
+            `UNUSED_PIN (str_req_valid),
+            `UNUSED_PIN (str_req_addr),
+            `UNUSED_PIN (str_req_beaten),
+            `UNUSED_PIN (str_req_tag),
+            .str_req_ready  ('{default: 1'b0}),
+            .str_rsp_valid  ('{default: 1'b0}),
+            .str_rsp_data   ('{default: '0}),
+            .str_rsp_beat   ('{default: '0}),
+            .str_rsp_tag    ('{default: '0}),
+            `UNUSED_PIN (str_rsp_ready),
+        `endif
+
             .dcr_req_valid  (dcr_req_valid),
             .dcr_req_rw     (dcr_req_rw),
             .dcr_req_addr   (dcr_req_addr),
