@@ -33,6 +33,7 @@ module VX_mem_to_axi #(
     parameter INTERLEAVE        = 0,
     parameter TAG_BUFFER_SIZE   = 16,
     parameter WRITE_TRACK_DEPTH = 8, // outstanding writes tracked per bank
+    parameter READ_TRACK_DEPTH  = 16, // outstanding reads tracked per bank (write-after-read guard)
     parameter ARBITER           = "R",
     parameter REQ_OUT_BUF       = 0,
     parameter RSP_OUT_BUF       = 0,
@@ -228,6 +229,7 @@ module VX_mem_to_axi #(
         wire xbar_rw_out;
         wire [BANK_ADDR_WIDTH-1:0] xbar_addr_out;
         wire [XBAR_TAG_WIDTH-1:0] xbar_tag_out;
+        `UNUSED_VAR (xbar_tag_out)   // the read path truncates it (only the low bits survive); lint only
         wire [DATA_WIDTH-1:0] xbar_data_out;
         wire [DATA_SIZE-1:0] xbar_byteen_out;
 
@@ -303,15 +305,77 @@ module VX_mem_to_axi #(
         end
         wire rd_hazard = (| wtrack_match);
 
+        // Read tracker (write-after-read ordering): AXI does not order a write
+        // against an outstanding read either, so a write issued while a read to
+        // the same address is still in flight may land first and the read then
+        // returns the NEWER data. A write-through L1 produces exactly this
+        // pattern: a load miss followed by a younger store to the same line
+        // (e.g. a stack reload followed by a spill into the same slot). Reads
+        // complete out of order (one ARID per read), so the tracker is a small
+        // CAM: a slot is taken at the AR handshake, freed when that ARID's last
+        // R beat is accepted, and a write is not started while any tracked
+        // read matches its address. A read only starts when a slot is free.
+        localparam RT_IDW = READ_FULL_TAG_WIDTH;
+        reg [READ_TRACK_DEPTH-1:0][BANK_ADDR_WIDTH-1:0] rtrack_addr;
+        reg [READ_TRACK_DEPTH-1:0][RT_IDW-1:0] rtrack_id;
+        reg [READ_TRACK_DEPTH-1:0] rtrack_valid;
+
+        wire rtrack_full = (& rtrack_valid);
+        wire rtrack_push = m_axi_arvalid[i] && m_axi_arready[i];
+        wire rtrack_pop  = m_axi_rvalid[i] && m_axi_rready[i] && m_axi_rlast[i];
+
+        reg [READ_TRACK_DEPTH-1:0] rtrack_alloc;   // one-hot first free slot
+        always @(*) begin
+            rtrack_alloc = '0;
+            for (integer j = READ_TRACK_DEPTH-1; j >= 0; --j) begin
+                if (~rtrack_valid[j]) rtrack_alloc = READ_TRACK_DEPTH'(1) << j;
+            end
+        end
+
+        wire [READ_TRACK_DEPTH-1:0] rtrack_idm;
+        for (genvar j = 0; j < READ_TRACK_DEPTH; ++j) begin : g_rtrack_idm
+            assign rtrack_idm[j] = rtrack_valid[j] && (rtrack_id[j] == RT_IDW'(m_axi_rid[i]));
+        end
+        reg [READ_TRACK_DEPTH-1:0] rtrack_free;    // one-hot: retire a single slot per response
+        always @(*) begin
+            rtrack_free = '0;
+            for (integer j = READ_TRACK_DEPTH-1; j >= 0; --j) begin
+                if (rtrack_pop && rtrack_idm[j]) rtrack_free = READ_TRACK_DEPTH'(1) << j;
+            end
+        end
+
+        always @(posedge clk) begin
+            if (reset) begin
+                rtrack_valid <= '0;
+            end else begin
+                rtrack_valid <= (rtrack_valid & ~rtrack_free) | (rtrack_push ? rtrack_alloc : '0);
+            end
+            for (integer j = 0; j < READ_TRACK_DEPTH; ++j) begin
+                if (rtrack_push && rtrack_alloc[j]) begin
+                    rtrack_addr[j] <= xbar_addr_out;
+                    rtrack_id[j]   <= RT_IDW'(m_axi_arid[i]);
+                end
+            end
+        end
+
+        `RUNTIME_ASSERT(~rtrack_pop || (| rtrack_free), ("*** AXI read response with no tracked read"))
+
+        wire [READ_TRACK_DEPTH-1:0] rtrack_match;
+        for (genvar j = 0; j < READ_TRACK_DEPTH; ++j) begin : g_rtrack_match
+            assign rtrack_match[j] = rtrack_valid[j] && (rtrack_addr[j] == xbar_addr_out);
+        end
+        wire wr_hazard = (| rtrack_match);
+
         wire wr_in_progress   = m_axi_aw_ack || m_axi_w_ack;
-        wire wr_start_allowed = wr_in_progress || ~wtrack_full;
+        wire wr_start_allowed = wr_in_progress || (~wtrack_full && ~wr_hazard);
+        wire rd_start_allowed = ~rd_hazard && ~rtrack_full;
 
         // axi_write_ready reflects the READY pins alone, so it can be high
         // while the valids are held off. The xbar handshake must carry the
         // same gating as the valids, or a held write is consumed from the
         // xbar without ever reaching AXI.
         assign req_xbar_ready_out[i] = xbar_rw_out ? (axi_write_ready && wr_start_allowed)
-                                                   : (m_axi_arready[i] && ~rd_hazard);
+                                                   : (m_axi_arready[i] && rd_start_allowed);
 
         // AXI write address channel
 
@@ -350,7 +414,7 @@ module VX_mem_to_axi #(
             assign xbar_tag_r_out = READ_TAG_WIDTH'(xbar_tag_out);
         end
 
-        assign m_axi_arvalid[i] = req_xbar_valid_out[i] && ~xbar_rw_out && ~rd_hazard;
+        assign m_axi_arvalid[i] = req_xbar_valid_out[i] && ~xbar_rw_out && rd_start_allowed;
 
         // convert address to byte-addressable space
     if (INTERLEAVE) begin : g_m_axi_araddr_i
