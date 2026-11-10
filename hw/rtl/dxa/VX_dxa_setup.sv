@@ -223,6 +223,11 @@ module VX_dxa_setup import VX_gpu_pkg::*, VX_dxa_pkg::*; (
     reg [DXA_SMEM_ADDR_W-1:0]              s_initial_smem_base;
     reg [31:0]                             s_row_len_bytes;
     reg [DXA_MAX_OUTER_DIMS-1:0][31:0]     s_delta;
+    // Cumulative rewind of the lower dims, (tile1-1)*stride0 + (tile2-1)*stride1 + ...: when outer dim N steps, ALL
+    // lower dims wrap at once (nested odometer), so delta[N] = strideN - sum_{d<N} (tile_d-1)*stride_(d-1), not just
+    // the last term (2026-11-09: a 4D box with tile3 > 1 read every k-step after the first one chunk too far; SimX,
+    // which computes absolute row addresses, was exact).
+    reg [31:0]                             s_rewind;
     reg [DXA_MAX_OUTER_DIMS-1:0][31:0]     s_dim_tiles;
     reg [DXA_MAX_OUTER_DIMS-1:0][31:0]     s_oob_limit;
     reg [31:0]                             s_cfill;
@@ -482,6 +487,7 @@ module VX_dxa_setup import VX_gpu_pkg::*, VX_dxa_pkg::*; (
                     s_delta[1]          <= '0;
                     s_delta[2]          <= '0;
                     s_delta[3]          <= '0;
+                    s_rewind            <= '0;
                     s_dim_tiles[0]      <= dec_tile1;
                     s_dim_tiles[1]      <= dec_tile2;
                     s_dim_tiles[2]      <= dec_tile3;
@@ -532,22 +538,24 @@ module VX_dxa_setup import VX_gpu_pkg::*, VX_dxa_pkg::*; (
                                          + `VX_CFG_MEM_ADDR_WIDTH'(mul_off_result);
                     // delta[1] = stride1 - (tile1-1)*stride0
                     s_delta[1] <= lat_stride1 - mul_dlt_result;
+                    s_rewind   <= mul_dlt_result;
                 end
 
                 // ── Phase 2 capture at ctr=7 (rank≥4) ──
                 if (ctr_r == 4'd7 && lat_rank >= 4) begin
                     s_initial_gmem_base <= s_initial_gmem_base
                                          + `VX_CFG_MEM_ADDR_WIDTH'(mul_off_result);
-                    // delta[2] = stride2 - (tile2-1)*stride1
-                    s_delta[2] <= lat_stride2 - mul_dlt_result;
+                    // delta[2] = stride2 - (tile2-1)*stride1 - (tile1-1)*stride0  (dims 1 and 2 both wrap)
+                    s_delta[2] <= lat_stride2 - (mul_dlt_result + s_rewind);
+                    s_rewind   <= s_rewind + mul_dlt_result;
                 end
 
                 // ── Phase 3 capture at ctr=9 (rank=5) ──
                 if (ctr_r == 4'd9 && lat_rank >= 5) begin
                     s_initial_gmem_base <= s_initial_gmem_base
                                          + `VX_CFG_MEM_ADDR_WIDTH'(mul_off_result);
-                    // delta[3] = stride3 - (tile3-1)*stride2
-                    s_delta[3] <= lat_stride3 - mul_dlt_result;
+                    // delta[3] = stride3 - (tile3-1)*stride2 - (tile2-1)*stride1 - (tile1-1)*stride0
+                    s_delta[3] <= lat_stride3 - (mul_dlt_result + s_rewind);
                 end
 
                 // Transition to STAGED at the last capture cycle.
