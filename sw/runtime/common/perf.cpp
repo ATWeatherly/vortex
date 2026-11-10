@@ -694,6 +694,15 @@ extern "C" vx_result_t vx_device_dump_perf(vx_device_h hdevice, FILE *stream) {
       int dedup_pct  = calc_percent(gmem_dedup, gmem_reads + gmem_dedup);
       perf_print_core(stream, rep_core, "dxa: transfers=%" PRIu64 ", gmem_reads=%" PRIu64 ", gmem_dedup=%" PRIu64 " (rate=%d%%), lmem_writes=%" PRIu64 ", avg_gmem_lat=%.1f, noslot_stalls=%" PRIu64,
                       transfers, gmem_reads, gmem_dedup, dedup_pct, lmem_writes, avg_lat, noslot);
+    #ifdef VX_CSR_MPM_DXA_TSU_BURSTS
+      uint64_t tsu_bursts = 0, tsu_bytes = 0;
+      CHECK_ERR(vx_device_mpm_query(hdevice, mpm_class, VX_CSR_MPM_DXA_TSU_BURSTS, rep_core, &tsu_bursts), { return err; });
+      CHECK_ERR(vx_device_mpm_query(hdevice, mpm_class, VX_CSR_MPM_DXA_TSU_BYTES,  rep_core, &tsu_bytes),  { return err; });
+      if (tsu_bursts) {
+        perf_print_core(stream, rep_core, "tsu: bursts=%" PRIu64 ", bytes=%" PRIu64 ", avg_burst=%.1f B",
+                        tsu_bursts, tsu_bytes, safe_div((double)tsu_bytes, (double)tsu_bursts));
+      }
+    #endif
     }
     {
       double avg_lat = safe_div((double)tot_gmem_lt, (double)tot_transfers);

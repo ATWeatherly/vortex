@@ -76,6 +76,13 @@ using namespace vortex;
 
 static uint32_t g_mem_bank_addr_width = (VX_CFG_PLATFORM_MEMORY_ADDR_WIDTH - log2ceil(VX_CFG_PLATFORM_MEMORY_NUM_BANKS));
 
+#ifdef VX_CFG_TSU_ENABLE
+// Tile-stream masters (mirrors VX_gpu_pkg VX_STR_PORTS).
+#define TSU_NUM_SOCKETS ((VX_CFG_NUM_CORES / VX_CFG_SOCKET_SIZE) > 0 ? (VX_CFG_NUM_CORES / VX_CFG_SOCKET_SIZE) : 1)
+#define TSU_STR_PORTS (VX_CFG_NUM_TSU_CORES * VX_CFG_TSU_MASTERS_PER_WORKER * TSU_NUM_SOCKETS * VX_CFG_NUM_CLUSTERS)
+#define TSU_BEAT_SIZE VX_CFG_PLATFORM_MEMORY_DATA_SIZE
+#endif
+
 static uint64_t timestamp = 0;
 
 double sc_time_stamp() {
@@ -127,6 +134,16 @@ public:
     if (const char* e = std::getenv("VORTEX_MEM_RAW_STALL")) throttle_raw_ = (std::atoi(e) != 0);
     if (const char* e = std::getenv("VORTEX_MEM_PIPE_LATENCY")) throttle_lat_ = std::atoll(e);
     if (const char* e = std::getenv("VORTEX_MEM_COUPLED")) throttle_coupled_ = (std::atoi(e) != 0);
+  #ifdef VX_CFG_TSU_ENABLE
+    // Stream-port model: VORTEX_STR_MAX_RD outstanding bursts per port (the
+    // U50 platform accepts 16), first beat after VORTEX_STR_LATENCY cycles
+    // (default: the main-memory floor, i.e. VORTEX_MEM_PIPE_LATENCY/2 if set,
+    // else 30 cycles ~ the rtlsim DRAM model), then one beat per cycle.
+    if (const char* e = std::getenv("VORTEX_STR_MAX_RD")) str_max_rd_ = std::atoi(e);
+    str_lat_ticks_ = (throttle_lat_ ? throttle_lat_ : 60);
+    if (const char* e = std::getenv("VORTEX_STR_LATENCY")) str_lat_ticks_ = 2 * std::atoll(e);
+    printf("[sim] stream ports: %d, max_rd=%u, latency=%lu cycles\n", TSU_STR_PORTS, str_max_rd_, (unsigned long)(str_lat_ticks_ / 2));
+  #endif
     if (throttle_on()) {
       printf("[sim] AXI throttle: max_wr=%u max_rd=%u raw_stall=%d pipe_latency=%lu coupled=%d\n", throttle_max_wr_, throttle_max_rd_, (int)throttle_raw_, (unsigned long)throttle_lat_, (int)throttle_coupled_);
     }
@@ -296,6 +313,11 @@ private:
     for (int b = 0; b < VX_CFG_PLATFORM_MEMORY_NUM_BANKS; ++b) {
       device_->mem_req_ready[b] = 1;
     }
+  #ifdef VX_CFG_TSU_ENABLE
+    for (int p = 0; p < TSU_STR_PORTS; ++p) {
+      device_->str_req_ready[p] = 1;
+    }
+  #endif
   }
 
   void tick() {
@@ -303,11 +325,17 @@ private:
     this->eval();
 
     this->mem_bus_eval(0);
+  #ifdef VX_CFG_TSU_ENABLE
+    this->str_bus_eval(0);
+  #endif
 
     device_->clk = 1;
     this->eval();
 
     this->mem_bus_eval(1);
+  #ifdef VX_CFG_TSU_ENABLE
+    this->str_bus_eval(1);
+  #endif
 
     dram_sim_.tick();
 
@@ -349,7 +377,68 @@ private:
       device_->mem_req_ready[b] = 0;
       device_->mem_rsp_valid[b] = 0;
     }
+  #ifdef VX_CFG_TSU_ENABLE
+    for (int p = 0; p < TSU_STR_PORTS; ++p) {
+      device_->str_req_ready[p] = 0;
+      device_->str_rsp_valid[p] = 0;
+      str_reqs_[p].clear();
+    }
+  #endif
   }
+
+#ifdef VX_CFG_TSU_ENABLE
+  // One AXI read master per stream port: a request is one burst over the
+  // contiguous wanted beats of a granule; beats return in order, one per cycle,
+  // the first after str_lat_ticks_; bursts are served in issue order.
+  void str_bus_eval(bool clk) {
+    if (!clk) {
+      for (int p = 0; p < TSU_STR_PORTS; ++p) {
+        str_rsp_ready_[p] = device_->str_rsp_ready[p];
+      }
+      return;
+    }
+    for (int p = 0; p < TSU_STR_PORTS; ++p) {
+      auto& q = str_reqs_[p];
+      // retire the presented beat
+      if (device_->str_rsp_valid[p] && str_rsp_ready_[p]) {
+        device_->str_rsp_valid[p] = 0;
+        auto& r = q.front();
+        if (++r.next_beat > r.last_beat) {
+          q.pop_front();
+        }
+      }
+      // present the next beat
+      if (!device_->str_rsp_valid[p] && !q.empty()) {
+        auto& r = q.front();
+        if (timestamp >= r.t_ready) {
+          uint64_t baddr = r.byte_addr + uint64_t(r.next_beat) * TSU_BEAT_SIZE;
+          ram_->read(VDataCast<void*, TSU_BEAT_SIZE>::get(device_->str_rsp_data[p]), baddr, TSU_BEAT_SIZE);
+          device_->str_rsp_beat[p] = r.next_beat;
+          device_->str_rsp_tag[p]  = r.tag;
+          device_->str_rsp_valid[p] = 1;
+        }
+      }
+      // accept a request
+      if (device_->str_req_valid[p] && device_->str_req_ready[p]) {
+        str_req_t r;
+        uint32_t beaten = uint32_t(device_->str_req_beaten[p]);
+        uint32_t first = 0, last = 0;
+        bool found = false;
+        for (uint32_t b = 0; b < 32; ++b) {
+          if ((beaten >> b) & 1) { if (!found) { first = b; found = true; } last = b; }
+        }
+        r.byte_addr = uint64_t(device_->str_req_addr[p]) * VX_CFG_TSU_BURST_BYTES;
+        r.next_beat = first;
+        r.last_beat = last;
+        r.tag       = uint64_t(device_->str_req_tag[p]);
+        r.t_ready   = timestamp + str_lat_ticks_;
+        q.push_back(r);
+        ++str_bursts_;
+      }
+      device_->str_req_ready[p] = (str_max_rd_ == 0) || (q.size() < str_max_rd_);
+    }
+  }
+#endif
 
   void mem_bus_eval(bool clk) {
     if (!clk) {
@@ -540,6 +629,21 @@ private:
   bool req_done(const mem_req_t* r) const { return r->ready && (timestamp - r->t_issue) >= throttle_lat_; }
 
   std::array<bool, VX_CFG_PLATFORM_MEMORY_NUM_BANKS> mem_rd_rsp_ready_;
+
+#ifdef VX_CFG_TSU_ENABLE
+  typedef struct {
+    uint64_t byte_addr;
+    uint32_t next_beat;
+    uint32_t last_beat;
+    uint64_t tag;
+    uint64_t t_ready;
+  } str_req_t;
+  std::deque<str_req_t> str_reqs_[TSU_STR_PORTS];
+  std::array<bool, TSU_STR_PORTS> str_rsp_ready_ = {};
+  uint32_t str_max_rd_    = 16;
+  uint64_t str_lat_ticks_ = 60;
+  uint64_t str_bursts_    = 0;
+#endif
 
   DramSim dram_sim_;
 

@@ -47,7 +47,6 @@ module VX_dxa_worker import VX_gpu_pkg::*, VX_dxa_pkg::*; #(
     // Address-generator granule: an L1 line for the line engine, a burst for
     // the stream engine.
     localparam GMEM_BYTES      = STREAM ? TSU_BURST_BYTES : `VX_CFG_L1_LINE_SIZE;
-    localparam GMEM_DATAW      = GMEM_BYTES * 8;
     localparam GMEM_OFF_BITS   = `CLOG2(GMEM_BYTES);
     localparam GMEM_ADDR_WIDTH = `VX_CFG_MEM_ADDR_WIDTH - GMEM_OFF_BITS;
 

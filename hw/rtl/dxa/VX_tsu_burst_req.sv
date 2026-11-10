@@ -223,6 +223,7 @@ module VX_tsu_burst_req import VX_gpu_pkg::*, VX_dxa_pkg::*; #(
     wire [BEAT_W-1:0] present_beat = bus_rsp_present ? bus_rsp_beat : oob_beat_r[oob_tag];
     slot_t ps;
     assign ps = slot_table_r[present_tag];
+    `UNUSED_VAR (ps.nbeats)
 
     // Per-beat byte window inside the granule, clipped to the valid span.
     wire [SPAN_W-1:0] p_lo0  = SPAN_W'(ps.byte_offset);

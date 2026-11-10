@@ -109,6 +109,19 @@ module rtlsim_shim import VX_gpu_pkg::*; #(
         .mem_rsp_tag    (vx_mem_rsp_tag),
         .mem_rsp_ready  (vx_mem_rsp_ready),
 
+    `ifdef VX_CFG_TSU_ENABLE
+        .str_req_valid  (str_req_valid),
+        .str_req_addr   (str_req_addr),
+        .str_req_beaten (str_req_beaten),
+        .str_req_tag    (str_req_tag),
+        .str_req_ready  (str_req_ready),
+        .str_rsp_valid  (str_rsp_valid),
+        .str_rsp_data   (str_rsp_data),
+        .str_rsp_beat   (str_rsp_beat),
+        .str_rsp_tag    (str_rsp_tag),
+        .str_rsp_ready  (str_rsp_ready),
+    `endif
+
         .dcr_req_valid  (dcr_req_valid),
         .dcr_req_rw     (dcr_req_rw),
         .dcr_req_addr   (dcr_req_addr),

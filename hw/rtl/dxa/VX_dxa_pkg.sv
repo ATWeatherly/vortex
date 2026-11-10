@@ -56,6 +56,7 @@ package VX_dxa_pkg;
     //                      1 = TILEBUF_B, 2 = TILEBUF_A (reserved for phase 4)
     //   SLOT      [18:15]: tile-buffer slot (phase 4)
     //   ENGINE    [19]   : 0 = DXA line engine, 1 = TSU burst engine
+    /* verilator lint_off UNUSEDPARAM */
     localparam DXA_DESC_META_DEST_KIND_BITS = 2;
     localparam DXA_DESC_META_SLOT_BITS      = 4;
     localparam DXA_DESC_META_ENGINE_BITS    = 1;
@@ -81,6 +82,7 @@ package VX_dxa_pkg;
     // Master select inside a worker: byte-address bits [SEL_LSB +: log2(M)],
     // expressed in granule-address units.
     localparam TSU_SEL_LSB_GRANULE = `VX_CFG_TSU_SEL_LSB - `CLOG2(TSU_BURST_BYTES);
+    /* verilator lint_on UNUSEDPARAM */
 
     // DXA request data — core → DXA control path.
     typedef struct packed {
