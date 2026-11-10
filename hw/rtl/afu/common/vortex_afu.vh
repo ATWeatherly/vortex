@@ -80,6 +80,53 @@
     .m_axi_mem_``i``_bresp(m_axi_mem_``i``_bresp), \
     .m_axi_mem_``i``_bid(m_axi_mem_``i``_bid)
 
+// Tile-stream AXI4 read master <i> (read channels only; one per HBM
+// pseudo-channel, see hw/syn/xilinx/xrt/platforms.mk TSU_MASTERS).
+`define GEN_AXI_STR(i) \
+	output wire                                 m_axi_str_``i``_arvalid, \
+	input  wire                                 m_axi_str_``i``_arready, \
+	output wire [C_M_AXI_MEM_ADDR_WIDTH-1:0]   	m_axi_str_``i``_araddr, \
+	output wire [C_M_AXI_MEM_ID_WIDTH-1:0]     	m_axi_str_``i``_arid, \
+	output wire [7:0]                           m_axi_str_``i``_arlen, \
+	output wire [2:0]                           m_axi_str_``i``_arsize, \
+	output wire [1:0]                           m_axi_str_``i``_arburst, \
+	input  wire                                 m_axi_str_``i``_rvalid, \
+	output wire                                 m_axi_str_``i``_rready, \
+	input  wire [C_M_AXI_MEM_DATA_WIDTH-1:0] 	m_axi_str_``i``_rdata, \
+	input  wire                                 m_axi_str_``i``_rlast, \
+	input  wire [C_M_AXI_MEM_ID_WIDTH-1:0]   	m_axi_str_``i``_rid, \
+	input  wire [1:0]                           m_axi_str_``i``_rresp
+
+`define AXI_STR_ARGS(i) \
+    .m_axi_str_``i``_arvalid(m_axi_str_``i``_arvalid), \
+    .m_axi_str_``i``_arready(m_axi_str_``i``_arready), \
+    .m_axi_str_``i``_araddr(m_axi_str_``i``_araddr), \
+    .m_axi_str_``i``_arid(m_axi_str_``i``_arid), \
+    .m_axi_str_``i``_arlen(m_axi_str_``i``_arlen), \
+    .m_axi_str_``i``_arsize(m_axi_str_``i``_arsize), \
+    .m_axi_str_``i``_arburst(m_axi_str_``i``_arburst), \
+    .m_axi_str_``i``_rvalid(m_axi_str_``i``_rvalid), \
+    .m_axi_str_``i``_rready(m_axi_str_``i``_rready), \
+    .m_axi_str_``i``_rdata(m_axi_str_``i``_rdata), \
+    .m_axi_str_``i``_rlast(m_axi_str_``i``_rlast), \
+    .m_axi_str_``i``_rid(m_axi_str_``i``_rid), \
+    .m_axi_str_``i``_rresp(m_axi_str_``i``_rresp)
+
+`define AXI_STR_TO_ARRAY(i) \
+	assign m_axi_str_``i``_arvalid = m_axi_str_arvalid_a[i]; \
+	assign m_axi_str_arready_a[i] = m_axi_str_``i``_arready; \
+	assign m_axi_str_``i``_araddr = m_axi_str_araddr_a[i]; \
+	assign m_axi_str_``i``_arid = m_axi_str_arid_a[i]; \
+	assign m_axi_str_``i``_arlen = m_axi_str_arlen_a[i]; \
+	assign m_axi_str_``i``_arsize = m_axi_str_arsize_a[i]; \
+	assign m_axi_str_``i``_arburst = m_axi_str_arburst_a[i]; \
+	assign m_axi_str_rvalid_a[i] = m_axi_str_``i``_rvalid; \
+	assign m_axi_str_``i``_rready = m_axi_str_rready_a[i]; \
+	assign m_axi_str_rdata_a[i] = m_axi_str_``i``_rdata; \
+	assign m_axi_str_rlast_a[i] = m_axi_str_``i``_rlast; \
+	assign m_axi_str_rid_a[i] = m_axi_str_``i``_rid; \
+	assign m_axi_str_rresp_a[i] = m_axi_str_``i``_rresp
+
 // Host-memory AXI4 master port (CP command ring + host side of DMA).
 // XRT pins this kernel port to HOST[0] (see hw/syn/xilinx/xrt/platforms.mk).
 `define GEN_AXI_HOST \
