@@ -408,6 +408,17 @@ module VX_tcu_core import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
 
     wire [TCU_TC_M-1:0][TCU_TC_N-1:0][31:0] d_val;
 
+`ifdef VX_CFG_TCU_DSP_I8
+    // DSP-centric int8 engine: the per-(i,j) operand pipes below are kept and
+    // collected here; the FEDP instances are replaced by one row-pair module
+    // per (i/2, j) after the grid (two rows share the B column and one DSP per
+    // element pair). Integer int8/uint8 only.
+    `STATIC_ASSERT (TCU_TC_M % 2 == 0, ("VX_CFG_TCU_DSP_I8 needs an even TCU_TC_M (actual=%0d)", TCU_TC_M))
+    wire [TCU_TC_M-1:0][TCU_TC_N-1:0][FEDP_K-1:0][31:0] dsp_a_row_r, dsp_b_col_r;
+    wire [TCU_TC_M-1:0][TCU_TC_N-1:0][31:0] dsp_c_val_r;
+    wire [TCU_TC_M-1:0][TCU_TC_N-1:0][4:0]  dsp_fmt_s_r, dsp_fmt_d_r;
+`endif
+
     for (genvar i = 0; i < TCU_TC_M; ++i) begin : g_i
         for (genvar j = 0; j < TCU_TC_N; ++j) begin : g_j
         `ifdef VX_CFG_TCU_SPARSE_ENABLE
@@ -602,7 +613,19 @@ module VX_tcu_core import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
             );
         `endif
 
-        `ifdef VX_CFG_TCU_TYPE_DPI
+        `ifdef VX_CFG_TCU_DSP_I8
+            assign dsp_a_row_r[i][j] = a_row_r;
+            assign dsp_b_col_r[i][j] = b_col_r;
+            assign dsp_c_val_r[i][j] = c_val_r;
+            assign dsp_fmt_s_r[i][j] = fmt_s_r;
+            assign dsp_fmt_d_r[i][j] = fmt_d_r;
+        `ifdef VX_CFG_TCU_MX_ENABLE
+            `UNUSED_VAR ({sf_a_r, sf_b_r})
+        `endif
+        `ifdef VX_CFG_TCU_TYPE_TFR
+            `UNUSED_VAR (vld_mask_r)
+        `endif
+        `elsif VX_CFG_TCU_TYPE_DPI
             VX_tcu_fedp_dpi #(
                 .INSTANCE_ID (INSTANCE_ID),
                 .LATENCY (FEDP_LATENCY),
@@ -714,6 +737,35 @@ module VX_tcu_core import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
         `endif // DBG_TRACE_TCU
         end
     end
+
+`ifdef VX_CFG_TCU_DSP_I8
+    // Row-pair DSP engines: rows (2p, 2p+1) of column j share b_col.
+    for (genvar p = 0; p < TCU_TC_M / 2; ++p) begin : g_dsp_p
+        for (genvar j = 0; j < TCU_TC_N; ++j) begin : g_dsp_j
+            `UNUSED_VAR (dsp_fmt_s_r[2*p+1][j])
+            `UNUSED_VAR (dsp_fmt_d_r[2*p+1][j])
+            `UNUSED_VAR (dsp_b_col_r[2*p+1][j])
+            VX_tcu_fedp_dsp_i8 #(
+                .INSTANCE_ID (INSTANCE_ID),
+                .LATENCY (FEDP_LATENCY),
+                .N (FEDP_K)
+            ) fedp_pair (
+                .clk    (clk),
+                .reset  (reset),
+                .enable (1'b1),
+                .fmt_s  (dsp_fmt_s_r[2*p][j]),
+                .fmt_d  (dsp_fmt_d_r[2*p][j]),
+                .a_row0 (dsp_a_row_r[2*p][j]),
+                .a_row1 (dsp_a_row_r[2*p+1][j]),
+                .b_col  (dsp_b_col_r[2*p][j]),
+                .c_val0 (dsp_c_val_r[2*p][j]),
+                .c_val1 (dsp_c_val_r[2*p+1][j]),
+                .d_val0 (d_val[2*p][j]),
+                .d_val1 (d_val[2*p+1][j])
+            );
+        end
+    end
+`endif
 
     // -----------------------------------------------------------------------
     // Result landing queue
