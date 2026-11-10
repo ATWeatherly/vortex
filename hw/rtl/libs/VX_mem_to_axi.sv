@@ -33,7 +33,7 @@ module VX_mem_to_axi #(
     parameter INTERLEAVE        = 0,
     parameter TAG_BUFFER_SIZE   = 16,
     parameter WRITE_TRACK_DEPTH = 8, // outstanding writes tracked per bank
-    parameter READ_TRACK_DEPTH  = 16, // outstanding reads tracked per bank (write-after-read guard)
+    parameter READ_TRACK_DEPTH  = 8,  // outstanding reads tracked per bank (write-after-read guard); 16 x 32 HBM banks over-congested U50 routing
     parameter ARBITER           = "R",
     parameter REQ_OUT_BUF       = 0,
     parameter RSP_OUT_BUF       = 0,
