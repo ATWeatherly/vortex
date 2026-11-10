@@ -29,6 +29,14 @@ else ifneq ($(findstring xilinx_u50,$(XSA)),)
   CONFIGS += -DVX_CFG_PLATFORM_MEMORY_NUM_BANKS=32 -DVX_CFG_PLATFORM_MEMORY_ADDR_WIDTH=33
   CONFIGS += -DPLATFORM_MERGED_MEMORY_INTERFACE
   VPP_FLAGS += --connectivity.sp vortex_afu_1.m_axi_mem_0:HBM[0:31]
+  # Tile stream unit (balanced-design spec phase 1): TSU_MASTERS=<n> (32, 16 or 8) adds n read-only
+  # masters m_axi_str_<i>; master i lands on pseudo-channel i*(32/n) (the HBM switch reaches the rest of
+  # its group; phase 0 measures the per-port cost). The masters are split over sockets and TSU workers,
+  # so n must be a multiple of sockets x VX_CFG_TSU_MASTERS_PER_WORKER (VX_afu_wrap asserts it).
+  ifneq ($(TSU_MASTERS),)
+    CONFIGS += -DVX_CFG_TSU_ENABLE -DVX_CFG_STREAM_NUM_MASTERS=$(TSU_MASTERS)
+    VPP_FLAGS += $(shell n=$(TSU_MASTERS); i=0; while [ $$i -lt $$n ]; do echo "--connectivity.sp vortex_afu_1.m_axi_str_$$i:HBM[$$((i*32/n))]"; i=$$((i+1)); done)
+  endif
 else ifneq ($(findstring xilinx_u280,$(XSA)),)
   # 8 GB of HBM2 with 32 channels (256 MB per channel)
   CONFIGS += -DVX_CFG_PLATFORM_MEMORY_NUM_BANKS=32 -DVX_CFG_PLATFORM_MEMORY_ADDR_WIDTH=33

@@ -38,6 +38,11 @@ module vortex_afu #(
 	`MP_REPEAT (`VX_CFG_PLATFORM_MEMORY_NUM_BANKS, GEN_AXI_MEM, MP_COMMA),
 `endif
 
+`ifdef VX_CFG_TSU_ENABLE
+	// Tile-stream AXI4 read masters (platforms.mk: m_axi_str_<i>:HBM[<i>])
+	`MP_REPEAT (`VX_CFG_STREAM_NUM_MASTERS, GEN_AXI_STR, MP_COMMA),
+`endif
+
     // AXI4 host-memory master interface (CP command ring + host side of DMA)
 	`GEN_AXI_HOST,
 
@@ -89,6 +94,9 @@ module vortex_afu #(
 		`MP_REPEAT (1, AXI_MEM_ARGS, MP_COMMA),
 	`else
 		`MP_REPEAT (`VX_CFG_PLATFORM_MEMORY_NUM_BANKS, AXI_MEM_ARGS, MP_COMMA),
+	`endif
+	`ifdef VX_CFG_TSU_ENABLE
+		`MP_REPEAT (`VX_CFG_STREAM_NUM_MASTERS, AXI_STR_ARGS, MP_COMMA),
 	`endif
 		`AXI_HOST_ARGS,
 		.s_axi_ctrl_awvalid (s_axi_ctrl_awvalid),
