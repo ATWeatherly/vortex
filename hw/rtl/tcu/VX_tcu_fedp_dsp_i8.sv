@@ -20,14 +20,17 @@
 //     d_val0 = c_val0 + sum_e a_row0[e] * b_col[e]
 //     d_val1 = c_val1 + sum_e a_row1[e] * b_col[e]      (int32, wrapping)
 // with ONE DSP48E2 per element pair: the two activations of an element are
-// packed into the 30-bit A port SEP bits apart and multiplied by the shared
+// packed SEP bits apart into the 27-bit multiplier input (the DSP48E2 multiplier
+// is 27x18: A port bits above 27 do not reach it) and multiplied by the shared
 // weight byte on the 18-bit B port,
-//     P = (a1 * 2^SEP + a0) * b = (a1*b) * 2^SEP + (a0*b),
-// so the sum over the NE elements is  S1 * 2^SEP + S0.  With SEP = 21 the low
-// field holds |S0| <= NE * 2^14 (signed) or NE * 255^2 (unsigned) for NE <= 16
-// without touching the high field, and the extraction is exact:
-//     S0 = sext(P[SEP-1:0])            (zext when unsigned)
-//     S1 = (P >>> SEP) + P[SEP-1]      (borrow correction; no term when unsigned)
+//     P = (a1 * 2^SEP + a0) * b = (a1*b) * 2^SEP + (a0*b).
+// Products are summed in groups of 4 in packed form; for a group,
+// P_g = S1g * 2^SEP + S0g with |S0g| <= 4 * 2^14 < 2^17 (signed) or
+// S0g <= 4 * 255^2 < 2^18 (unsigned), so with SEP = 18 the fields do not
+// interfere and the per-group extraction is exact:
+//     S0g = sext(P_g[SEP-1:0])          (zext when unsigned)
+//     S1g = (P_g >>> SEP) + P_g[SEP-1]  (borrow correction; no term when unsigned)
+// and the group fields are then summed per row.
 // Integer formats only (TCU_I8_ID / TCU_U8_ID); other formats return 0.
 // Bit-exact with the TFR int8 path, which also produces exact int32 (its
 // norm_round stage reconstructs two's complement and adds C's high bits).
@@ -60,14 +63,12 @@ module VX_tcu_fedp_dsp_i8 import VX_tcu_pkg::*; #(
     `UNUSED_VAR (reset)
 
     localparam NE  = 4 * N;         // int8 elements per row = DSP48E2 count
-    localparam SEP = 21;            // packed-field separation (bits)
-    localparam AW  = 30;            // DSP48E2 A port
+    localparam SEP = 18;            // packed-field separation (bits)
+    localparam AW  = 27;            // DSP48E2 multiplier A input
     localparam BW  = 18;            // DSP48E2 B port
-    localparam PW  = 48;            // DSP48E2 P
-    localparam NG  = (NE + 3) / 4;  // partial-sum groups of 4
-
-    // Field bound: |S0| < 2^(SEP-1) (signed) / S0 < 2^SEP (unsigned) needs NE * 2^16 <= 2^SEP.
-    `STATIC_ASSERT (NE <= 16, ("VX_tcu_fedp_dsp_i8: NE=%0d exceeds the packed-field bound (SEP=%0d)", NE, SEP))
+    localparam PW  = AW + BW;       // 45-bit product
+    localparam GW  = PW + 2;        // group sum of 4 products
+    localparam NG  = (NE + 3) / 4;  // partial-sum groups of 4 (field bound holds per group)
 
     localparam PROD_STAGES   = LATENCY - 3;   // 1 (LATENCY 4) or 2 (LATENCY 5)
     `STATIC_ASSERT (PROD_STAGES == 1 || PROD_STAGES == 2,
@@ -114,7 +115,7 @@ module VX_tcu_fedp_dsp_i8 import VX_tcu_pkg::*; #(
     end
 
     // -----------------------------------------------------------------------
-    // S2[.S3]: one 30x18 signed product per element (DSP48E2 M [+ P] register)
+    // S2[.S3]: one 27x18 signed product per element (DSP48E2 M [+ P] register)
     // -----------------------------------------------------------------------
     logic signed [PW-1:0] prod_r [NE];
     for (genvar e = 0; e < NE; ++e) begin : g_mul
@@ -152,13 +153,13 @@ module VX_tcu_fedp_dsp_i8 import VX_tcu_pkg::*; #(
     // -----------------------------------------------------------------------
     // S4: partial sums of up to 4 products (registered)
     // -----------------------------------------------------------------------
-    logic signed [PW-1:0] psum_r [NG];
+    logic signed [GW-1:0] psum_r [NG];
     for (genvar g = 0; g < NG; ++g) begin : g_psum
-        logic signed [PW-1:0] psum;
+        logic signed [GW-1:0] psum;
         always_comb begin
             psum = '0;
             for (int q = 0; q < 4; ++q) begin
-                if (g*4 + q < NE) psum = psum + prod_r[g*4 + q];
+                if (g*4 + q < NE) psum = psum + GW'(prod_r[g*4 + q]);
             end
         end
         always_ff @(posedge clk) begin
@@ -180,18 +181,21 @@ module VX_tcu_fedp_dsp_i8 import VX_tcu_pkg::*; #(
     );
 
     // -----------------------------------------------------------------------
-    // S5: final sum, field extraction, C add (registered output)
+    // S5: per-group field extraction, field sums, C add (registered output)
     // -----------------------------------------------------------------------
-    logic signed [PW-1:0] total;
+    logic [31:0] s0, s1;
     always_comb begin
-        total = '0;
-        for (int g = 0; g < NG; ++g) total = total + psum_r[g];
+        s0 = '0;
+        s1 = '0;
+        for (int g = 0; g < NG; ++g) begin
+            logic [SEP-1:0]    f_lo;
+            logic [GW-SEP-1:0] f_hi;
+            f_lo = psum_r[g][SEP-1:0];
+            f_hi = psum_r[g][GW-1:SEP];                 // arithmetic: psum_r is signed
+            s0 = s0 + (s4_signed ? 32'($signed(f_lo)) : 32'(f_lo));
+            s1 = s1 + 32'($signed(f_hi)) + (s4_signed ? 32'(f_lo[SEP-1]) : 32'b0);
+        end
     end
-
-    wire [SEP-1:0]    f_lo  = total[SEP-1:0];
-    wire [PW-SEP-1:0] f_hi  = total[PW-1:SEP];           // arithmetic shift: total is signed
-    wire [31:0] s0 = s4_signed ? 32'($signed(f_lo)) : 32'(f_lo);
-    wire [31:0] s1 = s4_signed ? (32'($signed(f_hi)) + 32'(f_lo[SEP-1])) : 32'($signed(f_hi));
 
     logic [31:0] d0_r, d1_r;
     always_ff @(posedge clk) begin
