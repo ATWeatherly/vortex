@@ -90,6 +90,10 @@ ifneq (,$(filter -DVX_CFG_EXT_TCU_ENABLE, $(XCONFIGS)))
 	else ifneq (,$(filter -DVX_CFG_TCU_TYPE_TFR, $(XCONFIGS)))
 		RTL_INCLUDE += -I$(RTL_DIR)/tcu/tfr
 	endif
+	# TCU-side sequencer (tgemm ISA) drives the 512-MAC block
+	ifneq (,$(filter -DVX_CFG_TCU_SEQ_ENABLE, $(XCONFIGS)))
+		RTL_INCLUDE += -I$(RTL_DIR)/tcu/mac
+	endif
 endif
 
 # Add DXA extension sources

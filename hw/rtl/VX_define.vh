@@ -115,6 +115,31 @@
     `define TCU_META_ENABLE
 `endif
 
+// TCU-side sequencer (tgemm ISA, VX_CFG_TCU_SEQ_ENABLE): owns the TCU's LSU client port (shared with
+// the metadata AGU's — the two are mutually exclusive in v1) and releases twait/tfence-stalled warps
+// through the scheduler unlock port (shared with the RTU's — also mutually exclusive in v1).
+`ifdef VX_CFG_TCU_SEQ_ENABLE
+    `ifdef TCU_META_ENABLE
+        `error "VX_CFG_TCU_SEQ_ENABLE v1 cannot be combined with TCU MX / sparse (shared LSU client port)"
+    `endif
+    `ifdef VX_CFG_EXT_RTU_ENABLE
+        `error "VX_CFG_TCU_SEQ_ENABLE v1 cannot be combined with the RTU (shared scheduler unlock port)"
+    `endif
+    `ifndef VX_CFG_TCU_WGMMA_ENABLE
+        `error "VX_CFG_TCU_SEQ_ENABLE requires VX_CFG_TCU_WGMMA_ENABLE (TCU LMEM DMA port)"
+    `endif
+`endif
+`ifdef TCU_META_ENABLE
+    `define TCU_MEMCLIENT_ENABLE
+`elsif VX_CFG_TCU_SEQ_ENABLE
+    `define TCU_MEMCLIENT_ENABLE
+`endif
+`ifdef VX_CFG_EXT_RTU_ENABLE
+    `define SCHED_UNLOCK_ENABLE
+`elsif VX_CFG_TCU_SEQ_ENABLE
+    `define SCHED_UNLOCK_ENABLE
+`endif
+
 // Integer mul/div via DPI: simulation only (not synthesis) with DPI enabled.
 // Internal derived macros — not VX_CFG_* knobs.
 `ifndef SYNTHESIS

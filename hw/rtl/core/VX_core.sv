@@ -86,8 +86,8 @@ module VX_core import VX_gpu_pkg::*, VX_tlb_pkg::*; #(
     VX_commit_sched_if  commit_sched_if();
     VX_branch_ctl_if    branch_ctl_if[`VX_CFG_NUM_ALU_BLOCKS]();
     VX_warp_ctl_if      warp_ctl_if();
-`ifdef VX_CFG_EXT_RTU_ENABLE
-    VX_sched_unlock_if  sched_unlock_if();  // RTU TRACE wstall release -> scheduler
+`ifdef SCHED_UNLOCK_ENABLE
+    VX_sched_unlock_if  sched_unlock_if();  // RTU TRACE / TCU twait,tfence wstall release -> scheduler
 `endif
 
     VX_dispatch_if      dispatch_if[NUM_EX_UNITS * `VX_CFG_ISSUE_WIDTH]();
@@ -114,7 +114,7 @@ module VX_core import VX_gpu_pkg::*, VX_tlb_pkg::*; #(
     VX_lsu_sched_if lsu_client_if [`VX_CFG_NUM_LSU_BLOCKS]();
     wire [`VX_CFG_NUM_LSU_BLOCKS-1:0] lsu_sched_empty;
 
-`ifdef TCU_META_ENABLE
+`ifdef TCU_MEMCLIENT_ENABLE
     VX_lsu_sched_if tcu_mem_if();
 `endif
 
@@ -234,7 +234,7 @@ module VX_core import VX_gpu_pkg::*, VX_tlb_pkg::*; #(
 
         .warp_ctl_if    (warp_ctl_if),
         .branch_ctl_if  (branch_ctl_if),
-    `ifdef VX_CFG_EXT_RTU_ENABLE
+    `ifdef SCHED_UNLOCK_ENABLE
         .sched_unlock_if (sched_unlock_if),
     `endif
 
@@ -329,8 +329,11 @@ module VX_core import VX_gpu_pkg::*, VX_tlb_pkg::*; #(
         // execute and lsu_mem_if (which connects to mem_unit).
         .lsu_client_if  (lsu_client_if),
 
-    `ifdef TCU_META_ENABLE
+    `ifdef TCU_MEMCLIENT_ENABLE
         .tcu_mem_if     (tcu_mem_if),
+    `endif
+    `ifdef VX_CFG_TCU_SEQ_ENABLE
+        .store_drained  (store_drained),
     `endif
 
         .dispatch_if    (dispatch_if),
@@ -354,6 +357,8 @@ module VX_core import VX_gpu_pkg::*, VX_tlb_pkg::*; #(
     `endif
     `ifdef VX_CFG_EXT_RTU_ENABLE
         .rtu_bus_if     (rtu_bus_if),
+    `endif
+    `ifdef SCHED_UNLOCK_ENABLE
         .sched_unlock_if (sched_unlock_if),
     `endif
 
@@ -378,7 +383,7 @@ module VX_core import VX_gpu_pkg::*, VX_tlb_pkg::*; #(
     // Block 0 wires client 1 to the warp-level TCU AGU; other blocks tie it off.
     // Symmetric NUM_CLIENTS keeps module generation uniform — tied-off clients
     // cost only a few muxes inside the round-robin arbiter.
-`ifdef TCU_META_ENABLE
+`ifdef TCU_MEMCLIENT_ENABLE
     localparam LSU_SCHED_NUM_CLIENTS = 2;
 `else
     localparam LSU_SCHED_NUM_CLIENTS = 1;
@@ -396,8 +401,8 @@ module VX_core import VX_gpu_pkg::*, VX_tlb_pkg::*; #(
         assign lsu_client_if[block_idx].rsp_data   = sched_client_if[0].rsp_data;
         assign sched_client_if[0].rsp_ready    = lsu_client_if[block_idx].rsp_ready;
 
-    `ifdef TCU_META_ENABLE
-        // Client 1 — TCU AGU on block 0; tied off on other blocks.
+    `ifdef TCU_MEMCLIENT_ENABLE
+        // Client 1 — TCU AGU / sequencer slot loader on block 0; tied off on other blocks.
         if (block_idx == 0) begin : g_tcu_client
             assign sched_client_if[1].req_valid = tcu_mem_if.req_valid;
             assign sched_client_if[1].req_data  = tcu_mem_if.req_data;

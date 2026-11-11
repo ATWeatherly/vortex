@@ -748,6 +748,29 @@ module VX_decode import
                         end
                     end
                 `endif
+                `ifdef VX_CFG_TCU_SEQ_ENABLE
+                    7'h05: begin // TCU-side sequencer (tgemm ISA): funct3 0 tgemm.i8, 1 tacc.st, 2 twait,
+                                 // 3 tbuf.ldx, 4 tbuf.ldw, 5 tcfg, 6 tfence. Single uops, no GPR writeback.
+                        ex_type = EX_TCU;
+                        op_type = INST_OP_BITS'(INST_TCU_SEQ);
+                        op_args.tcu.cd_nregs     = '0;
+                        op_args.tcu.a_from_smem  = 1'b0;
+                        op_args.tcu.fmt_s        = {2'b00, funct3};
+                        op_args.tcu.fmt_d        = '0;
+                        op_args.tcu.step_m       = '0;
+                        op_args.tcu.step_n       = '0;
+                        op_args.tcu.step_k       = '0;
+                        op_args.tcu.is_first_uop = 1'b0;
+                        op_args.tcu.is_last_uop  = 1'b0;
+                        if (funct3 == 3'h2 || funct3 == 3'h6) begin
+                            // twait / tfence hold the warp until the sequencer releases it
+                            is_wstall = 1;
+                        end else begin
+                            `USED_IREG (rs1);
+                            `USED_IREG (rs2);
+                        end
+                    end
+                `endif
                 `ifdef VX_CFG_EXT_DXA_ENABLE
                     7'h03: begin // DXA issue
                         // Multicast is determined by cta_mask (>1 bit set).

@@ -346,7 +346,7 @@ module VX_tcu_tbuf import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
 
     VX_mem_bus_if #(
         .DATA_SIZE  (NUM_BANKS * (`VX_CFG_XLEN / 8)),
-        .TAG_WIDTH  (TCU_LMEM_TAG_W),
+        .TAG_WIDTH  (TCU_LMEM_WG_TAG_W),
         .ATTR_WIDTH (LMEM_DMA_ATTR_W),
         .ADDR_WIDTH (BANK_ADDR_WIDTH)
     ) lmem_arb_out_if[1]();

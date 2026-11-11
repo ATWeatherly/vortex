@@ -30,9 +30,16 @@ module VX_tcu_unit import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
     VX_mem_bus_if.master     tcu_lmem_if,
 `endif
 
-`ifdef TCU_META_ENABLE
-    // TCU_LD memory client connection to VX_lsu_scheduler at VX_core.
+`ifdef TCU_MEMCLIENT_ENABLE
+    // TCU_LD / sequencer slot-load memory client connection to VX_lsu_scheduler at VX_core.
     VX_lsu_sched_if.master  tcu_mem_if,
+`endif
+
+`ifdef VX_CFG_TCU_SEQ_ENABLE
+    // tfence: core-wide store drain
+    input wire              store_drained,
+    // twait / tfence release of the wstalled warp
+    VX_sched_unlock_if.master sched_unlock_if,
 `endif
 
     // Inputs
@@ -91,29 +98,54 @@ module VX_tcu_unit import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
     wire [BLOCK_SIZE-1:0]    agu_result_ready;
 `endif
 
+`ifdef VX_CFG_TCU_SEQ_ENABLE
+    // Sequencer commands (INST_TCU_SEQ) leave the WMMA/WGMMA path before the AGU/core split.
+    VX_execute_if #(
+        .data_t (tcu_execute_t)
+    ) mma_execute_if[BLOCK_SIZE]();
+
+    wire [BLOCK_SIZE-1:0] seq_cmd_valid, seq_cmd_ready;
+    tcu_execute_t         seq_cmd_data [BLOCK_SIZE];
+    wire [BLOCK_SIZE-1:0] seq_res_valid, seq_res_ready;
+    tcu_result_t          seq_res_data [BLOCK_SIZE];
+
+    for (genvar bi = 0; bi < BLOCK_SIZE; ++bi) begin : g_seq_split
+        wire is_seq = (per_block_execute_if[bi].data.op_type == INST_TCU_SEQ);
+        assign seq_cmd_valid[bi] = per_block_execute_if[bi].valid && is_seq;
+        assign seq_cmd_data[bi]  = per_block_execute_if[bi].data;
+        assign mma_execute_if[bi].valid = per_block_execute_if[bi].valid && !is_seq;
+        assign mma_execute_if[bi].data  = per_block_execute_if[bi].data;
+        assign per_block_execute_if[bi].ready = is_seq ? seq_cmd_ready[bi] : mma_execute_if[bi].ready;
+    end
+    `define TCU_MMA_EXEC_IF mma_execute_if
+`else
+    `define TCU_MMA_EXEC_IF per_block_execute_if
+`endif
+
     for (genvar bi = 0; bi < BLOCK_SIZE; ++bi) begin : g_split
     `ifdef TCU_META_ENABLE
-        wire is_tcu_ld = (per_block_execute_if[bi].data.op_type == INST_TCU_LD);
+        wire is_tcu_ld = (`TCU_MMA_EXEC_IF[bi].data.op_type == INST_TCU_LD);
 
         // To AGU when TCU_LD
-        assign agu_ld_valid[bi]    = per_block_execute_if[bi].valid && is_tcu_ld;
-        assign agu_ld_data[bi]     = per_block_execute_if[bi].data;
+        assign agu_ld_valid[bi]    = `TCU_MMA_EXEC_IF[bi].valid && is_tcu_ld;
+        assign agu_ld_data[bi]     = `TCU_MMA_EXEC_IF[bi].data;
 
         // To tcu_core when NOT TCU_LD
-        assign core_execute_if[bi].valid = per_block_execute_if[bi].valid && !is_tcu_ld;
-        assign core_execute_if[bi].data  = per_block_execute_if[bi].data;
+        assign core_execute_if[bi].valid = `TCU_MMA_EXEC_IF[bi].valid && !is_tcu_ld;
+        assign core_execute_if[bi].data  = `TCU_MMA_EXEC_IF[bi].data;
 
         // Parent .ready: route to AGU on TCU_LD, otherwise to tcu_core
-        assign per_block_execute_if[bi].ready = is_tcu_ld
+        assign `TCU_MMA_EXEC_IF[bi].ready = is_tcu_ld
             ? agu_ld_ready[bi]
             : core_execute_if[bi].ready;
     `else
         // No sparse: pass-through to tcu_core
-        assign core_execute_if[bi].valid = per_block_execute_if[bi].valid;
-        assign core_execute_if[bi].data  = per_block_execute_if[bi].data;
-        assign per_block_execute_if[bi].ready = core_execute_if[bi].ready;
+        assign core_execute_if[bi].valid = `TCU_MMA_EXEC_IF[bi].valid;
+        assign core_execute_if[bi].data  = `TCU_MMA_EXEC_IF[bi].data;
+        assign `TCU_MMA_EXEC_IF[bi].ready = core_execute_if[bi].ready;
     `endif
     end
+    `undef TCU_MMA_EXEC_IF
 
     // -----------------------------------------------------------------------
     // Result_if merge: AGU result and tcu_core result are mutually exclusive
@@ -129,12 +161,78 @@ module VX_tcu_unit import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
         assign agu_result_ready[bi]    = per_block_result_if[bi].ready;
         assign core_result_if[bi].ready = per_block_result_if[bi].ready && !agu_result_valid[bi];
     end
+`elsif VX_CFG_TCU_SEQ_ENABLE
+    // Sequencer commit packets win same-cycle conflicts (one per command; rare next to MMA uops).
+    for (genvar bi = 0; bi < BLOCK_SIZE; ++bi) begin : g_result_merge_seq
+        assign per_block_result_if[bi].valid = seq_res_valid[bi] || core_result_if[bi].valid;
+        assign per_block_result_if[bi].data  = seq_res_valid[bi] ? seq_res_data[bi] : core_result_if[bi].data;
+        assign seq_res_ready[bi]        = per_block_result_if[bi].ready;
+        assign core_result_if[bi].ready = per_block_result_if[bi].ready && !seq_res_valid[bi];
+    end
 `else
     for (genvar bi = 0; bi < BLOCK_SIZE; ++bi) begin : g_result_passthru
         assign per_block_result_if[bi].valid = core_result_if[bi].valid;
         assign per_block_result_if[bi].data  = core_result_if[bi].data;
         assign core_result_if[bi].ready      = per_block_result_if[bi].ready;
     end
+`endif
+
+`ifdef VX_CFG_TCU_SEQ_ENABLE
+    // -----------------------------------------------------------------------
+    // TCU-side sequencer (tgemm ISA). Shares the TCU LMEM port with the WGMMA
+    // tile buffers through a 2:1 arbiter (sequencer = input 1).
+    // -----------------------------------------------------------------------
+    VX_mem_bus_if #(
+        .DATA_SIZE  (`VX_CFG_LMEM_NUM_BANKS * LSU_WORD_SIZE),
+        .TAG_WIDTH  (TCU_LMEM_WG_TAG_W),
+        .ATTR_WIDTH (LMEM_DMA_ATTR_W),
+        .ADDR_WIDTH (`VX_CFG_LMEM_LOG_SIZE - `CLOG2(LSU_WORD_SIZE) - `CLOG2(`VX_CFG_LMEM_NUM_BANKS))
+    ) tcu_lmem_in_if[2]();
+
+    VX_mem_bus_if #(
+        .DATA_SIZE  (`VX_CFG_LMEM_NUM_BANKS * LSU_WORD_SIZE),
+        .TAG_WIDTH  (TCU_LMEM_TAG_W),
+        .ATTR_WIDTH (LMEM_DMA_ATTR_W),
+        .ADDR_WIDTH (`VX_CFG_LMEM_LOG_SIZE - `CLOG2(LSU_WORD_SIZE) - `CLOG2(`VX_CFG_LMEM_NUM_BANKS))
+    ) tcu_lmem_arb_out_if[1]();
+
+    VX_mem_bus_arb #(
+        .NUM_INPUTS  (2),
+        .NUM_OUTPUTS (1),
+        .DATA_SIZE   (`VX_CFG_LMEM_NUM_BANKS * LSU_WORD_SIZE),
+        .TAG_WIDTH   (TCU_LMEM_WG_TAG_W),
+        .ATTR_WIDTH  (LMEM_DMA_ATTR_W),
+        .ADDR_WIDTH  (`VX_CFG_LMEM_LOG_SIZE - `CLOG2(LSU_WORD_SIZE) - `CLOG2(`VX_CFG_LMEM_NUM_BANKS)),
+        .ARBITER     ("R")
+    ) tcu_lmem_arb (
+        .clk        (clk),
+        .reset      (reset),
+        .bus_in_if  (tcu_lmem_in_if),
+        .bus_out_if (tcu_lmem_arb_out_if)
+    );
+
+    `ASSIGN_VX_MEM_BUS_IF (tcu_lmem_if, tcu_lmem_arb_out_if[0]);
+
+    VX_tcu_seq #(
+        .INSTANCE_ID (`SFORMATF(("%s-seq", INSTANCE_ID)))
+    ) tcu_seq (
+        .clk           (clk),
+        .reset         (reset),
+        .cmd_valid     (seq_cmd_valid),
+        .cmd_data      (seq_cmd_data),
+        .cmd_ready     (seq_cmd_ready),
+        .res_valid     (seq_res_valid),
+        .res_data      (seq_res_data),
+        .res_ready     (seq_res_ready),
+        .unlock_valid  (sched_unlock_if.valid),
+        .unlock_wid    (sched_unlock_if.wid),
+        .store_drained (store_drained),
+        .mem_if        (tcu_mem_if),
+        .lmem_if       (tcu_lmem_in_if[1])
+    );
+    `define TCU_WG_LMEM_IF tcu_lmem_in_if[0]
+`else
+    `define TCU_WG_LMEM_IF tcu_lmem_if
 `endif
 
     // -----------------------------------------------------------------------
@@ -183,7 +281,7 @@ module VX_tcu_unit import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
         .exec_valid     (exec_valid_w),
         .exec_ready     (exec_ready_w),
         .exec_data      (exec_data_w),
-        .tcu_lmem_if    (tcu_lmem_if),
+        .tcu_lmem_if    (`TCU_WG_LMEM_IF),
         .tbuf_rs1_data  (tbuf_rs1_data),
         .tbuf_rs2_data  (tbuf_rs2_data),
         .tbuf_ready_eff (tbuf_ready_eff)
@@ -389,5 +487,7 @@ module VX_tcu_unit import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
     `UNUSED_VAR (perf_credit_full_w)
 `endif
 `endif
+
+`undef TCU_WG_LMEM_IF
 
 endmodule

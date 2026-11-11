@@ -629,6 +629,10 @@ package VX_gpu_pkg;
     // TCU_LD — warp-level load into a metadata SRAM namespace.
     localparam INST_TCU_LD         = 4'h5;
 `endif
+`ifdef VX_CFG_TCU_SEQ_ENABLE
+    // TCU-side sequencer command (tgemm ISA, CUSTOM0 funct7=5); op_args.tcu.fmt_s[2:0] = funct3.
+    localparam INST_TCU_SEQ        = 4'h6;
+`endif
     localparam INST_TCU_BITS = 4;
 `endif
 
@@ -1521,7 +1525,14 @@ package VX_gpu_pkg;
 `else
     localparam TCU_LMEM_NUM_MASTERS = `VX_CFG_NUM_TCU_BLOCKS + 1;
 `endif
-    localparam TCU_LMEM_TAG_W = TCU_LMEM_BLK_TAG_W + `ARB_SEL_BITS(TCU_LMEM_NUM_MASTERS, 1);
+    // Tag width of the WGMMA tile-buffer side; the TCU-side sequencer (tacc.st) shares the TCU LMEM
+    // port through one more 2:1 arbiter, which adds a select bit.
+    localparam TCU_LMEM_WG_TAG_W = TCU_LMEM_BLK_TAG_W + `ARB_SEL_BITS(TCU_LMEM_NUM_MASTERS, 1);
+`ifdef VX_CFG_TCU_SEQ_ENABLE
+    localparam TCU_LMEM_TAG_W = TCU_LMEM_WG_TAG_W + 1;
+`else
+    localparam TCU_LMEM_TAG_W = TCU_LMEM_WG_TAG_W;
+`endif
 
     // LMEM DMA port parameters. (The raster FWD needs no LMEM DMA agent —
     // the raster stamp rides the launch itself.)

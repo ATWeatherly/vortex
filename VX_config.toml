@@ -348,8 +348,10 @@ VX_CFG_TSU_MASTERS_PER_WORKER = 4
 VX_CFG_TSU_BURST_BYTES = 256
 VX_CFG_TSU_MAX_INFLIGHT = 64
 VX_CFG_TSU_SEL_LSB = 28
-VX_CFG_TSU_MASTERS_PER_SOCKET = "expr: up($VX_CFG_STREAM_NUM_MASTERS / up($VX_CFG_NUM_CORES / $VX_CFG_SOCKET_SIZE)) if $VX_CFG_TSU_ENABLED else 0"
-VX_CFG_NUM_TSU_CORES = "expr: max(1, up($VX_CFG_TSU_MASTERS_PER_SOCKET / $VX_CFG_TSU_MASTERS_PER_WORKER)) if $VX_CFG_TSU_ENABLED else 0"
+# Conditions test the _ENABLE define (present only when on), like every other expr here: _ENABLED is always
+# defined (0/1), so `if $VX_CFG_TSU_ENABLED` emitted `ifdef` true and sized a TSU worker in TSU-off builds.
+VX_CFG_TSU_MASTERS_PER_SOCKET = "expr: up($VX_CFG_STREAM_NUM_MASTERS / up($VX_CFG_NUM_CORES / $VX_CFG_SOCKET_SIZE)) if $VX_CFG_TSU_ENABLE else 0"
+VX_CFG_NUM_TSU_CORES = "expr: max(1, up($VX_CFG_TSU_MASTERS_PER_SOCKET / $VX_CFG_TSU_MASTERS_PER_WORKER)) if $VX_CFG_TSU_ENABLE else 0"
 
 [rtu]
 # RTU (Ray-Tracing Unit)
