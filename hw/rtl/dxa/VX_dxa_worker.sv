@@ -432,7 +432,7 @@ module VX_dxa_worker import VX_gpu_pkg::*, VX_dxa_pkg::*; #(
             ("%t: *** %s W-slot landing needs full 64 B beats of a 2^lg_kt (64..2048) byte row: off=0x%0h len=%0d oob=%b lgkt=%0d",
              $time, INSTANCE_ID, sw_byte_offset, sw_valid_length, sw_oob, wl_lgkt))
         `RUNTIME_ASSERT(~wl_fire || ((32'(wl_off) >> wl_lgkt) < 32'd64),
-            ("%t: *** %s W-slot landing offset 0x%0h is past row 63 of a 2^%0d B-row slot (issue with smem operand 0, not __local_mem())",
+            ("%t: *** %s W-slot landing offset 0x%0h is past row 63 of a 2^%0d B-row slot (issue with the LMEM base csr LOCAL_MEM_BASE, not __local_mem() or 0)",
              $time, INSTANCE_ID, wl_off, wl_lgkt))
         `RUNTIME_ASSERT(~(sm_release_en && wl_fire), ("%t: *** %s W-landing / smem_wr release collision", $time, INSTANCE_ID))
         `UNUSED_VAR (wl_k)

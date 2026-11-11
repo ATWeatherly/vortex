@@ -924,7 +924,9 @@ private:
                 << lw.gmem_cl_addr << std::dec << ", len " << lw.valid_length << ", oob " << lw.oob << ")" << std::endl;
       std::abort();
     }
-    uint64_t off = (lw.smem_word_addr + lw.smem_byte_offset) & ((uint64_t(1) << 17) - 1u);
+    // LMEM-relative like the RTL (VX_dxa_unit strips VX_MEM_LMEM_BASE_ADDR from the smem operand): the kernel
+    // issues a landing with the LMEM base, so the dense image offset starts at 0.
+    uint64_t off = (lw.smem_word_addr + lw.smem_byte_offset - uint64_t(VX_MEM_LMEM_BASE_ADDR)) & ((uint64_t(1) << 17) - 1u);
     w.req.core->tcu_unit()->seq_land(w.wl_tag, off, s.rsp_data->data(), 64);
     wl_beat_cycle_.at(lcid) = cycle_;
     ++w.writes_emitted;
