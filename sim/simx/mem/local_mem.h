@@ -59,6 +59,11 @@ public:
 
   const PerfStats& perf_stats() const;
 
+  // Functional (zero-time) access for the TCU sequencer golden model (VX_CFG_TCU_SEQ_ENABLE):
+  // bypasses banks and ports; `addr` is a device address inside the LMEM window.
+  void backdoor_read(uint64_t addr, void* data, uint64_t size);
+  void backdoor_write(uint64_t addr, const void* data, uint64_t size);
+
 protected:
 
   void on_reset();

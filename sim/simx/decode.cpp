@@ -1006,6 +1006,26 @@ Instr::Ptr Decoder::decode(uint32_t code, uint64_t uuid) {
       }
     } break;
   #endif
+  #if defined(VX_CFG_EXT_TCU_ENABLE) && defined(VX_CFG_TCU_SEQ_ENABLE)
+    case 5: { // TCU-side sequencer (bench docs/spec/tgemm_isa.md)
+      instr->set_fu_type(FUType::TCU);
+      instr->set_args(IntrTcuArgs{0, 0, 0, 0, 0, 0, 0, 0, 0, 0});
+      switch (funct3) {
+      case 0: instr->set_op_type(TcuType::TGEMM); break;
+      case 1: instr->set_op_type(TcuType::TACC_ST); break;
+      case 2: instr->set_op_type(TcuType::TWAIT); instr->set_wstall(true); break;
+      case 3: instr->set_op_type(TcuType::TBUF_LDX); break;
+      case 4: instr->set_op_type(TcuType::TBUF_LDW); break;
+      case 5: instr->set_op_type(TcuType::TCFG); break;
+      case 6: instr->set_op_type(TcuType::TFENCE); instr->set_wstall(true); break;
+      default: std::abort();
+      }
+      if (funct3 != 2 && funct3 != 6) {
+        instr->set_src_reg(0, rs1, RegType::Integer);
+        instr->set_src_reg(1, rs2, RegType::Integer);
+      }
+    } break;
+  #endif
     case 4: { // Load/Store Packing extensions — macro-ops, sequencer expands to N single-elem uops
       instr->set_fu_type(FUType::LSU);
       instr->set_op_type(LsuType::LOAD);

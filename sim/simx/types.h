@@ -789,7 +789,21 @@ enum class TcuType {
   WMMA_SP,    // Sparse variants live in distinct op_types so IntrTcuArgs
   WGMMA_SP,   // doesn't carry a per-uop is_sparse bit.
   TCU_LD,     // Warp-level metadata load. rd[4] selects sparse/MX namespace.
+  // TCU-side sequencer (VX_CFG_TCU_SEQ_ENABLE, CUSTOM0 funct7=5; bench docs/spec/tgemm_isa.md)
+  TGEMM,      // funct3 0: tile GEMM command (async)
+  TACC_ST,    // funct3 1: accumulator tile -> LMEM (async)
+  TWAIT,      // funct3 2: wait until the warp's commands completed (wstall)
+  TBUF_LDX,   // funct3 3: load an X (activation) slot (async)
+  TBUF_LDW,   // funct3 4: load a W (weight) slot (async)
+  TCFG,       // funct3 5: per-warp sequencer config write
+  TFENCE,     // funct3 6: cross-port ordering point (wstall)
 };
+
+inline bool tcu_is_seq(TcuType t) {
+  return t == TcuType::TGEMM || t == TcuType::TACC_ST || t == TcuType::TWAIT
+      || t == TcuType::TBUF_LDX || t == TcuType::TBUF_LDW || t == TcuType::TCFG
+      || t == TcuType::TFENCE;
+}
 
 struct IntrTcuArgs {
   uint32_t is_a_smem    : 1; // 0=register, 1=shared memory (B is always smem)
@@ -826,6 +840,13 @@ inline std::ostream &operator<<(std::ostream &os, const TcuType& type) {
   case TcuType::WMMA_SP:    os << "WMMA.SP"; break;
   case TcuType::WGMMA_SP:   os << "WGMMA.SP"; break;
   case TcuType::TCU_LD:     os << "TCU_LD"; break;
+  case TcuType::TGEMM:      os << "TGEMM.I8"; break;
+  case TcuType::TACC_ST:    os << "TACC.ST"; break;
+  case TcuType::TWAIT:      os << "TWAIT"; break;
+  case TcuType::TBUF_LDX:   os << "TBUF.LDX"; break;
+  case TcuType::TBUF_LDW:   os << "TBUF.LDW"; break;
+  case TcuType::TCFG:       os << "TCFG"; break;
+  case TcuType::TFENCE:     os << "TFENCE"; break;
   default:
     assert(false);
   }

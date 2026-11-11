@@ -22,6 +22,7 @@
 #include "processor_impl.h"
 #include "mem/memory.h"
 #include "stack_interleave.h"
+#include "tcu_seq.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -375,6 +376,23 @@ public:
     exec_done_.fill(false);
     in_wgmma_.fill(false);
     wgmma_desc_.fill({0, 0});
+  #ifdef VX_CFG_TCU_SEQ_ENABLE
+    TcuSeq::MemIf mif;
+    mif.is_lmem = [](uint64_t a) {
+      return a >= (uint64_t)VX_MEM_LMEM_BASE_ADDR && (a - (uint64_t)VX_MEM_LMEM_BASE_ADDR) < (1ull << VX_CFG_LMEM_LOG_SIZE);
+    };
+    auto is_lmem = mif.is_lmem;
+    mif.read = [this, is_lmem](uint64_t a, void* d, uint64_t n) {
+      if (is_lmem(a)) core_->local_mem()->backdoor_read(a, d, n);
+      else core_->processor()->ram()->read(d, a, n);
+    };
+    mif.write = [this, is_lmem](uint64_t a, const void* d, uint64_t n) {
+      if (is_lmem(a)) core_->local_mem()->backdoor_write(a, d, n);
+      else core_->processor()->ram()->write(d, a, n);
+    };
+    mif.notify = [this](uint32_t raw) { core_->barrier_event_release(bar_decode_id(raw, VX_CFG_NUM_BARRIERS)); };
+    seq_.bind(mif);
+  #endif
   }
 
   ~Impl() {}
@@ -399,6 +417,9 @@ public:
     in_wgmma_.fill(false);
     lmem_desc_.clear();
     wgmma_desc_.fill({0, 0});
+  #ifdef VX_CFG_TCU_SEQ_ENABLE
+    seq_.reset();
+  #endif
     cta_owner_a_.fill(-1);
   #ifdef VX_CFG_TCU_WGMMA_ENABLE
     abuf_.fill(abuf_slot_t{});
@@ -569,6 +590,9 @@ public:
   #endif
 
     uint64_t now = SimPlatform::instance().cycles();
+  #ifdef VX_CFG_TCU_SEQ_ENABLE
+    seq_.tick(now);
+  #endif
     // Per-block outcome of this cycle for the perf counters (accounted after the loop).
     enum : uint8_t { PS_NONE, PS_FIRE, PS_LOCK, PS_TBUF, PS_CREDIT, PS_COMMIT, PS_OTHER };
     std::array<uint8_t, VX_CFG_NUM_TCU_BLOCKS> pstat;
@@ -640,7 +664,12 @@ public:
           int32_t this_cta = (int32_t)core_->scheduler().warp(wid).cta_csrs.cta_id;
           // CTA lockstep invariant: no block may execute a WGMMA uop for a
           // different cta_id while another block is mid-WGMMA.
+          // Gated off with VX_CFG_TCU_WG_NO_LOCKSTEP: per-block B buffers let blocks run different CTAs.
+        #ifndef VX_CFG_TCU_WG_NO_LOCKSTEP
           if (!tpuArgs.is_setup_uop) {
+        #else
+          if (false) {
+        #endif
             for (uint32_t k = 0; k < VX_CFG_NUM_TCU_BLOCKS; ++k) {
               if (k == b) continue;
               if (in_wgmma_.at(k) && cta_owner_a_.at(k) != this_cta) {
@@ -682,6 +711,24 @@ public:
           this->agu_start(b, wid, tpuArgs.fmt_d, base_addr, trace);
         } break;
       #endif
+      #ifdef VX_CFG_TCU_SEQ_ENABLE
+        case TcuType::TGEMM:
+        case TcuType::TACC_ST:
+        case TcuType::TWAIT:
+        case TcuType::TBUF_LDX:
+        case TcuType::TBUF_LDW:
+        case TcuType::TCFG:
+        case TcuType::TFENCE: {
+          // warp-uniform scalars: the first active lane's values
+          uint32_t lane = 0;
+          while (lane + 1 < num_threads && !trace->tmask.test(lane)) ++lane;
+          uint32_t v1 = rs1_data.empty() ? 0 : rs1_data.at(lane).u32;
+          uint32_t v2 = rs2_data.empty() ? 0 : rs2_data.at(lane).u32;
+          if (!seq_.issue(tcu_type, wid, v1, v2, now)) {
+            continue; // queue full / waiting: hold this block's input
+          }
+        } break;
+      #endif
         default:
           std::abort();
         }
@@ -701,6 +748,17 @@ public:
         // The AGU round-trip models the memory latency; the remaining
         // cycles cover the metadata deposit and retire.
         delay = 3;
+        break;
+    #endif
+    #ifdef VX_CFG_TCU_SEQ_ENABLE
+      case TcuType::TGEMM:
+      case TcuType::TACC_ST:
+      case TcuType::TWAIT:
+      case TcuType::TBUF_LDX:
+      case TcuType::TBUF_LDW:
+      case TcuType::TCFG:
+      case TcuType::TFENCE:
+        delay = 1;   // async commands retire at acceptance; completion is tracked by TcuSeq
         break;
     #endif
       default:
@@ -1713,6 +1771,9 @@ private:
   uint32_t cur_xtile_n_ = 8;
   // CTA each block holds while mid-WGMMA (-1 = none).
   std::array<int32_t, VX_CFG_NUM_TCU_BLOCKS> cta_owner_a_{};
+#ifdef VX_CFG_TCU_SEQ_ENABLE
+  TcuSeq seq_;   // TCU-side sequencer golden model (bench docs/spec/tgemm_isa.md)
+#endif
 #ifdef VX_CFG_TCU_WGMMA_ENABLE
   std::array<abuf_slot_t, VX_CFG_NUM_TCU_BLOCKS> abuf_;
   std::array<bbuf_slot_t, TcuTbuf::NUM_BBUFS> bbuf_;   // one shared, or one per block (VX_CFG_TCU_BBUF_PER_BLOCK)
@@ -1745,6 +1806,13 @@ op_string_t TcuUnit::op_string(TcuType tcu_type, IntrTcuArgs args) {
   case TcuType::TCU_LD:
     return {"TCU_LD." + std::string((args.fmt_d & 0x10) ? "MX." : "SP.")
              + std::string(vt::fmt_string(args.fmt_s)) + ".slot" + std::to_string(args.fmt_d & 0xf), ""};
+  case TcuType::TGEMM:    return {"TGEMM.I8", ""};
+  case TcuType::TACC_ST:  return {"TACC.ST", ""};
+  case TcuType::TWAIT:    return {"TWAIT", ""};
+  case TcuType::TBUF_LDX: return {"TBUF.LDX", ""};
+  case TcuType::TBUF_LDW: return {"TBUF.LDW", ""};
+  case TcuType::TCFG:     return {"TCFG", ""};
+  case TcuType::TFENCE:   return {"TFENCE", ""};
   default:
     std::abort();
   }

@@ -59,6 +59,15 @@ protected:
 		return bit_getw(addr, 0, addr_bits_-1);
 	}
 
+public:
+	void backdoor_read(uint64_t addr, void* data, uint64_t size) {
+		ram_.read(data, to_local_addr(addr), size);
+	}
+	void backdoor_write(uint64_t addr, const void* data, uint64_t size) {
+		ram_.write(data, to_local_addr(addr), size);
+	}
+private:
+
 #if VX_CFG_EXT_A_ENABLED
 	// The word a bank is addressed by. Two byte addresses falling in one word
 	// are the same access as far as the bank is concerned.
@@ -355,4 +364,12 @@ void LocalMem::on_tick() {
 
 const LocalMem::PerfStats& LocalMem::perf_stats() const {
   return impl_->perf_stats();
+}
+
+void LocalMem::backdoor_read(uint64_t addr, void* data, uint64_t size) {
+  impl_->backdoor_read(addr, data, size);
+}
+
+void LocalMem::backdoor_write(uint64_t addr, const void* data, uint64_t size) {
+  impl_->backdoor_write(addr, data, size);
 }

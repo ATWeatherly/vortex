@@ -320,6 +320,10 @@ VX_CFG_TCU_SPARSE_ENABLE = false
 VX_CFG_TCU_DSM_ENABLE = false
 VX_CFG_TCU_WGMMA_ENABLE = false
 VX_CFG_TCU_FEDP2K = false
+# TCU-side sequencer (balanced-design spec phase 3, ISA bench docs/spec/tgemm_isa.md): tgemm.i8 / tacc.st /
+# twait / tbuf.ldx / tbuf.ldw / tcfg / tfence on CUSTOM0 funct7=5. Off by default.
+VX_CFG_TCU_SEQ_ENABLE = false
+VX_CFG_NUM_TCU_SEQ_BLOCKS = 4
 
 [dxa]
 # Cluster-level DXA engine count, decoupled from cores/socket size.
