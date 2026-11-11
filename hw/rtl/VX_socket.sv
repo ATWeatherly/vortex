@@ -36,6 +36,7 @@ module VX_socket import VX_gpu_pkg::*, VX_tlb_pkg::*;
 
     // Memory
     VX_mem_bus_if.master    mem_bus_if [L1_MEM_PORTS],
+    VX_stream_bus_if.master str_bus_if [`UP(SOCKET_STR_PORTS)],   // tile-stream masters (1 dummy when the TSU is off)
 
 `ifdef VX_CFG_VM_ENABLE
     // TLB miss/fill fabric up to the cluster walker (socket-arbitrated).
@@ -716,7 +717,8 @@ module VX_socket import VX_gpu_pkg::*, VX_tlb_pkg::*;
     VX_dxa_core #(
         .INSTANCE_ID    (`SFORMATF(("%s-dxa", INSTANCE_ID))),
         .NUM_REQS       (`VX_CFG_SOCKET_SIZE),
-        .GMEM_OUT_PORTS (1)
+        .GMEM_OUT_PORTS (1),
+        .NUM_STR_PORTS  (`UP(SOCKET_STR_PORTS))
     ) dxa_core (
         .clk              (clk),
         .reset            (reset),
@@ -727,6 +729,7 @@ module VX_socket import VX_gpu_pkg::*, VX_tlb_pkg::*;
         .req_bus_if       (per_core_dxa_req_bus_if),
         .smem_bus_if      (dxa_lmem_bus_if),
         .gmem_bus_if      (dxa_gmem_bus_if),
+        .str_bus_if       (str_bus_if),
         `UNUSED_PIN (busy)
     );
 
@@ -764,6 +767,16 @@ module VX_socket import VX_gpu_pkg::*, VX_tlb_pkg::*;
         .bus_in_if  (dxa_lmem_bus_if),
         .bus_out_if (per_core_dxa_lmem_bus_if)
     );
+`else
+    // No DXA core: the (dummy) tile-stream port array stays idle.
+    for (genvar i = 0; i < `UP(SOCKET_STR_PORTS); ++i) begin : g_str_tieoff
+        assign str_bus_if[i].req_valid = 1'b0;
+        assign str_bus_if[i].req_data  = '0;
+        assign str_bus_if[i].rsp_ready = 1'b0;
+        `UNUSED_VAR (str_bus_if[i].req_ready)
+        `UNUSED_VAR (str_bus_if[i].rsp_valid)
+        `UNUSED_VAR (str_bus_if[i].rsp_data)
+    end
 `endif // VX_CFG_EXT_DXA_ENABLE
 
     ///////////////////////////////////////////////////////////////////////////

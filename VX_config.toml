@@ -328,6 +328,25 @@ VX_CFG_DXA_MEM_PORTS = "expr: min($VX_CFG_NUM_DXA_CORES, up($VX_CFG_NUM_CORES / 
 VX_CFG_DXA_QUEUE_SIZE = 16
 VX_CFG_DXA_MAX_INFLIGHT = 8
 
+# Tile stream unit (TSU; balanced-design spec phase 1). Dedicated read-only
+# AXI stream masters (m_axi_str_<i>, one per HBM pseudo-channel on the U50)
+# feed VX_CFG_TSU_BURST_BYTES bursts into stream workers that sit beside the
+# DXA workers in each socket's DXA core and land in LMEM (phase 1) through the
+# same writer/completion path. Off by default: enabling adds the master array
+# to the AFU, so the platform connectivity (hw/syn/xilinx/xrt/platforms.mk,
+# TSU_MASTERS=<n>) and the rtlsim shim must agree with STREAM_NUM_MASTERS.
+# Masters are split evenly over the sockets, then over each socket's workers
+# (VX_CFG_TSU_MASTERS_PER_WORKER each); a worker picks the master by the
+# byte-address bits at VX_CFG_TSU_SEL_LSB (28 = the 256 MB U50 pseudo-channel).
+VX_CFG_TSU_ENABLE = false
+VX_CFG_STREAM_NUM_MASTERS = 32
+VX_CFG_TSU_MASTERS_PER_WORKER = 4
+VX_CFG_TSU_BURST_BYTES = 256
+VX_CFG_TSU_MAX_INFLIGHT = 64
+VX_CFG_TSU_SEL_LSB = 28
+VX_CFG_TSU_MASTERS_PER_SOCKET = "expr: up($VX_CFG_STREAM_NUM_MASTERS / up($VX_CFG_NUM_CORES / $VX_CFG_SOCKET_SIZE)) if $VX_CFG_TSU_ENABLED else 0"
+VX_CFG_NUM_TSU_CORES = "expr: max(1, up($VX_CFG_TSU_MASTERS_PER_SOCKET / $VX_CFG_TSU_MASTERS_PER_WORKER)) if $VX_CFG_TSU_ENABLED else 0"
+
 [rtu]
 # RTU (Ray-Tracing Unit)
 VX_CFG_NUM_RTU_CORES       = "expr: up($VX_CFG_SOCKET_SIZE / 4)"

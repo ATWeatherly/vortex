@@ -74,6 +74,23 @@ module Vortex_axi import VX_gpu_pkg::*; #(
     input wire [AXI_TID_WIDTH-1:0]      m_axi_rid [AXI_NUM_BANKS],
     input wire [1:0]                    m_axi_rresp [AXI_NUM_BANKS],
 
+`ifdef VX_CFG_TSU_ENABLE
+    // Tile-stream AXI read masters (one per HBM pseudo-channel), read channels only
+    output wire                         m_axi_str_arvalid [VX_STR_PORTS],
+    input  wire                         m_axi_str_arready [VX_STR_PORTS],
+    output wire [AXI_ADDR_WIDTH-1:0]    m_axi_str_araddr [VX_STR_PORTS],
+    output wire [AXI_TID_WIDTH-1:0]     m_axi_str_arid [VX_STR_PORTS],
+    output wire [7:0]                   m_axi_str_arlen [VX_STR_PORTS],
+    output wire [2:0]                   m_axi_str_arsize [VX_STR_PORTS],
+    output wire [1:0]                   m_axi_str_arburst [VX_STR_PORTS],
+    input  wire                         m_axi_str_rvalid [VX_STR_PORTS],
+    output wire                         m_axi_str_rready [VX_STR_PORTS],
+    input  wire [AXI_DATA_WIDTH-1:0]    m_axi_str_rdata [VX_STR_PORTS],
+    input  wire                         m_axi_str_rlast [VX_STR_PORTS],
+    input  wire [AXI_TID_WIDTH-1:0]     m_axi_str_rid [VX_STR_PORTS],
+    input  wire [1:0]                   m_axi_str_rresp [VX_STR_PORTS],
+`endif
+
     // DCR write request
     input  wire                         dcr_req_valid,
     input  wire                         dcr_req_rw,
@@ -107,6 +124,64 @@ module Vortex_axi import VX_gpu_pkg::*; #(
     wire [VX_MEM_TAG_WIDTH-1:0]     mem_rsp_tag [VX_MEM_PORTS];
     wire                            mem_rsp_ready [VX_MEM_PORTS];
 
+`ifdef VX_CFG_TSU_ENABLE
+    wire                            str_req_valid [VX_STR_PORTS];
+    wire [VX_STR_ADDR_WIDTH-1:0]    str_req_addr [VX_STR_PORTS];
+    wire [VX_STR_NUM_BEATS-1:0]     str_req_beaten [VX_STR_PORTS];
+    wire [VX_STR_TAG_WIDTH-1:0]     str_req_tag [VX_STR_PORTS];
+    wire                            str_req_ready [VX_STR_PORTS];
+    wire                            str_rsp_valid [VX_STR_PORTS];
+    wire [VX_STR_BEAT_SIZE*8-1:0]   str_rsp_data [VX_STR_PORTS];
+    wire [VX_STR_BEAT_WIDTH-1:0]    str_rsp_beat [VX_STR_PORTS];
+    wire [VX_STR_TAG_WIDTH-1:0]     str_rsp_tag [VX_STR_PORTS];
+    wire                            str_rsp_ready [VX_STR_PORTS];
+
+    `STATIC_ASSERT(AXI_DATA_WIDTH == VX_STR_BEAT_SIZE * 8, ("stream beat must equal the AXI data width"))
+
+    for (genvar i = 0; i < VX_STR_PORTS; ++i) begin : g_str_axi
+        VX_stream_to_axi #(
+            .DATA_WIDTH      (AXI_DATA_WIDTH),
+            .BURST_SIZE      (VX_STR_BURST_SIZE),
+            .ADDR_WIDTH_IN   (VX_STR_ADDR_WIDTH),
+            .ADDR_WIDTH_OUT  (AXI_ADDR_WIDTH),
+            .TAG_WIDTH_IN    (VX_STR_TAG_WIDTH),
+            .TAG_WIDTH_OUT   (AXI_TID_WIDTH),
+            .TAG_BUFFER_SIZE (16)
+        ) str_axi (
+            .clk            (clk),
+            .reset          (reset),
+            .str_req_valid  (str_req_valid[i]),
+            .str_req_addr   (str_req_addr[i]),
+            .str_req_beaten (str_req_beaten[i]),
+            .str_req_tag    (str_req_tag[i]),
+            .str_req_ready  (str_req_ready[i]),
+            .str_rsp_valid  (str_rsp_valid[i]),
+            .str_rsp_data   (str_rsp_data[i]),
+            .str_rsp_beat   (str_rsp_beat[i]),
+            .str_rsp_tag    (str_rsp_tag[i]),
+            .str_rsp_ready  (str_rsp_ready[i]),
+            .m_axi_arvalid  (m_axi_str_arvalid[i]),
+            .m_axi_arready  (m_axi_str_arready[i]),
+            .m_axi_araddr   (m_axi_str_araddr[i]),
+            .m_axi_arid     (m_axi_str_arid[i]),
+            .m_axi_arlen    (m_axi_str_arlen[i]),
+            .m_axi_arsize   (m_axi_str_arsize[i]),
+            .m_axi_arburst  (m_axi_str_arburst[i]),
+            `UNUSED_PIN (m_axi_arlock),
+            `UNUSED_PIN (m_axi_arcache),
+            `UNUSED_PIN (m_axi_arprot),
+            `UNUSED_PIN (m_axi_arqos),
+            `UNUSED_PIN (m_axi_arregion),
+            .m_axi_rvalid   (m_axi_str_rvalid[i]),
+            .m_axi_rready   (m_axi_str_rready[i]),
+            .m_axi_rdata    (m_axi_str_rdata[i]),
+            .m_axi_rlast    (m_axi_str_rlast[i]),
+            .m_axi_rid      (m_axi_str_rid[i]),
+            .m_axi_rresp    (m_axi_str_rresp[i])
+        );
+    end
+`endif
+
     `SCOPE_IO_SWITCH (1);
 
     Vortex vortex (
@@ -127,6 +202,19 @@ module Vortex_axi import VX_gpu_pkg::*; #(
         .mem_rsp_data   (mem_rsp_data),
         .mem_rsp_tag    (mem_rsp_tag),
         .mem_rsp_ready  (mem_rsp_ready),
+
+    `ifdef VX_CFG_TSU_ENABLE
+        .str_req_valid  (str_req_valid),
+        .str_req_addr   (str_req_addr),
+        .str_req_beaten (str_req_beaten),
+        .str_req_tag    (str_req_tag),
+        .str_req_ready  (str_req_ready),
+        .str_rsp_valid  (str_rsp_valid),
+        .str_rsp_data   (str_rsp_data),
+        .str_rsp_beat   (str_rsp_beat),
+        .str_rsp_tag    (str_rsp_tag),
+        .str_rsp_ready  (str_rsp_ready),
+    `endif
 
         .dcr_req_valid  (dcr_req_valid),
         .dcr_req_rw     (dcr_req_rw),

@@ -297,6 +297,39 @@ inline int set_tile_geometry(
                       (blk_k << 16) | (tcN & 0xffffu));
 }
 
+// ── Tile stream unit (TSU) ───────────────────────────────────────────
+//
+// Route an already-programmed descriptor to the tile-stream engine (256 B
+// bursts on the dedicated stream masters) instead of the DXA line engine.
+// Like set_layout, META is re-packed from scratch: pass the same rank,
+// elem_bytes and layout used when programming the slot. DestKind other than
+// LMEM is reserved for the tile-buffer landing of phase 4. Only valid on a
+// device built with VX_CFG_TSU_ENABLE (vx_dev_caps / has_tsu); on a device
+// without the TSU the ENGINE bit is ignored and the line engine runs it.
+enum class DestKind : uint32_t {
+  Lmem     = 0,
+  TilebufB = 1,
+  TilebufA = 2,
+};
+
+inline int set_stream(
+    vx_device_h dev, uint32_t slot,
+    uint32_t rank, uint32_t elem_bytes,
+    Layout layout = Layout::RowMajor,
+    bool enable = true,
+    DestKind dest = DestKind::Lmem,
+    uint32_t tile_slot = 0) {
+  uint32_t dcr  = VX_DCR_DXA_DESC_BASE + slot * VX_DCR_DXA_DESC_STRIDE;
+  uint32_t meta = detail::pack_meta(rank, detail::elem_size_enc(elem_bytes))
+                | ((static_cast<uint32_t>(layout) & ((1u << DXA_DESC_META_LAYOUT_BITS) - 1u))
+                   << DXA_DESC_META_LAYOUT_LSB)
+                | ((static_cast<uint32_t>(dest) & ((1u << DXA_DESC_META_DEST_KIND_BITS) - 1u))
+                   << DXA_DESC_META_DEST_KIND_LSB)
+                | ((tile_slot & ((1u << DXA_DESC_META_SLOT_BITS) - 1u)) << DXA_DESC_META_SLOT_LSB)
+                | ((enable ? 1u : 0u) << DXA_DESC_META_ENGINE_LSB);
+  return vx_dcr_write(dev, dcr + VX_DCR_DXA_DESC_META_OFF, meta);
+}
+
 } // namespace dxa
 } // namespace vortex
 

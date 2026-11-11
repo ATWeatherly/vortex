@@ -57,6 +57,10 @@ module VX_afu_wrap import VX_gpu_pkg::*; #(
 `else
     `MP_REPEAT (`VX_CFG_PLATFORM_MEMORY_NUM_BANKS, GEN_AXI_MEM, MP_COMMA),
 `endif
+`ifdef VX_CFG_TSU_ENABLE
+    // Tile-stream AXI4 read masters (one per HBM pseudo-channel)
+    `MP_REPEAT (`VX_CFG_STREAM_NUM_MASTERS, GEN_AXI_STR, MP_COMMA),
+`endif
     // AXI4 host-memory master interface (CP command ring + host side of DMA)
     `GEN_AXI_HOST,
     // AXI4-Lite slave interface
@@ -121,6 +125,32 @@ module VX_afu_wrap import VX_gpu_pkg::*; #(
     `MP_REPEAT (1, AXI_MEM_TO_ARRAY, MP_SEMI);
 `else
     `MP_REPEAT (`VX_CFG_PLATFORM_MEMORY_NUM_BANKS, AXI_MEM_TO_ARRAY, MP_SEMI);
+`endif
+
+`ifdef VX_CFG_TSU_ENABLE
+    `STATIC_ASSERT(`VX_CFG_STREAM_NUM_MASTERS == VX_STR_PORTS,
+        ("VX_CFG_STREAM_NUM_MASTERS must divide evenly into sockets x TSU workers x masters per worker"))
+    wire                                 m_axi_str_arvalid_a [VX_STR_PORTS];
+    wire                                 m_axi_str_arready_a [VX_STR_PORTS];
+    wire [C_M_AXI_MEM_ADDR_WIDTH-1:0]    m_axi_str_araddr_a  [VX_STR_PORTS];
+    wire [C_M_AXI_MEM_ID_WIDTH-1:0]      m_axi_str_arid_a    [VX_STR_PORTS];
+    wire [7:0]                           m_axi_str_arlen_a   [VX_STR_PORTS];
+    wire [2:0]                           m_axi_str_arsize_a  [VX_STR_PORTS];
+    wire [1:0]                           m_axi_str_arburst_a [VX_STR_PORTS];
+    wire                                 m_axi_str_rvalid_a  [VX_STR_PORTS];
+    wire                                 m_axi_str_rready_a  [VX_STR_PORTS];
+    wire [C_M_AXI_MEM_DATA_WIDTH-1:0]    m_axi_str_rdata_a   [VX_STR_PORTS];
+    wire                                 m_axi_str_rlast_a   [VX_STR_PORTS];
+    wire [C_M_AXI_MEM_ID_WIDTH-1:0]      m_axi_str_rid_a     [VX_STR_PORTS];
+    wire [1:0]                           m_axi_str_rresp_a   [VX_STR_PORTS];
+    `MP_REPEAT (`VX_CFG_STREAM_NUM_MASTERS, AXI_STR_TO_ARRAY, MP_SEMI);
+
+    // Vortex-side (unoffset) stream addresses; PLATFORM_MEMORY_OFFSET is
+    // applied here, at the port, exactly as for m_axi_mem.
+    wire [M_AXI_MEM_ADDR_WIDTH-1:0]      m_axi_str_araddr_u  [VX_STR_PORTS];
+    for (genvar i = 0; i < VX_STR_PORTS; ++i) begin : g_str_addressing
+        assign m_axi_str_araddr_a[i] = C_M_AXI_MEM_ADDR_WIDTH'(m_axi_str_araddr_u[i]) + C_M_AXI_MEM_ADDR_WIDTH'(`PLATFORM_MEMORY_OFFSET);
+    end
 `endif
 
     reg [`VX_CFG_RESET_DELAY-1:0] vx_reset_shift_r;
@@ -558,6 +588,22 @@ module VX_afu_wrap import VX_gpu_pkg::*; #(
             .m_axi_rid    	(vx_rid_a),
             .m_axi_rresp	(vx_rresp_a),
 
+        `ifdef VX_CFG_TSU_ENABLE
+            .m_axi_str_arvalid (m_axi_str_arvalid_a),
+            .m_axi_str_arready (m_axi_str_arready_a),
+            .m_axi_str_araddr  (m_axi_str_araddr_u),
+            .m_axi_str_arid    (m_axi_str_arid_a),
+            .m_axi_str_arlen   (m_axi_str_arlen_a),
+            .m_axi_str_arsize  (m_axi_str_arsize_a),
+            .m_axi_str_arburst (m_axi_str_arburst_a),
+            .m_axi_str_rvalid  (m_axi_str_rvalid_a),
+            .m_axi_str_rready  (m_axi_str_rready_a),
+            .m_axi_str_rdata   (m_axi_str_rdata_a),
+            .m_axi_str_rlast   (m_axi_str_rlast_a),
+            .m_axi_str_rid     (m_axi_str_rid_a),
+            .m_axi_str_rresp   (m_axi_str_rresp_a),
+        `endif
+
             .dcr_req_valid	(dcr_req_valid),
             .dcr_req_rw		(dcr_req_rw),
             .dcr_req_addr	(dcr_req_addr),
@@ -713,6 +759,10 @@ module VX_afu_wrap import VX_gpu_pkg::*; #(
 
     end else begin : g_multi_port
 
+    `ifdef VX_CFG_TSU_ENABLE
+        `STATIC_ASSERT(0, ("VX_CFG_TSU_ENABLE requires the merged single-port memory interface (PLATFORM_MERGED_MEMORY_INTERFACE)"))
+    `endif
+
         localparam DST_LDATAW = `CLOG2(C_M_AXI_MEM_DATA_WIDTH);
         localparam SRC_LDATAW = `CLOG2(VX_MEM_DATA_WIDTH);
         localparam SUB_LDATAW = DST_LDATAW - SRC_LDATAW;
@@ -756,6 +806,20 @@ module VX_afu_wrap import VX_gpu_pkg::*; #(
             .mem_rsp_data   (vx_mem_rsp_data),
             .mem_rsp_tag    (vx_mem_rsp_tag),
             .mem_rsp_ready  (vx_mem_rsp_ready),
+
+        `ifdef VX_CFG_TSU_ENABLE
+            // unreachable (static assert above): TSU needs the merged interface
+            `UNUSED_PIN (str_req_valid),
+            `UNUSED_PIN (str_req_addr),
+            `UNUSED_PIN (str_req_beaten),
+            `UNUSED_PIN (str_req_tag),
+            .str_req_ready  ('{default: 1'b0}),
+            .str_rsp_valid  ('{default: 1'b0}),
+            .str_rsp_data   ('{default: '0}),
+            .str_rsp_beat   ('{default: '0}),
+            .str_rsp_tag    ('{default: '0}),
+            `UNUSED_PIN (str_rsp_ready),
+        `endif
 
             .dcr_req_valid  (dcr_req_valid),
             .dcr_req_rw     (dcr_req_rw),

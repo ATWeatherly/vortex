@@ -40,6 +40,21 @@ module rtlsim_shim import VX_gpu_pkg::*; #(
     input wire [MEM_TAG_WIDTH-1:0]          mem_rsp_tag [MEM_NUM_BANKS],
     output wire                             mem_rsp_ready [MEM_NUM_BANKS],
 
+`ifdef VX_CFG_TSU_ENABLE
+    // Tile-stream masters (passed through unchanged; the C++ shim models
+    // one AXI read master per port: bursts, beat responses, outstanding cap)
+    output wire                             str_req_valid [VX_STR_PORTS],
+    output wire [VX_STR_ADDR_WIDTH-1:0]     str_req_addr [VX_STR_PORTS],
+    output wire [VX_STR_NUM_BEATS-1:0]      str_req_beaten [VX_STR_PORTS],
+    output wire [VX_STR_TAG_WIDTH-1:0]      str_req_tag [VX_STR_PORTS],
+    input  wire                             str_req_ready [VX_STR_PORTS],
+    input  wire                             str_rsp_valid [VX_STR_PORTS],
+    input  wire [VX_STR_BEAT_SIZE*8-1:0]    str_rsp_data [VX_STR_PORTS],
+    input  wire [VX_STR_BEAT_WIDTH-1:0]     str_rsp_beat [VX_STR_PORTS],
+    input  wire [VX_STR_TAG_WIDTH-1:0]      str_rsp_tag [VX_STR_PORTS],
+    output wire                             str_rsp_ready [VX_STR_PORTS],
+`endif
+
     // DCR write/read request
     input  wire                             dcr_req_valid,
     input  wire                             dcr_req_rw,
@@ -93,6 +108,19 @@ module rtlsim_shim import VX_gpu_pkg::*; #(
         .mem_rsp_data   (vx_mem_rsp_data),
         .mem_rsp_tag    (vx_mem_rsp_tag),
         .mem_rsp_ready  (vx_mem_rsp_ready),
+
+    `ifdef VX_CFG_TSU_ENABLE
+        .str_req_valid  (str_req_valid),
+        .str_req_addr   (str_req_addr),
+        .str_req_beaten (str_req_beaten),
+        .str_req_tag    (str_req_tag),
+        .str_req_ready  (str_req_ready),
+        .str_rsp_valid  (str_rsp_valid),
+        .str_rsp_data   (str_rsp_data),
+        .str_rsp_beat   (str_rsp_beat),
+        .str_rsp_tag    (str_rsp_tag),
+        .str_rsp_ready  (str_rsp_ready),
+    `endif
 
         .dcr_req_valid  (dcr_req_valid),
         .dcr_req_rw     (dcr_req_rw),

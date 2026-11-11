@@ -24,6 +24,16 @@ extern "C" {
 #define VX_DXA_EXT_OPCODE RISCV_CUSTOM0
 #define VX_DXA_FUNCT7     0x3
 
+// Tile stream unit (TSU): the issue instruction, the coordinates and the
+// barrier completion are the same as for the DXA line engine; the
+// descriptor's ENGINE meta bit (host: vortex::dxa::set_stream) selects the
+// burst engine. The vx_tsu_issue_* names make TSU call sites explicit.
+#define vx_tsu_issue_1d_wg vx_dxa_issue_1d_wg
+#define vx_tsu_issue_2d_wg vx_dxa_issue_2d_wg
+#define vx_tsu_issue_3d_wg vx_dxa_issue_3d_wg
+#define vx_tsu_issue_4d_wg vx_dxa_issue_4d_wg
+#define vx_tsu_issue_5d_wg vx_dxa_issue_5d_wg
+
 // Packed launch metadata:
 // meta[3:0]   = descriptor slot (up to 16 descriptors)
 // meta[30:4]  = raw barrier id payload

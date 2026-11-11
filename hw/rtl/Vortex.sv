@@ -35,6 +35,21 @@ module Vortex import VX_gpu_pkg::*, VX_trace_pkg::*, VX_tlb_pkg::*; (
     input wire [VX_MEM_TAG_WIDTH-1:0]       mem_rsp_tag [VX_MEM_PORTS],
     output wire                             mem_rsp_ready [VX_MEM_PORTS],
 
+`ifdef VX_CFG_TSU_ENABLE
+    // Tile-stream masters (read-only burst requests, beat responses)
+    output wire                             str_req_valid [VX_STR_PORTS],
+    output wire [VX_STR_ADDR_WIDTH-1:0]     str_req_addr [VX_STR_PORTS],
+    output wire [VX_STR_NUM_BEATS-1:0]      str_req_beaten [VX_STR_PORTS],
+    output wire [VX_STR_TAG_WIDTH-1:0]      str_req_tag [VX_STR_PORTS],
+    input  wire                             str_req_ready [VX_STR_PORTS],
+
+    input  wire                             str_rsp_valid [VX_STR_PORTS],
+    input  wire [VX_STR_BEAT_SIZE*8-1:0]    str_rsp_data [VX_STR_PORTS],
+    input  wire [VX_STR_BEAT_WIDTH-1:0]     str_rsp_beat [VX_STR_PORTS],
+    input  wire [VX_STR_TAG_WIDTH-1:0]      str_rsp_tag [VX_STR_PORTS],
+    output wire                             str_rsp_ready [VX_STR_PORTS],
+`endif
+
     // DCR write request
     input  wire                             dcr_req_valid,
     input  wire                             dcr_req_rw,
@@ -123,6 +138,41 @@ module Vortex import VX_gpu_pkg::*, VX_trace_pkg::*, VX_tlb_pkg::*; (
         .DATA_SIZE (L3_SECTOR_SIZE),
         .TAG_WIDTH (L3_MEM_TAG_WIDTH)
     ) mem_bus_if[L3_MEM_PORTS]();
+
+    // Tile-stream masters: one bus per stream master, straight from the
+    // sockets' DXA cores to the top (no cache, no L2/L3 on this path).
+    localparam CL_STR_PORTS = `UP(SOCKET_STR_PORTS) * NUM_SOCKETS;
+    VX_stream_bus_if #(
+        .BURST_SIZE (VX_STR_BURST_SIZE),
+        .BEAT_SIZE  (VX_STR_BEAT_SIZE),
+        .TAG_WIDTH  (VX_STR_TAG_WIDTH)
+    ) str_bus_if[CL_STR_PORTS * `VX_CFG_NUM_CLUSTERS]();
+
+`ifdef VX_CFG_TSU_ENABLE
+    `STATIC_ASSERT(CL_STR_PORTS * `VX_CFG_NUM_CLUSTERS == VX_STR_PORTS, ("stream master count mismatch"))
+    for (genvar i = 0; i < VX_STR_PORTS; ++i) begin : g_str_bus_if
+        assign str_req_valid[i]  = str_bus_if[i].req_valid;
+        assign str_req_addr[i]   = str_bus_if[i].req_data.addr;
+        assign str_req_beaten[i] = str_bus_if[i].req_data.beaten;
+        assign str_req_tag[i]    = str_bus_if[i].req_data.tag;
+        assign str_bus_if[i].req_ready = str_req_ready[i];
+
+        assign str_bus_if[i].rsp_valid     = str_rsp_valid[i];
+        assign str_bus_if[i].rsp_data.data = str_rsp_data[i];
+        assign str_bus_if[i].rsp_data.beat = str_rsp_beat[i];
+        assign str_bus_if[i].rsp_data.tag  = str_rsp_tag[i];
+        assign str_rsp_ready[i] = str_bus_if[i].rsp_ready;
+    end
+`else
+    for (genvar i = 0; i < CL_STR_PORTS * `VX_CFG_NUM_CLUSTERS; ++i) begin : g_str_tieoff
+        assign str_bus_if[i].req_ready = 1'b0;
+        assign str_bus_if[i].rsp_valid = 1'b0;
+        assign str_bus_if[i].rsp_data  = '0;
+        `UNUSED_VAR (str_bus_if[i].req_valid)
+        `UNUSED_VAR (str_bus_if[i].req_data)
+        `UNUSED_VAR (str_bus_if[i].rsp_ready)
+    end
+`endif
 
     VX_cache_wrap #(
         .INSTANCE_ID    ("l3cache"),
@@ -338,6 +388,8 @@ module Vortex import VX_gpu_pkg::*, VX_trace_pkg::*, VX_tlb_pkg::*; (
             .dcr_bus_if         (per_cluster_dcr_bus_if[cluster_id]),
 
             .mem_bus_if         (per_cluster_mem_bus_if[cluster_id * L2_MEM_PORTS +: L2_MEM_PORTS]),
+
+            .str_bus_if         (str_bus_if[cluster_id * CL_STR_PORTS +: CL_STR_PORTS]),
 
             .kmu_bus_if         (per_cluster_kmu_bus_if[cluster_id +: 1]),
 

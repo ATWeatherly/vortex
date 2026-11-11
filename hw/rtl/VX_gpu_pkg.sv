@@ -1298,6 +1298,8 @@ package VX_gpu_pkg;
         logic [PERF_CTR_BITS-1:0] lmem_writes;
         logic [PERF_CTR_BITS-1:0] gmem_latency;
         logic [PERF_CTR_BITS-1:0] noslot_stalls;
+        logic [PERF_CTR_BITS-1:0] tsu_bursts;      // tile-stream bursts issued (all stream masters)
+        logic [PERF_CTR_BITS-1:0] tsu_bytes;       // bytes requested by those bursts
     } dxa_perf_t;
 `endif
 
@@ -1503,7 +1505,10 @@ package VX_gpu_pkg;
     localparam DXA_LMEM_ATTR_W = (BAR_ADDR_W + 1);
     localparam DXA_LMEM_ENGINE_TAG_W = UUID_WIDTH + 1;
     localparam DXA_LMEM_TAG_W = DXA_LMEM_ENGINE_TAG_W + NC_BITS;
-    localparam DXA_LMEM_OUT_TAG_W = DXA_LMEM_TAG_W + `ARB_SEL_BITS(`VX_CFG_NUM_DXA_CORES, 1);
+    // The DXA core's LMEM arbiter merges the line workers and the tile-stream
+    // workers (VX_CFG_NUM_TSU_CORES, 0 when the TSU is off).
+    localparam DXA_LMEM_NUM_WORKERS = `VX_CFG_NUM_DXA_CORES + `VX_CFG_NUM_TSU_CORES;
+    localparam DXA_LMEM_OUT_TAG_W = DXA_LMEM_TAG_W + `ARB_SEL_BITS(DXA_LMEM_NUM_WORKERS, 1);
 
     // TCU lmem tag and attr widths for DMA arb.
     // Masters into the TCU LMEM port: BLOCK_SIZE abufs + 1 shared bbuf.
@@ -1529,6 +1534,18 @@ package VX_gpu_pkg;
     localparam LMEM_DMA_INPUTS     = `VX_CFG_EXT_DXA_ENABLED + `VX_CFG_TCU_WGMMA_ENABLED;
     localparam LMEM_DMA_IN_TAG_MAX = `MAX(DXA_LMEM_OUT_TAG_W, TCU_LMEM_TAG_W);
     localparam LMEM_DMA_TAG_WIDTH  = LMEM_DMA_IN_TAG_MAX + `ARB_SEL_BITS(LMEM_DMA_INPUTS, 1);
+
+    // Tile stream unit: stream masters per socket / cluster / device
+    // (VX_CFG_TSU_ENABLE; all zero when it is off).
+    localparam SOCKET_STR_PORTS  = `VX_CFG_NUM_TSU_CORES * `VX_CFG_TSU_MASTERS_PER_WORKER;
+    localparam CLUSTER_STR_PORTS = SOCKET_STR_PORTS * NUM_SOCKETS;
+    localparam VX_STR_PORTS      = CLUSTER_STR_PORTS * `VX_CFG_NUM_CLUSTERS;
+    localparam VX_STR_BURST_SIZE = `VX_CFG_TSU_BURST_BYTES;
+    localparam VX_STR_BEAT_SIZE  = `VX_CFG_PLATFORM_MEMORY_DATA_SIZE;
+    localparam VX_STR_NUM_BEATS  = VX_STR_BURST_SIZE / VX_STR_BEAT_SIZE;
+    localparam VX_STR_BEAT_WIDTH = `UP(`CLOG2(VX_STR_NUM_BEATS));
+    localparam VX_STR_ADDR_WIDTH = `VX_CFG_MEM_ADDR_WIDTH - `CLOG2(VX_STR_BURST_SIZE);
+    localparam VX_STR_TAG_WIDTH  = UUID_WIDTH + `CLOG2(`VX_CFG_TSU_MAX_INFLIGHT);
 
     ////////////////////////// Icache Parameters //////////////////////////////
 
