@@ -33,9 +33,9 @@ module VX_dxa_core import VX_gpu_pkg::*, VX_dxa_pkg::*; #(
 `ifdef VX_CFG_TSU_ENABLE
 `ifdef VX_CFG_TCU_SEQ_ENABLE
     // Phase-4 W-slot landing to the socket's core TCU sequencer (one core per socket)
-    output wire                 wl_valid,
-    input  wire                 wl_ready,
-    output dxa_wland_beat_t     wl_beat,
+    output wire [TSU_WL_LANES-1:0] wl_valid,
+    input  wire [TSU_WL_LANES-1:0] wl_ready,
+    output dxa_wland_beat_t [TSU_WL_LANES-1:0] wl_beat,
     output wire                 wl_done_valid,
     output dxa_wland_done_t     wl_done,
 `endif
@@ -306,28 +306,19 @@ module VX_dxa_core import VX_gpu_pkg::*, VX_dxa_pkg::*; #(
     ) tsu_gmem_dummy_if[NUM_STR_WORKERS]();
 
 `ifdef VX_CFG_TCU_SEQ_ENABLE
-    // W-slot landing merge: one beat per cycle from the stream workers (round-robin, combinational so a
-    // worker's completion pulse can never overtake its own last beat); completion pulses are held per worker
-    // and forwarded one per cycle.
+    // W-slot landing: one lane per stream worker straight to the sequencer (phase-4 feed). Worker w only lands
+    // blocks b with b mod NW == w, so lanes never target the same block and all can land in one cycle.
+    // Completion pulses are held per worker and forwarded one per cycle; a worker raises its pulse only after its
+    // last beat was accepted on its own lane, so a pulse never overtakes its beats.
+    `STATIC_ASSERT(NUM_STR_WORKERS == TSU_WL_LANES, ("W-landing lane count must equal the TSU worker count"))
     wire [NUM_STR_WORKERS-1:0] tw_valid, tw_ready, tw_done_valid;
     dxa_wland_beat_t           tw_beat [NUM_STR_WORKERS];
     dxa_wland_done_t           tw_done [NUM_STR_WORKERS];
     localparam TW_W = `UP(`CLOG2(NUM_STR_WORKERS));
-    reg  [TW_W-1:0] tw_rr_r;
-    logic [TW_W-1:0] tw_sel;
-    logic            tw_any;
-    always_comb begin
-        tw_sel = tw_rr_r;
-        tw_any = 1'b0;
-        for (integer k = 0; k < NUM_STR_WORKERS; ++k) begin
-            automatic logic [TW_W-1:0] s = TW_W'((32'(tw_rr_r) + k) % NUM_STR_WORKERS);
-            if (!tw_any && tw_valid[s]) begin tw_sel = s; tw_any = 1'b1; end
-        end
-    end
-    assign wl_valid = tw_any;
-    assign wl_beat  = tw_beat[tw_sel];
-    for (genvar i = 0; i < NUM_STR_WORKERS; ++i) begin : g_tw_rdy
-        assign tw_ready[i] = wl_ready && tw_any && (tw_sel == TW_W'(i));
+    for (genvar i = 0; i < NUM_STR_WORKERS; ++i) begin : g_tw_lane
+        assign wl_valid[i] = tw_valid[i];
+        assign wl_beat[i]  = tw_beat[i];
+        assign tw_ready[i] = wl_ready[i];
     end
     reg [NUM_STR_WORKERS-1:0] tw_dpend_r;
     dxa_wland_done_t          tw_dval_r [NUM_STR_WORKERS];
@@ -344,10 +335,8 @@ module VX_dxa_core import VX_gpu_pkg::*, VX_dxa_pkg::*; #(
     assign wl_done       = tw_dval_r[td_sel];
     always @(posedge clk) begin
         if (reset) begin
-            tw_rr_r    <= '0;
             tw_dpend_r <= '0;
         end else begin
-            if (tw_any && wl_ready) tw_rr_r <= TW_W'((32'(tw_sel) + 1) % NUM_STR_WORKERS);
             for (integer k = 0; k < NUM_STR_WORKERS; ++k) begin
                 if (td_any && (td_sel == TW_W'(k))) tw_dpend_r[k] <= 1'b0;
                 if (tw_done_valid[k]) begin tw_dpend_r[k] <= 1'b1; tw_dval_r[k] <= tw_done[k]; end

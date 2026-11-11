@@ -42,9 +42,9 @@ module VX_tcu_unit import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
     VX_sched_unlock_if.master sched_unlock_if,
 `ifdef VX_CFG_TSU_ENABLE
     // phase-4 W-slot landing (TSU)
-    input  wire                         wl_valid,
-    output wire                         wl_ready,
-    input  VX_dxa_pkg::dxa_wland_beat_t wl_beat,
+    input  wire [VX_dxa_pkg::TSU_WL_LANES-1:0] wl_valid,
+    output wire [VX_dxa_pkg::TSU_WL_LANES-1:0] wl_ready,
+    input  VX_dxa_pkg::dxa_wland_beat_t [VX_dxa_pkg::TSU_WL_LANES-1:0] wl_beat,
     input  wire                         wl_done_valid,
     input  VX_dxa_pkg::dxa_wland_done_t wl_done,
 `endif

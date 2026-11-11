@@ -130,6 +130,7 @@ public:
     // sequencer (TcuUnit::seq_land) instead of LMEM; tag = raw barrier field low byte {lg_kt, blk, slot}.
     bool                    wl = false;
     uint32_t                wl_tag = 0;
+    uint64_t                wl_beat_cycle = UINT64_MAX;  // phase-4 feed: one landing lane per worker (RTL VX_dxa_core)
   };
 
   // ── Constructor ──────────────────────────────────────────────────────
@@ -914,8 +915,9 @@ private:
   // beats round-robin into one beat/cycle per core) into the core's TCU sequencer instead of LMEM. No
   // barrier notify; the last beat closes the landing (seq_land_done) once every other beat has drained.
   void tick_worker_wland(Worker& w) {
-    uint32_t lcid = w.req.core->id() % kCoresPerSocket;
-    if (wl_beat_cycle_.at(lcid) == cycle_) return;
+    // One 64 B landing beat per cycle per TSU worker: the RTL gives every stream worker its own lane into the
+    // sequencer (worker w lands blocks b = w mod NW only, so lanes never share a block's W banks).
+    if (w.wl_beat_cycle == cycle_) return;
     uint32_t slot = w.drain_slot;
     auto& s = w.inflight[slot];
     const LineWork& lw = s.work;
@@ -928,7 +930,7 @@ private:
     // issues a landing with the LMEM base, so the dense image offset starts at 0.
     uint64_t off = (lw.smem_word_addr + lw.smem_byte_offset - uint64_t(VX_MEM_LMEM_BASE_ADDR)) & ((uint64_t(1) << 17) - 1u);
     w.req.core->tcu_unit()->seq_land(w.wl_tag, off, s.rsp_data->data(), 64);
-    wl_beat_cycle_.at(lcid) = cycle_;
+    w.wl_beat_cycle = cycle_;
     ++w.writes_emitted;
     bool last = lw.last;
     s.allocated = false;
@@ -938,10 +940,6 @@ private:
     if (it != w.issued_order.end()) w.issued_order.erase(it);
     w.drain_slot = UINT32_MAX;
     if (last) w.req.core->tcu_unit()->seq_land_done(w.wl_tag);
-  }
-  std::array<uint64_t, kCoresPerSocket> wl_beat_cycle_ = filled_cycles();
-  static std::array<uint64_t, kCoresPerSocket> filled_cycles() {
-    std::array<uint64_t, kCoresPerSocket> a; a.fill(UINT64_MAX); return a;
   }
 #endif
 

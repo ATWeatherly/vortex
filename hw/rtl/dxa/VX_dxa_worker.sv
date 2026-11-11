@@ -275,7 +275,17 @@ module VX_dxa_worker import VX_gpu_pkg::*, VX_dxa_pkg::*; #(
             // VX_CFG_TSU_SEL_LSB = 28 + log2(32 / STREAM_NUM_MASTERS) must leave the select bits inside the
             // address (e.g. 4 masters on a 32-bit address would select on bits 31..32: override SEL_LSB).
             `STATIC_ASSERT(STR_SEL_LSB + STR_SEL_W <= TSU_STR_ADDR_W, ("TSU master-select bits above the stream address"))
+        `ifdef VX_CFG_TSU_MASTER_INTERLEAVE
+            // Phase-4 feed: consecutive bursts of one transfer round-robin over the worker's masters, so a tile that
+            // sits in ONE pseudo-channel still uses all of them (each master keeps reading the same PC: no per-burst
+            // PC switching inside a master). Needs every master to reach every PC (platforms.mk TSU_LINK=full).
+            `ifdef VX_CFG_TSU_LINK_GROUP
+            `STATIC_ASSERT(0, ("VX_CFG_TSU_MASTER_INTERLEAVE needs TSU_LINK=full (group-linked masters reach only their own PCs)"))
+            `endif
+            assign str_sel = str_w.req_data.addr[0 +: STR_SEL_W];
+        `else
             assign str_sel = str_w.req_data.addr[STR_SEL_LSB +: STR_SEL_W];
+        `endif
         end else begin : g_nosel
             assign str_sel = '0;
         end
