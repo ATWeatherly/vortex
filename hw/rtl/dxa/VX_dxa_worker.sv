@@ -280,7 +280,9 @@ module VX_dxa_worker import VX_gpu_pkg::*, VX_dxa_pkg::*; #(
             // sits in ONE pseudo-channel still uses all of them (each master keeps reading the same PC: no per-burst
             // PC switching inside a master). Needs every master to reach every PC (platforms.mk TSU_LINK=full).
             `ifdef VX_CFG_TSU_LINK_GROUP
-            `STATIC_ASSERT(0, ("VX_CFG_TSU_MASTER_INTERLEAVE needs TSU_LINK=full (group-linked masters reach only their own PCs)"))
+            // Hard compile error in every tool (STATIC_ASSERT is an initial-block $error: lint and synthesis skip it):
+            // VX_CFG_TSU_MASTER_INTERLEAVE needs TSU_LINK=full -- group-linked masters reach only their own PCs.
+            `VX_CFG_TSU_MASTER_INTERLEAVE_requires_TSU_LINK_full
             `endif
             assign str_sel = str_w.req_data.addr[0 +: STR_SEL_W];
         `else
