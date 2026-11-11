@@ -51,9 +51,9 @@ module VX_core import VX_gpu_pkg::*, VX_tlb_pkg::*; #(
 `ifdef VX_CFG_TSU_ENABLE
 `ifdef VX_CFG_TCU_SEQ_ENABLE
     // phase-4 W-slot landing from the socket's TSU workers
-    input  wire                         wl_valid,
-    output wire                         wl_ready,
-    input  VX_dxa_pkg::dxa_wland_beat_t wl_beat,
+    input  wire [VX_dxa_pkg::TSU_WL_LANES-1:0] wl_valid,
+    output wire [VX_dxa_pkg::TSU_WL_LANES-1:0] wl_ready,
+    input  VX_dxa_pkg::dxa_wland_beat_t [VX_dxa_pkg::TSU_WL_LANES-1:0] wl_beat,
     input  wire                         wl_done_valid,
     input  VX_dxa_pkg::dxa_wland_done_t wl_done,
 `endif

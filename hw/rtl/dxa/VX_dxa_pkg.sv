@@ -100,6 +100,9 @@ package VX_dxa_pkg;
     // Master select inside a worker: byte-address bits [SEL_LSB +: log2(M)],
     // expressed in granule-address units.
     localparam TSU_SEL_LSB_GRANULE = `VX_CFG_TSU_SEL_LSB - `CLOG2(TSU_BURST_BYTES);
+    // Phase-4 feed: W-slot landing lanes, one per TSU worker (worker w lands only blocks b with b mod NW == w, so
+    // lanes never collide on a block and the sequencer writes all of them in one cycle).
+    localparam TSU_WL_LANES = (TSU_NUM_WORKERS > 0) ? TSU_NUM_WORKERS : 1;
     /* verilator lint_on UNUSEDPARAM */
 
     // DXA request data — core → DXA control path.

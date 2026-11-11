@@ -718,8 +718,9 @@ module VX_socket import VX_gpu_pkg::*, VX_tlb_pkg::*;
 `ifdef VX_CFG_TCU_SEQ_ENABLE
     // Phase-4 W-slot landing: the socket's TSU workers write straight into the core's TCU sequencer W slots.
     `STATIC_ASSERT (`VX_CFG_SOCKET_SIZE == 1, ("W-slot landing (TSU + TCU sequencer) supports one core per socket"))
-    wire                         sock_wl_valid, sock_wl_ready, sock_wl_done_valid;
-    VX_dxa_pkg::dxa_wland_beat_t sock_wl_beat;
+    wire [VX_dxa_pkg::TSU_WL_LANES-1:0] sock_wl_valid, sock_wl_ready;
+    wire                         sock_wl_done_valid;
+    VX_dxa_pkg::dxa_wland_beat_t [VX_dxa_pkg::TSU_WL_LANES-1:0] sock_wl_beat;
     VX_dxa_pkg::dxa_wland_done_t sock_wl_done;
 `endif
 `endif

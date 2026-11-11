@@ -44,9 +44,9 @@ module VX_execute import VX_gpu_pkg::*; #(
     // core-wide store drain (LSU schedulers + mem unit empty), for tfence
     input wire              store_drained,
 `ifdef VX_CFG_TSU_ENABLE
-    input  wire                         wl_valid,
-    output wire                         wl_ready,
-    input  VX_dxa_pkg::dxa_wland_beat_t wl_beat,
+    input  wire [VX_dxa_pkg::TSU_WL_LANES-1:0] wl_valid,
+    output wire [VX_dxa_pkg::TSU_WL_LANES-1:0] wl_ready,
+    input  VX_dxa_pkg::dxa_wland_beat_t [VX_dxa_pkg::TSU_WL_LANES-1:0] wl_beat,
     input  wire                         wl_done_valid,
     input  VX_dxa_pkg::dxa_wland_done_t wl_done,
 `endif
