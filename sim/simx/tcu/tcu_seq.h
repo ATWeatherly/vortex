@@ -56,7 +56,7 @@ public:
   enum CfgField : uint32_t { KT = 0, X_ROWS, X_STRIDE, W_ROWS, W_LAYOUT, W_STRIDE, ACC_STRIDE, NOTIFY_BAR, NUM_CFG };
 
   struct PerfStats {
-    uint64_t gemms = 0, gemm_k = 0, loads_x = 0, loads_w = 0, acc_st = 0, busy = 0;
+    uint64_t gemms = 0, gemm_k = 0, loads_x = 0, loads_w = 0, acc_st = 0, busy = 0, landings = 0;
   };
 
   // Memory access callbacks bound by the owner (LMEM window vs global backing store).
@@ -87,10 +87,49 @@ public:
     w_read_end_.assign(kBlocks, std::vector<uint64_t>(kWSlots, 0));
     acc_ready_.assign(kBlocks, std::vector<uint64_t>(kAccTiles, 0));
     x_ready_.fill(0); x_read_end_.fill(0);
+    staging_.assign(kBlocks, std::vector<std::deque<Landing>>(kWSlots));
+    expect_.assign(kBlocks, std::vector<std::deque<uint32_t>>(kWSlots));
+  }
+
+  // ---- phase-4 tile-stream landing (TSU -> W slot) ----
+  // The DXA/TSU model delivers a transfer's bytes into a per-slot staging image (landings into one slot arrive in
+  // issue order: the RTL steers them to one TSU worker); land_done() closes it. A tbuf.ldws expectation is matched
+  // with the oldest closed image in tick(): the image becomes the slot's contents (functional effect) and the
+  // expectation retires (pending--). Because the ldws is accepted after every earlier tgemm on the slot (in-order
+  // issue), overwriting the slot then is safe; a tgemm on a slot with an unmatched expectation is held.
+  void land(uint32_t tag, uint64_t off, const void* data, uint32_t size) {
+    uint32_t lg = (tag >> 4) & 0xfu, b = (tag >> 2) & 3u, s = tag & 3u;
+    assert(b < kBlocks && lg >= 6 && lg <= 11 && off + size <= kWSlotBytes);
+    auto& q = staging_.at(b).at(s);
+    if (q.empty() || q.back().closed) q.push_back(Landing{std::vector<int8_t>(kWSlotBytes, 0), 1u << lg, false, 0});
+    std::memcpy(q.back().img.data() + off, data, size);
+  }
+  void land_done(uint32_t tag, uint64_t now) {
+    uint32_t b = (tag >> 2) & 3u, s = tag & 3u;
+    auto& q = staging_.at(b).at(s);
+    if (q.empty() || q.back().closed) q.push_back(Landing{std::vector<int8_t>(kWSlotBytes, 0), 1u << ((tag >> 4) & 0xfu), false, 0});
+    q.back().closed = true;
+    q.back().at = now;
+    ++perf_.landings;
   }
 
   // Retire commands whose modelled end time has passed.
   void tick(uint64_t now) {
+    for (uint32_t b = 0; b < kBlocks; ++b) {
+      for (uint32_t s = 0; s < kWSlots; ++s) {
+        auto& eq = expect_.at(b).at(s);
+        auto& sq = staging_.at(b).at(s);
+        while (!eq.empty() && !sq.empty() && sq.front().closed && sq.front().at <= now) {
+          w_.at(b).at(s).swap(sq.front().img);
+          w_rows_.at(b).at(s) = 64;
+          w_kt_.at(b).at(s) = sq.front().kt;
+          w_ready_.at(b).at(s) = now;
+          --pending_.at(eq.front());
+          eq.pop_front();
+          sq.pop_front();
+        }
+      }
+    }
     while (!events_.empty()) {
       bool any = false;
       for (auto it = events_.begin(); it != events_.end(); ) {
@@ -126,6 +165,15 @@ public:
       return true;
     case TcuType::TBUF_LDX: return ldx(wid, rs1, rs2, now);
     case TcuType::TBUF_LDW: return ldw(wid, rs1, rs2, now);
+    case TcuType::TBUF_LDWS: {
+      uint32_t b = (rs2 >> 2) & 3u, s = rs2 & 3u;
+      assert(b < kBlocks);
+      auto& eq = expect_.at(b).at(s);
+      if (eq.size() >= kQueueDepth) return false;
+      eq.push_back(wid);
+      ++pending_.at(wid);
+      return true;
+    }
     case TcuType::TGEMM:    return gemm(wid, rs1, rs2, now);
     case TcuType::TACC_ST:  return acc_st(wid, rs1, rs2, now);
     default: std::abort();
@@ -229,6 +277,7 @@ private:
       std::abort();
     }
     if (outstanding(b, now) >= kQueueDepth) return false;
+    if (!expect_.at(b).at(wsl).empty()) return false;   // W slot still waiting for its stream landing
     const uint32_t rows = rows_of(mode), cols = cols_of(mode);
     const uint32_t wkt = w_kt_.at(b).at(wsl);
     assert(koff + K <= wkt && koff + K <= kXRowBytes);
@@ -279,6 +328,10 @@ private:
     ++perf_.acc_st;
     return true;
   }
+
+  struct Landing { std::vector<int8_t> img; uint32_t kt; bool closed; uint64_t at; };
+  std::vector<std::vector<std::deque<Landing>>> staging_;
+  std::vector<std::vector<std::deque<uint32_t>>> expect_;   // tbuf.ldws expectations: issuing wid
 
   MemIf mem_;
   std::array<std::vector<int8_t>, kXSlots> x_;

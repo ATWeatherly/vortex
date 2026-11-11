@@ -717,6 +717,7 @@ public:
         case TcuType::TWAIT:
         case TcuType::TBUF_LDX:
         case TcuType::TBUF_LDW:
+        case TcuType::TBUF_LDWS:
         case TcuType::TCFG:
         case TcuType::TFENCE: {
           // warp-uniform scalars: the first active lane's values
@@ -756,6 +757,7 @@ public:
       case TcuType::TWAIT:
       case TcuType::TBUF_LDX:
       case TcuType::TBUF_LDW:
+      case TcuType::TBUF_LDWS:
       case TcuType::TCFG:
       case TcuType::TFENCE:
         delay = 1;   // async commands retire at acceptance; completion is tracked by TcuSeq
@@ -1480,6 +1482,15 @@ public:
     return perf_stats_;
   }
 
+#ifdef VX_CFG_TCU_SEQ_ENABLE
+  void seq_land(uint32_t tag, uint64_t off, const void* data, uint32_t size) {
+    seq_.land(tag, off, data, size);
+  }
+  void seq_land_done(uint32_t tag) {
+    seq_.land_done(tag, SimPlatform::instance().cycles());
+  }
+#endif
+
 private:
   uint32_t elem_bits(uint32_t fmt_s) const {
     switch (fmt_s) {
@@ -1813,6 +1824,7 @@ op_string_t TcuUnit::op_string(TcuType tcu_type, IntrTcuArgs args) {
   case TcuType::TBUF_LDW: return {"TBUF.LDW", ""};
   case TcuType::TCFG:     return {"TCFG", ""};
   case TcuType::TFENCE:   return {"TFENCE", ""};
+  case TcuType::TBUF_LDWS: return {"TBUF.LDWS", ""};
   default:
     std::abort();
   }
@@ -2060,6 +2072,15 @@ TcuUnit::~TcuUnit() {
 TcuTbuf::Ptr& TcuUnit::tbuf() {
   return tbuf_;
 }
+
+#ifdef VX_CFG_TCU_SEQ_ENABLE
+void TcuUnit::seq_land(uint32_t tag, uint64_t off, const void* data, uint32_t size) {
+  impl_->seq_land(tag, off, data, size);
+}
+void TcuUnit::seq_land_done(uint32_t tag) {
+  impl_->seq_land_done(tag);
+}
+#endif
 
 void TcuUnit::on_reset() {
   impl_->reset();

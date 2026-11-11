@@ -797,12 +797,13 @@ enum class TcuType {
   TBUF_LDW,   // funct3 4: load a W (weight) slot (async)
   TCFG,       // funct3 5: per-warp sequencer config write
   TFENCE,     // funct3 6: cross-port ordering point (wstall)
+  TBUF_LDWS,  // funct3 7: expect one tile-stream landing into a W slot (async, phase 4, TSU builds)
 };
 
 inline bool tcu_is_seq(TcuType t) {
   return t == TcuType::TGEMM || t == TcuType::TACC_ST || t == TcuType::TWAIT
       || t == TcuType::TBUF_LDX || t == TcuType::TBUF_LDW || t == TcuType::TCFG
-      || t == TcuType::TFENCE;
+      || t == TcuType::TFENCE || t == TcuType::TBUF_LDWS;
 }
 
 struct IntrTcuArgs {
@@ -847,6 +848,7 @@ inline std::ostream &operator<<(std::ostream &os, const TcuType& type) {
   case TcuType::TBUF_LDW:   os << "TBUF.LDW"; break;
   case TcuType::TCFG:       os << "TCFG"; break;
   case TcuType::TFENCE:     os << "TFENCE"; break;
+  case TcuType::TBUF_LDWS:  os << "TBUF.LDWS"; break;
   default:
     assert(false);
   }

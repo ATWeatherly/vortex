@@ -17,8 +17,12 @@
 #include <array>
 #include <cstring>
 #include <deque>
+#include <iostream>
 #include <vector>
 #include "core.h"
+#if defined(VX_CFG_TSU_ENABLE) && defined(VX_CFG_TCU_SEQ_ENABLE)
+#include "tcu_unit.h"
+#endif
 #include "socket.h"
 #include "socket.h"
 #include "mem_block_pool.h"
@@ -122,12 +126,17 @@ public:
     uint32_t                mc_cta_idx = 0;      // 0..cta_indices.size()
     uint32_t                km_elem_idx = 0;     // 0..km_num_elems (K-major scatter)
     uint32_t                writes_emitted = 0;  // count for perf
+    // Phase-4 W-slot landing: TSU descriptor with DEST_KIND TILEBUF_B; the bytes go to the core's TCU
+    // sequencer (TcuUnit::seq_land) instead of LMEM; tag = raw barrier field low byte {lg_kt, blk, slot}.
+    bool                    wl = false;
+    uint32_t                wl_tag = 0;
   };
 
   // ── Constructor ──────────────────────────────────────────────────────
-  explicit Impl(DxaCore* simobject, MemArbiter* gmem_arb)
+  explicit Impl(DxaCore* simobject, MemArbiter* gmem_arb, uint32_t socket_id)
     : simobject_(simobject)
     , gmem_arb_(gmem_arb)
+    , socket_id_(socket_id)
     , workers_(VX_CFG_NUM_DXA_CORES)
     , cycle_(0)
   {
@@ -233,10 +242,24 @@ public:
       }
     }
 
-    // 3) Dispatch from queue to idle workers.
-    for (auto& w : workers_) {
-      if (w.state == WState::IDLE && !queue_.empty())
-        start_worker(w, queue_.front()), queue_.pop_front();
+    // 3) Dispatch from queue to idle workers (in order). A W-slot landing is steered to worker
+    //    blk % workers (RTL VX_dxa_core: TSU worker blk % NUM_STR_WORKERS) so landings into one slot complete
+    //    in issue order; it holds the queue head while that worker is busy.
+    while (!queue_.empty()) {
+      const DxaReq& r = queue_.front();
+      Worker* tgt = nullptr;
+      if (req_is_wland(r)) {
+        auto& w = workers_.at(((r.bar_id >> 2) & 3u) % workers_.size());
+        if (w.state == WState::IDLE) tgt = &w;
+      } else {
+        for (auto& w : workers_) {
+          if (w.state == WState::IDLE) { tgt = &w; break; }
+        }
+      }
+      if (tgt == nullptr) break;
+      DxaReq req = r;
+      queue_.pop_front();
+      start_worker(*tgt, req);
     }
 
     // 4) Drain DxaUnit channels → req queue (round-robin).
@@ -257,6 +280,23 @@ private:
     uint32_t enc = (meta >> DXA_DESC_META_ELEMSZ_LSB)
                     & ((1u << DXA_DESC_META_ELEMSZ_BITS) - 1u);
     return 1u << enc;
+  }
+
+  // Tile-stream fields above the meta budget (sw/common/dxa_meta.h).
+  static bool desc_is_tsu(uint32_t meta) { return (meta >> DXA_DESC_META_ENGINE_LSB) & 1u; }
+  static uint32_t desc_dest_kind(uint32_t meta) {
+    return (meta >> DXA_DESC_META_DEST_KIND_LSB) & ((1u << DXA_DESC_META_DEST_KIND_BITS) - 1u);
+  }
+  static bool desc_is_wland(uint32_t meta) {
+#if defined(VX_CFG_TSU_ENABLE) && defined(VX_CFG_TCU_SEQ_ENABLE)
+    return desc_is_tsu(meta) && desc_dest_kind(meta) == 1u;   // DEST_KIND TILEBUF_B
+#else
+    (void)meta;
+    return false;
+#endif
+  }
+  bool req_is_wland(const DxaReq& r) const {
+    return r.desc_slot < VX_DCR_DXA_DESC_COUNT && desc_is_wland(descriptors_.at(r.desc_slot).meta);
   }
 
   // Destination SMEM layout (2-bit LAYOUT meta field). Mirrors dxa.h::Layout.
@@ -365,8 +405,11 @@ private:
 
     w.desc = descriptors_.at(req.desc_slot);
     w.smem_stride = w.desc.smem_stride;
+    w.wl = desc_is_wland(w.desc.meta);
+    w.wl_tag = req.bar_id & 0xffu;
 
     enumerate_work_list(w);
+    check_tsu_link(w);
     if (w.work_list.empty()) {
       // No work — same edge case as above.
       release_all_barriers(w);
@@ -627,6 +670,13 @@ private:
       w.drain_slot = slot;
     }
 
+#if defined(VX_CFG_TSU_ENABLE) && defined(VX_CFG_TCU_SEQ_ENABLE)
+    if (w.wl) {
+      tick_worker_wland(w);
+      return;
+    }
+#endif
+
     // Determine destination core's LMEM port group.
     uint32_t socket_local_cid = w.req.core->id() % kCoresPerSocket;
 
@@ -826,11 +876,77 @@ private:
     w.mc_cta_idx = 0;
     w.km_elem_idx = 0;
     w.writes_emitted = 0;
+    w.wl = false;
   }
+
+  // Group-linked platform (platforms.mk TSU_LINK=group): m_axi_str_<i> reaches only its PC group
+  // HBM[i*g : i*g+g-1] (g = 32 / STREAM_NUM_MASTERS) and reads garbage elsewhere (u50wgts_2c200, 2026-11-11).
+  // Mirror of the RTL VX_dxa_worker range assert: a TSU read's group index addr >> VX_CFG_TSU_SEL_LSB must lie
+  // in this socket's masters, and for a W landing in the masters of TSU worker blk % NUM_TSU_CORES.
+  void check_tsu_link(const Worker& w) const {
+#if defined(VX_CFG_TSU_ENABLE) && defined(VX_CFG_TSU_LINK_GROUP)
+    if (!desc_is_tsu(w.desc.meta)) return;
+    const uint32_t ps = VX_CFG_TSU_MASTERS_PER_SOCKET;
+    const uint32_t mpw = VX_CFG_TSU_MASTERS_PER_WORKER;
+    for (const auto& lw : w.work_list) {
+      if (lw.oob) continue;
+      uint64_t grp = lw.gmem_cl_addr >> VX_CFG_TSU_SEL_LSB;
+      uint64_t lo = uint64_t(socket_id_) * ps, hi = lo + ps;
+      if (w.wl) {
+        lo += uint64_t(((w.wl_tag >> 2) & 3u) % VX_CFG_NUM_TSU_CORES) * mpw;
+        hi = lo + mpw;
+      }
+      if (grp < lo || grp >= hi) {
+        std::cerr << "*** dxa: TSU read 0x" << std::hex << lw.gmem_cl_addr << std::dec << " is in PC group " << grp
+                  << " but the group-linked platform routes it to masters [" << lo << "," << hi << ")"
+                  << " of socket " << socket_id_ << " (each reaches only its own " << (32 / VX_CFG_STREAM_NUM_MASTERS)
+                  << " PCs)" << std::endl;
+        std::abort();
+      }
+    }
+#else
+    (void)w;
+#endif
+  }
+
+#if defined(VX_CFG_TSU_ENABLE) && defined(VX_CFG_TCU_SEQ_ENABLE)
+  // W-slot landing drain: one 64 B beat per core per cycle (the RTL DXA core merges its TSU workers' landing
+  // beats round-robin into one beat/cycle per core) into the core's TCU sequencer instead of LMEM. No
+  // barrier notify; the last beat closes the landing (seq_land_done) once every other beat has drained.
+  void tick_worker_wland(Worker& w) {
+    uint32_t lcid = w.req.core->id() % kCoresPerSocket;
+    if (wl_beat_cycle_.at(lcid) == cycle_) return;
+    uint32_t slot = w.drain_slot;
+    auto& s = w.inflight[slot];
+    const LineWork& lw = s.work;
+    if (lw.oob || lw.scatter || !s.rsp_data || lw.valid_length != 64 || lw.cl_byte_offset != 0) {
+      std::cerr << "*** dxa: W-slot landing needs full 64 B in-bounds row-major beats (gmem 0x" << std::hex
+                << lw.gmem_cl_addr << std::dec << ", len " << lw.valid_length << ", oob " << lw.oob << ")" << std::endl;
+      std::abort();
+    }
+    uint64_t off = (lw.smem_word_addr + lw.smem_byte_offset) & ((uint64_t(1) << 17) - 1u);
+    w.req.core->tcu_unit()->seq_land(w.wl_tag, off, s.rsp_data->data(), 64);
+    wl_beat_cycle_.at(lcid) = cycle_;
+    ++w.writes_emitted;
+    bool last = lw.last;
+    s.allocated = false;
+    s.rsp_arrived = false;
+    s.rsp_data.reset();
+    auto it = std::find(w.issued_order.begin(), w.issued_order.end(), slot);
+    if (it != w.issued_order.end()) w.issued_order.erase(it);
+    w.drain_slot = UINT32_MAX;
+    if (last) w.req.core->tcu_unit()->seq_land_done(w.wl_tag);
+  }
+  std::array<uint64_t, kCoresPerSocket> wl_beat_cycle_ = filled_cycles();
+  static std::array<uint64_t, kCoresPerSocket> filled_cycles() {
+    std::array<uint64_t, kCoresPerSocket> a; a.fill(UINT64_MAX); return a;
+  }
+#endif
 
   // ── Members ──────────────────────────────────────────────────────────
   DxaCore*    simobject_;
   MemArbiter* gmem_arb_;
+  uint32_t    socket_id_;
   std::array<Descriptor, VX_DCR_DXA_DESC_COUNT> descriptors_;
   std::deque<DxaReq>     queue_;
   std::vector<Worker>    workers_;
@@ -864,7 +980,7 @@ DxaCore::DxaCore(const SimContext& ctx, const char* name, Socket* socket)
     gmem_rsp_in.at(i).bind(&gmem_arb_->RspIn.at(i));
   }
 
-  impl_ = new Impl(this, gmem_arb_.get());
+  impl_ = new Impl(this, gmem_arb_.get(), socket->id());
 }
 
 DxaCore::~DxaCore() {

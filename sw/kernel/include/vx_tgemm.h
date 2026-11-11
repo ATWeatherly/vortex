@@ -82,6 +82,17 @@ static inline void vx_tfence(void) {
   __asm__ volatile (".insn r %0, 6, 5, x0, x0, x0" :: "i"(RISCV_CUSTOM0) : "memory");
 }
 
+// Phase 4 (TSU builds): tbuf.ldws expects one tile-stream landing into W slot w_slot ({blk[1:0], slot[1:0]}).
+// Issue it BEFORE the matching TSU transfer (vx_tsu_issue_wslot) so the stream never waits on the sequencer.
+static inline void vx_tbuf_ldws(uint32_t w_slot) {
+  __asm__ volatile (".insn r %0, 7, 5, x0, x0, %1" :: "i"(RISCV_CUSTOM0), "r"(w_slot) : "memory");
+}
+
+// W-slot landing tag carried in the TSU issue's barrier field: {lg_kt[3:0], blk[1:0], slot[1:0]}.
+static inline uint32_t vx_tsu_wslot_tag(uint32_t w_slot, uint32_t kt) {
+  return ((uint32_t)__builtin_ctz(kt) << 4) | (w_slot & 0xf);
+}
+
 #ifdef __cplusplus
 }
 #endif
