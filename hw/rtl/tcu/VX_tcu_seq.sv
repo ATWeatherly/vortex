@@ -255,7 +255,9 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
         logic [NW_WIDTH-1:0]   wid;
         logic [GEN_W-1:0]      cap;      // WAR: landing may write once w_rd_done reaches cap
     } lws_ent_t;
+    /* verilator lint_off UNUSEDSIGNAL */   // read only by the TSU landing path (VX_CFG_TSU_ENABLE)
     lws_ent_t  lws_q [NB][NWS][QD];
+    /* verilator lint_on UNUSEDSIGNAL */
     reg [1:0]  lws_cnt [NB][NWS];
     reg        lws_wp [NB][NWS], lws_rp [NB][NWS];
     // landing completion (one transfer = one expectation)
@@ -635,11 +637,12 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
     assign lws_done_head = lws_q[wl_done.blk][wl_done.slot][lws_rp[wl_done.blk][wl_done.slot]];
     `RUNTIME_ASSERT(~wl_done_valid || (lws_cnt[wl_done.blk][wl_done.slot] != 2'd0),
         ("%t: *** %s stream landing done without a tbuf.ldws (blk=%0d slot=%0d)", $time, INSTANCE_ID, wl_done.blk, wl_done.slot))
-    `RUNTIME_ASSERT(~wl_fire || (32'(wl_beat.seg) < CX),
+    `RUNTIME_ASSERT(~wl_fire || ((wl_beat.simt ? (32'(wl_beat.seg) >> 3) : 32'(wl_beat.seg)) < CX),
         ("%t: *** %s stream landing segment %0d beyond KT_MAX", $time, INSTANCE_ID, wl_beat.seg))
 `else
     wire       wl_fire = 1'b0;
     `UNUSED_VAR (wl_fire)
+    `UNUSED_VAR (wb_lsu_busy)
     assign lws_done_ev   = 1'b0;
     assign lws_done_blk  = '0;
     assign lws_done_slot = '0;
@@ -932,11 +935,16 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
     `ifdef VX_CFG_TSU_ENABLE
         // stream landing: one 64 B row segment = chunks seg*8 .. seg*8+7 of row n -> all 8 banks, one address
         // (bank = (n + ch) mod 8, entry = (slot*64 + n)*CX + ch/8). Never overlaps an LSU write (wl_ready).
+        // SIMT8 beat: 8 B piece j = chunk c (= seg) of row r0 + j (r0 = row, a multiple of 8) -> bank (r0 + j + c)
+        // mod 8, entry (slot*64 + r0 + j)*CX + c/8: 8 distinct banks, one address each.
         if (wl_fire) begin
             for (integer j = 0; j < 8; ++j) begin
-                automatic logic [2:0] bk = 3'(32'(wl_beat.row) + 32'(j));
+                automatic logic [2:0] bk = wl_beat.simt ? 3'(32'(wl_beat.row) + 32'(j) + 32'(wl_beat.seg))
+                                                        : 3'(32'(wl_beat.row) + 32'(j));
                 wb_we[wl_blk][bk]  = 1'b1;
-                wb_wa[wl_blk][bk]  = WA_W'((32'(wl_slot) * WROWS + 32'(wl_beat.row)) * CX + 32'(wl_beat.seg));
+                wb_wa[wl_blk][bk]  = wl_beat.simt
+                    ? WA_W'((32'(wl_slot) * WROWS + 32'(wl_beat.row) + 32'(j)) * CX + (32'(wl_beat.seg) >> 3))
+                    : WA_W'((32'(wl_slot) * WROWS + 32'(wl_beat.row)) * CX + 32'(wl_beat.seg));
                 wb_wd[wl_blk][bk]  = wl_beat.data[j*64 +: 64];
                 wb_wbe[wl_blk][bk] = 8'hFF;
             end

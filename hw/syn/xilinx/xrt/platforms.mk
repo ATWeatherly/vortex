@@ -37,7 +37,11 @@ else ifneq ($(findstring xilinx_u50,$(XSA)),)
   #     4 masters on HBM[0:31] through the switch ran at the one-PC rate; hmss cost is per port).
   #   TSU_LINK=group: master i linked to its PC group HBM[i*g : i*g+g-1], g = 32/n (phase 0 tgen16.cfg:
   #     16 x 2 PCs = 190.8 GB/s). Correct ONLY for PC-striped data in which every burst routed to master i
-  #     lies in group i; it adds -DVX_CFG_TSU_LINK_GROUP, the RTL assert that checks exactly that.
+  #     lies in group i; it adds -DVX_CFG_TSU_LINK_GROUP, the RTL assert that checks exactly that. Socket 1's
+  #     masters serve PCs 16-31: the host programs full-width (VX_CFG_TSU_ADDR_WIDTH = 33) descriptor bases,
+  #     kernel pointers stay 32-bit. Production: TSU_MASTERS=8 TSU_LINK=group (1 TSU worker per socket, any
+  #     PC of the socket's 16 reachable). TSU_MASTERS=16 needs TSU_LINK=full until landings are steered to the
+  #     worker that owns the tile's PC (2 workers per socket; v1 steers by sequencer block).
   # Either way VX_CFG_TSU_SEL_LSB = 28 + log2(g) routes a burst to master (PC group mod 4) of its worker, so
   # a master never alternates between PC groups. The masters are split over sockets and TSU workers,
   # so n must be a multiple of sockets x VX_CFG_TSU_MASTERS_PER_WORKER (VX_afu_wrap asserts it).

@@ -352,6 +352,11 @@ VX_CFG_TSU_MAX_INFLIGHT = 64
 # worker's 4 masters then serve 4 different PC groups and each master only ever sees addresses of its own group
 # (phase 0, 2026-11-11: a master alternating between PCs per 256 B burst collapses to 1.64 GB/s).
 VX_CFG_TSU_SEL_LSB = "expr: 28 + clog2(32 / $VX_CFG_STREAM_NUM_MASTERS)"
+# Stream (TSU) global address width: descriptor base, setup/addr_gen cursor, stream bus and stream AXI address.
+# Wider than VX_CFG_MEM_ADDR_WIDTH on XLEN 32 so the 64-bit host can program a descriptor base anywhere in the
+# 8 GB U50 HBM (all 32 PCs) while kernel pointers stay 32-bit (2026-11-11 user decision). The line engine keeps
+# VX_CFG_MEM_ADDR_WIDTH (and asserts the high base bits are 0).
+VX_CFG_TSU_ADDR_WIDTH = "expr: max($VX_CFG_MEM_ADDR_WIDTH, $VX_CFG_PLATFORM_MEMORY_ADDR_WIDTH) if $VX_CFG_TSU_ENABLE else $VX_CFG_MEM_ADDR_WIDTH"
 # Conditions test the _ENABLE define (present only when on), like every other expr here: _ENABLED is always
 # defined (0/1), so `if $VX_CFG_TSU_ENABLED` emitted `ifdef` true and sized a TSU worker in TSU-off builds.
 VX_CFG_TSU_MASTERS_PER_SOCKET = "expr: up($VX_CFG_STREAM_NUM_MASTERS / up($VX_CFG_NUM_CORES / $VX_CFG_SOCKET_SIZE)) if $VX_CFG_TSU_ENABLE else 0"

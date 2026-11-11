@@ -1555,7 +1555,7 @@ package VX_gpu_pkg;
     localparam VX_STR_BEAT_SIZE  = `VX_CFG_PLATFORM_MEMORY_DATA_SIZE;
     localparam VX_STR_NUM_BEATS  = VX_STR_BURST_SIZE / VX_STR_BEAT_SIZE;
     localparam VX_STR_BEAT_WIDTH = `UP(`CLOG2(VX_STR_NUM_BEATS));
-    localparam VX_STR_ADDR_WIDTH = `VX_CFG_MEM_ADDR_WIDTH - `CLOG2(VX_STR_BURST_SIZE);
+    localparam VX_STR_ADDR_WIDTH = `VX_CFG_TSU_ADDR_WIDTH - `CLOG2(VX_STR_BURST_SIZE);
     localparam VX_STR_TAG_WIDTH  = UUID_WIDTH + `CLOG2(`VX_CFG_TSU_MAX_INFLIGHT);
 
     ////////////////////////// Icache Parameters //////////////////////////////

@@ -102,6 +102,15 @@ public:
     assert(b < kBlocks && lg >= 6 && lg <= 11 && off + size <= kWSlotBytes);
     auto& q = staging_.at(b).at(s);
     if (q.empty() || q.back().closed) q.push_back(Landing{std::vector<int8_t>(kWSlotBytes, 0), 1u << lg, false, 0});
+    if ((tag >> 8) & 1u) {   // tile-local SIMT8 image: byte o = chunk o >> 9, row (o >> 3) & 63, byte o & 7
+      const uint32_t kt = 1u << lg;
+      for (uint32_t i = 0; i < size; ++i) {
+        const uint64_t o = off + i, k = (o >> 9) * 8 + (o & 7), n = (o >> 3) & 63;
+        assert(k < kt);
+        q.back().img[n * kt + k] = static_cast<const int8_t*>(data)[i];
+      }
+      return;
+    }
     std::memcpy(q.back().img.data() + off, data, size);
   }
   void land_done(uint32_t tag, uint64_t now) {

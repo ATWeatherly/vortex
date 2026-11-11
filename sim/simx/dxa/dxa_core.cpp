@@ -406,7 +406,7 @@ private:
     w.desc = descriptors_.at(req.desc_slot);
     w.smem_stride = w.desc.smem_stride;
     w.wl = desc_is_wland(w.desc.meta);
-    w.wl_tag = req.bar_id & 0xffu;
+    w.wl_tag = req.bar_id & 0x1ffu;   // {simt8, lg_kt, blk, slot}
 
     enumerate_work_list(w);
     check_tsu_link(w);
@@ -899,7 +899,7 @@ private:
       if (grp < lo || grp >= hi) {
         std::cerr << "*** dxa: TSU read 0x" << std::hex << lw.gmem_cl_addr << std::dec << " is in PC group " << grp
                   << " but the group-linked platform routes it to masters [" << lo << "," << hi << ")"
-                  << " of socket " << socket_id_ << " (each reaches only its own " << (32 / VX_CFG_STREAM_NUM_MASTERS)
+                  << " of socket " << socket_id_ << " (each reaches only its own " << (1u << (VX_CFG_TSU_SEL_LSB - 28))
                   << " PCs)" << std::endl;
         std::abort();
       }

@@ -89,8 +89,10 @@ static inline void vx_tbuf_ldws(uint32_t w_slot) {
 }
 
 // W-slot landing tag carried in the TSU issue's barrier field: {lg_kt[3:0], blk[1:0], slot[1:0]}.
-static inline uint32_t vx_tsu_wslot_tag(uint32_t w_slot, uint32_t kt) {
-  return ((uint32_t)__builtin_ctz(kt) << 4) | (w_slot & 0xf);
+static inline uint32_t vx_tsu_wslot_tag(uint32_t w_slot, uint32_t kt, bool simt8 = false) {
+  // {simt8[8], lg2(kt)[7:4], blk[3:2], slot[1:0]}; simt8 = the landing image is a tile-local SIMT8 W tile
+  // (512 B per 8 B k-chunk of the 64 rows), else row-major (row n at n*kt)
+  return ((simt8 ? 1u : 0u) << 8) | ((uint32_t)__builtin_ctz(kt) << 4) | (w_slot & 0xf);
 }
 
 #ifdef __cplusplus

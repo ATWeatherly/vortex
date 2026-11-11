@@ -26,7 +26,7 @@ interface VX_stream_bus_if import VX_gpu_pkg::*; #(
     parameter BURST_SIZE = 256,
     parameter BEAT_SIZE  = 64,
     parameter TAG_WIDTH  = UUID_WIDTH + 1,
-    parameter ADDR_WIDTH = `VX_CFG_MEM_ADDR_WIDTH - `CLOG2(BURST_SIZE),
+    parameter ADDR_WIDTH = `VX_CFG_TSU_ADDR_WIDTH - `CLOG2(BURST_SIZE),
     parameter NUM_BEATS  = BURST_SIZE / BEAT_SIZE,
     parameter BEAT_WIDTH = `UP(`CLOG2(NUM_BEATS))
 ) ();

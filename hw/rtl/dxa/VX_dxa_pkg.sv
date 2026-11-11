@@ -18,6 +18,12 @@
 
 package VX_dxa_pkg;
 
+    // Global byte-address width of the DXA/TSU descriptor base and address generator: VX_CFG_TSU_ADDR_WIDTH
+    // (= VX_CFG_MEM_ADDR_WIDTH unless the TSU is on and the platform memory is wider, e.g. 33 bits = 8 GB U50).
+    /* verilator lint_off UNUSEDPARAM */
+    localparam DXA_GADDR_W = `VX_CFG_TSU_ADDR_WIDTH;
+    /* verilator lint_on UNUSEDPARAM */
+
     import VX_gpu_pkg::*;
 
     // DXA local-memory path: dimensioned to cover all banks in one request.
@@ -88,7 +94,7 @@ package VX_dxa_pkg;
     localparam TSU_MAX_INFLIGHT = `VX_CFG_TSU_MAX_INFLIGHT;
     localparam TSU_TAG_W        = `CLOG2(TSU_MAX_INFLIGHT);
     localparam TSU_STR_TAG_W    = UUID_WIDTH + TSU_TAG_W;
-    localparam TSU_STR_ADDR_W   = `VX_CFG_MEM_ADDR_WIDTH - `CLOG2(TSU_BURST_BYTES);
+    localparam TSU_STR_ADDR_W   = `VX_CFG_TSU_ADDR_WIDTH - `CLOG2(TSU_BURST_BYTES);
     localparam TSU_NUM_WORKERS  = `VX_CFG_NUM_TSU_CORES;
     localparam TSU_MASTERS_PER_WORKER = `VX_CFG_TSU_MASTERS_PER_WORKER;
     // Master select inside a worker: byte-address bits [SEL_LSB +: log2(M)],
@@ -109,7 +115,7 @@ package VX_dxa_pkg;
 
     // Descriptor table read output — all fields for one slot.
     typedef struct packed {
-        logic [`VX_CFG_MEM_ADDR_WIDTH-1:0] base_addr;
+        logic [DXA_GADDR_W-1:0] base_addr;   // full-width (VX_CFG_TSU_ADDR_WIDTH): {BASE_HI, BASE_LO}
         logic [31:0] meta;
         logic [31:0] tile01;
         logic [31:0] tile23;
@@ -143,7 +149,7 @@ package VX_dxa_pkg;
     // Setup parameters: precomputed constants for addr_gen, rd_ctrl, cl2smem, wr_ctrl.
     // All multiplies happen during setup; fast path uses additions only.
     typedef struct packed {
-        logic [`VX_CFG_MEM_ADDR_WIDTH-1:0]  initial_gmem_base;
+        logic [DXA_GADDR_W-1:0]             initial_gmem_base;
         logic [DXA_SMEM_ADDR_W-1:0]         initial_smem_base;
         logic [31:0]                row_len_bytes;
         // Rolling-cursor deltas applied at each outer-dim step:
@@ -173,15 +179,16 @@ package VX_dxa_pkg;
         // issue meta's barrier field (bits [11:4]): {lg_kt[3:0], blk[1:0], slot[1:0]}; the transfer is a dense
         // 64-row x 2^lg_kt-byte image landed straight into W slot `slot` of sequencer block `blk`.
         logic                       wl_en;
-        logic [7:0]                 wl_tag;
+        logic [8:0]                 wl_tag;      // {simt8, lg_kt[3:0], blk[1:0], slot[1:0]}
     } dxa_setup_params_t;
 
     // W-slot landing beat, TSU worker -> socket -> core -> TCU sequencer (phase 4).
     typedef struct packed {
         logic [1:0]   blk;
         logic [1:0]   slot;
-        logic [5:0]   row;     // weight row n in the slot (0..63)
-        logic [4:0]   seg;     // 64 B segment of the row: k = seg * 64 .. seg * 64 + 63
+        logic         simt;    // 0: row-major image (row n, segment seg); 1: tile-local SIMT8 image (rows row..row+7, k-chunk seg)
+        logic [5:0]   row;     // row-major: weight row n (0..63); SIMT8: first row r0 (multiple of 8)
+        logic [7:0]   seg;     // row-major: 64 B segment k = seg*64 ..; SIMT8: 8 B k-chunk c (k = c*8 .. c*8+7) of rows r0..r0+7
         logic [511:0] data;
     } dxa_wland_beat_t;
     typedef struct packed {

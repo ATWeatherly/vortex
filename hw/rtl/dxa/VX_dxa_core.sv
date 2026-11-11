@@ -43,6 +43,7 @@ module VX_dxa_core import VX_gpu_pkg::*, VX_dxa_pkg::*; #(
     output wire busy
 );
     `UNUSED_SPARAM (INSTANCE_ID)
+    `UNUSED_PARAM (STR_MASTER_BASE)   // TSU workers only
 
     // Worker pool: line workers [0, NUM_DXA_CORES) on the socket memory port,
     // stream workers [NUM_DXA_CORES, NUM_WORKERS) on the tile-stream masters.
