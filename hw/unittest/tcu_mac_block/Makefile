@@ -22,7 +22,7 @@ DBG_TRACE_FLAGS :=
 
 RTL_PKGS :=
 
-RTL_INCLUDE := -I$(ROOT_DIR)/hw -I$(RTL_DIR) -I$(DPI_DIR) -I$(RTL_DIR)/libs -I$(RTL_DIR)/tcu
+RTL_INCLUDE := -I$(ROOT_DIR)/hw -I$(RTL_DIR) -I$(DPI_DIR) -I$(RTL_DIR)/libs -I$(RTL_DIR)/tcu/mac
 
 TOP := VX_tcu_mac_block
 
