@@ -336,6 +336,8 @@ module VX_dxa_addr_gen import VX_gpu_pkg::*, VX_dxa_pkg::*; #(
 
     // km_step is LMEM-bounded; only the low DXA_SMEM_ADDR_W bits feed smem_byte_addr_r.
     `UNUSED_VAR (km_step[31:DXA_SMEM_ADDR_W])
+    // W-slot landing fields are consumed by the worker's landing steer, not the address generator.
+    `UNUSED_VAR ({setup_params.wl_en, setup_params.wl_tag})
 
 `ifdef DBG_TRACE_DXA
     always @(posedge clk) begin

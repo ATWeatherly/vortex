@@ -26,7 +26,19 @@ package VX_dxa_pkg;
 
     // LMEM byte-address width: an LMEM-relative byte offset, same as
     // VX_local_mem's ADDR_WIDTH = `CLOG2(SIZE) = `VX_CFG_LMEM_LOG_SIZE.
+    // Phase-4 W-slot landing (TSU + TCU sequencer): the destination of a TILEBUF_B transfer is a dense byte
+    // offset inside one 64-row x kt W slot (<= 128 KB), so the byte-address field is widened to 17 bits there.
+    // LMEM transfers are unaffected: every LMEM-side use truncates explicitly to the LMEM word address.
+`ifdef VX_CFG_TSU_ENABLE
+`ifdef VX_CFG_TCU_SEQ_ENABLE
+    localparam DXA_WLAND_OFF_W = 17;
+    localparam DXA_SMEM_ADDR_W = (`VX_CFG_LMEM_LOG_SIZE > DXA_WLAND_OFF_W) ? `VX_CFG_LMEM_LOG_SIZE : DXA_WLAND_OFF_W;
+`else
     localparam DXA_SMEM_ADDR_W = `VX_CFG_LMEM_LOG_SIZE;
+`endif
+`else
+    localparam DXA_SMEM_ADDR_W = `VX_CFG_LMEM_LOG_SIZE;
+`endif
 
     localparam DXA_DESC_SLOT_BITS = `CLOG2(`VX_DCR_DXA_DESC_COUNT);
     localparam DXA_DESC_SLOT_W    = `UP(DXA_DESC_SLOT_BITS);
@@ -157,7 +169,25 @@ package VX_dxa_pkg;
         logic [3:0]                 lg_tcN;      // log2(tcN)  (= log2(tcK))
         logic [3:0]                 lg_nsteps;   // log2(xtileN / tcN)
         logic [3:0]                 lg_bkK;      // log2(dense B block K extent, in elements)
+        // Phase-4 W-slot landing (TSU worker only): descriptor DEST_KIND == TILEBUF_B. wl_tag comes from the
+        // issue meta's barrier field (bits [11:4]): {lg_kt[3:0], blk[1:0], slot[1:0]}; the transfer is a dense
+        // 64-row x 2^lg_kt-byte image landed straight into W slot `slot` of sequencer block `blk`.
+        logic                       wl_en;
+        logic [7:0]                 wl_tag;
     } dxa_setup_params_t;
+
+    // W-slot landing beat, TSU worker -> socket -> core -> TCU sequencer (phase 4).
+    typedef struct packed {
+        logic [1:0]   blk;
+        logic [1:0]   slot;
+        logic [5:0]   row;     // weight row n in the slot (0..63)
+        logic [4:0]   seg;     // 64 B segment of the row: k = seg * 64 .. seg * 64 + 63
+        logic [511:0] data;
+    } dxa_wland_beat_t;
+    typedef struct packed {
+        logic [1:0]   blk;
+        logic [1:0]   slot;
+    } dxa_wland_done_t;
 
     // SMEM byte destination for B element (k = K-row, n = N-col) under the
     // bbuf-native Flat / BlockMajor layouts. Mirrors vx_tensor.h::b_sp_flat_idx

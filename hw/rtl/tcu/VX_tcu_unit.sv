@@ -40,6 +40,14 @@ module VX_tcu_unit import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
     input wire              store_drained,
     // twait / tfence release of the wstalled warp
     VX_sched_unlock_if.master sched_unlock_if,
+`ifdef VX_CFG_TSU_ENABLE
+    // phase-4 W-slot landing (TSU)
+    input  wire                         wl_valid,
+    output wire                         wl_ready,
+    input  VX_dxa_pkg::dxa_wland_beat_t wl_beat,
+    input  wire                         wl_done_valid,
+    input  VX_dxa_pkg::dxa_wland_done_t wl_done,
+`endif
 `endif
 
     // Inputs
@@ -227,6 +235,13 @@ module VX_tcu_unit import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
         .unlock_valid  (sched_unlock_if.valid),
         .unlock_wid    (sched_unlock_if.wid),
         .store_drained (store_drained),
+    `ifdef VX_CFG_TSU_ENABLE
+        .wl_valid      (wl_valid),
+        .wl_ready      (wl_ready),
+        .wl_beat       (wl_beat),
+        .wl_done_valid (wl_done_valid),
+        .wl_done       (wl_done),
+    `endif
         .mem_if        (tcu_mem_if),
         .lmem_if       (tcu_lmem_in_if[1])
     );

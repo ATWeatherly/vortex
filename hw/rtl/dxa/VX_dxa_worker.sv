@@ -39,6 +39,16 @@ module VX_dxa_worker import VX_gpu_pkg::*, VX_dxa_pkg::*; #(
     VX_dxa_worker_req_if.slave req_if,
     VX_mem_bus_if.master gmem_bus_if,
     VX_stream_bus_if.master str_bus_if [NUM_STR_PORTS],
+`ifdef VX_CFG_TSU_ENABLE
+`ifdef VX_CFG_TCU_SEQ_ENABLE
+    // Phase-4 W-slot landing (STREAM workers; line workers tie wl_ready low and never drive wl_*)
+    output wire                 wl_valid,
+    input  wire                 wl_ready,
+    output dxa_wland_beat_t     wl_beat,
+    output wire                 wl_done_valid,
+    output dxa_wland_done_t     wl_done,
+`endif
+`endif
     VX_mem_bus_if.master smem_bus_if
 );
     `UNUSED_SPARAM (INSTANCE_ID)
@@ -348,6 +358,92 @@ module VX_dxa_worker import VX_gpu_pkg::*, VX_dxa_pkg::*; #(
     end
 
     // ════════════════════════════════════════════════════════════════════
+    // Stage 3b: W-slot landing steer (phase 4). A TILEBUF_B transfer on a
+    // stream worker bypasses smem_wr: every delivered beat (a full, aligned
+    // 64 B piece of one weight row) goes straight to the TCU sequencer's W
+    // slot, releases its burst-slot beat on acceptance, and the transfer
+    // completes once the last beat has landed and no burst slot is
+    // outstanding. LMEM transfers take the unchanged smem_wr path.
+    // ════════════════════════════════════════════════════════════════════
+
+    wire                        sm_valid;
+    wire                        sm_ready;
+    wire                        sm_release_en;
+    wire [TAG_W-1:0]            sm_release_tag;
+    wire                        sm_transfer_done;
+
+`ifdef VX_CFG_TSU_ENABLE
+`ifdef VX_CFG_TCU_SEQ_ENABLE
+    if (STREAM != 0) begin : g_wland
+        wire wl_mode = setup_params.wl_en;
+        wire [3:0] wl_lgkt = setup_params.wl_tag[7:4];
+        wire [DXA_WLAND_OFF_W-1:0] wl_off = DXA_WLAND_OFF_W'(sw_smem_byte_addr);
+        wire [DXA_WLAND_OFF_W-1:0] wl_kmask = (DXA_WLAND_OFF_W'(1) << wl_lgkt) - DXA_WLAND_OFF_W'(1);
+        wire [DXA_WLAND_OFF_W-1:0] wl_k = wl_off & wl_kmask;
+        wire wl_fire = wl_valid && wl_ready;
+        reg  wl_last_seen_r, wl_done_r;
+        assign wl_valid      = sw_valid && wl_mode;
+        assign sm_valid      = sw_valid && ~wl_mode;
+        assign sw_ready      = wl_mode ? wl_ready : sm_ready;
+        assign wl_beat.blk   = setup_params.wl_tag[3:2];
+        assign wl_beat.slot  = setup_params.wl_tag[1:0];
+        assign wl_beat.row   = 6'(wl_off >> wl_lgkt);
+        assign wl_beat.seg   = 5'(wl_k >> 6);
+        assign wl_beat.data  = 512'(sw_data);
+        assign sw_release_en  = sm_release_en || wl_fire;
+        assign sw_release_tag = wl_fire ? sw_tag : sm_release_tag;
+        assign wl_done_valid  = wl_done_r;
+        assign wl_done.blk    = setup_params.wl_tag[3:2];
+        assign wl_done.slot   = setup_params.wl_tag[1:0];
+        assign transfer_done  = sm_transfer_done || wl_done_r;
+        always @(posedge clk) begin
+            if (reset || pipeline_start) begin
+                wl_last_seen_r <= 1'b0;
+                wl_done_r      <= 1'b0;
+            end else begin
+                wl_done_r <= 1'b0;
+                if (wl_fire && sw_last) wl_last_seen_r <= 1'b1;
+                if (wl_mode && transfer_active && wl_last_seen_r && (sw_outstanding == '0) && ~wl_done_r) begin
+                    wl_done_r      <= 1'b1;
+                    wl_last_seen_r <= 1'b0;
+                end
+            end
+        end
+        `RUNTIME_ASSERT(~wl_fire || (~sw_oob && (sw_byte_offset == '0) && (32'(sw_valid_length) == 32'(CL_BYTES))
+                                     && (wl_off[5:0] == 6'd0) && (wl_lgkt >= 4'd6) && (wl_lgkt <= 4'd11)),
+            ("%t: *** %s W-slot landing needs full 64 B beats of a 2^lg_kt (64..2048) byte row: off=0x%0h len=%0d oob=%b lgkt=%0d",
+             $time, INSTANCE_ID, sw_byte_offset, sw_valid_length, sw_oob, wl_lgkt))
+        `RUNTIME_ASSERT(~(sm_release_en && wl_fire), ("%t: *** %s W-landing / smem_wr release collision", $time, INSTANCE_ID))
+        `UNUSED_VAR (wl_k)
+    end else begin : g_no_wland
+        assign wl_valid       = 1'b0;
+        assign wl_beat        = '0;
+        assign wl_done_valid  = 1'b0;
+        assign wl_done        = '0;
+        assign sm_valid       = sw_valid;
+        assign sw_ready       = sm_ready;
+        assign sw_release_en  = sm_release_en;
+        assign sw_release_tag = sm_release_tag;
+        assign transfer_done  = sm_transfer_done;
+        `UNUSED_VAR (wl_ready)
+        `RUNTIME_ASSERT(~(transfer_active && setup_params.wl_en), ("%t: *** %s TILEBUF_B descriptor on the DXA line engine (set the TSU ENGINE bit)", $time, INSTANCE_ID))
+    end
+`else
+    assign sm_valid       = sw_valid;
+    assign sw_ready       = sm_ready;
+    assign sw_release_en  = sm_release_en;
+    assign sw_release_tag = sm_release_tag;
+    assign transfer_done  = sm_transfer_done;
+`endif
+`else
+    assign sm_valid       = sw_valid;
+    assign sw_ready       = sm_ready;
+    assign sw_release_en  = sm_release_en;
+    assign sw_release_tag = sm_release_tag;
+    assign transfer_done  = sm_transfer_done;
+`endif
+
+    // ════════════════════════════════════════════════════════════════════
     // Stage 4: SMEM Writer (gmem_req drives smem_wr directly via the
     // sw_* channel; smem_wr's pend slot + deferred-last register handle
     // out-of-order drain).
@@ -372,8 +468,8 @@ module VX_dxa_worker import VX_gpu_pkg::*, VX_dxa_pkg::*; #(
         .active_uuid           (active_uuid),
         .active_bar_addr       (active_bar_addr),
         .active_notify_smem_done (active_notify_smem_done),
-        .sw_valid              (sw_valid),
-        .sw_ready              (sw_ready),
+        .sw_valid              (sm_valid),
+        .sw_ready              (sm_ready),
         .sw_tag                (sw_tag),
         .sw_data               (sw_data),
         .sw_smem_byte_addr     (sw_smem_byte_addr),
@@ -384,10 +480,10 @@ module VX_dxa_worker import VX_gpu_pkg::*, VX_dxa_pkg::*; #(
         .sw_k_row              (sw_k_row),
         .sw_n_base             (sw_n_base),
         .sw_outstanding        (sw_outstanding),
-        .release_en            (sw_release_en),
-        .release_tag           (sw_release_tag),
+        .release_en            (sm_release_en),
+        .release_tag           (sm_release_tag),
         .smem_bus_if           (smem_bus_if),
-        .transfer_done         (transfer_done),
+        .transfer_done         (sm_transfer_done),
         .wr_done_count         (wr_done_count),
         .smem_req_fire         (smem_req_fire),
         .is_multicast          (active_is_multicast),

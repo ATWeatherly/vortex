@@ -43,6 +43,13 @@ module VX_execute import VX_gpu_pkg::*; #(
 `ifdef VX_CFG_TCU_SEQ_ENABLE
     // core-wide store drain (LSU schedulers + mem unit empty), for tfence
     input wire              store_drained,
+`ifdef VX_CFG_TSU_ENABLE
+    input  wire                         wl_valid,
+    output wire                         wl_ready,
+    input  VX_dxa_pkg::dxa_wland_beat_t wl_beat,
+    input  wire                         wl_done_valid,
+    input  VX_dxa_pkg::dxa_wland_done_t wl_done,
+`endif
 `endif
 
     // dispatch interface
@@ -146,6 +153,13 @@ module VX_execute import VX_gpu_pkg::*; #(
     `ifdef VX_CFG_TCU_SEQ_ENABLE
         .store_drained     (store_drained),
         .sched_unlock_if   (sched_unlock_if),
+    `ifdef VX_CFG_TSU_ENABLE
+        .wl_valid          (wl_valid),
+        .wl_ready          (wl_ready),
+        .wl_beat           (wl_beat),
+        .wl_done_valid     (wl_done_valid),
+        .wl_done           (wl_done),
+    `endif
     `endif
         .dispatch_if    (dispatch_if[EX_TCU * `VX_CFG_ISSUE_WIDTH +: `VX_CFG_ISSUE_WIDTH]),
         .commit_if      (commit_if[EX_TCU * `VX_CFG_ISSUE_WIDTH +: `VX_CFG_ISSUE_WIDTH])

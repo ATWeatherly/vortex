@@ -101,6 +101,9 @@ module VX_dxa_setup import VX_gpu_pkg::*, VX_dxa_pkg::*; (
     wire [1:0] dec_dest_mode =
         desc_data.meta[DXA_DESC_META_LAYOUT_LSB +: DXA_DESC_META_LAYOUT_BITS];
     wire dec_dest_kmajor = (dec_dest_mode == DXA_DEST_KMAJOR);
+    // Phase-4 W-slot landing: DEST_KIND == TILEBUF_B; tag {lg_kt, blk, slot} from the issue meta barrier field.
+    wire       dec_wl_en  = (desc_data.meta[DXA_DESC_META_DEST_KIND_LSB +: DXA_DESC_META_DEST_KIND_BITS] == DXA_DEST_KIND_TILEBUF_B);
+    wire [7:0] dec_wl_tag = req_data.meta[4 +: 8];
 
     // Tiled (Flat/BlockMajor) geometry — log shift amounts (computed below,
     // after dec_tile0). tcN rides ESTRIDE2[15:0] and the dense B block K
@@ -205,6 +208,8 @@ module VX_dxa_setup import VX_gpu_pkg::*, VX_dxa_pkg::*; (
     reg [3:0]                              r_lg_tcN;
     reg [3:0]                              r_lg_nsteps;
     reg [3:0]                              r_lg_bkK;
+    reg                                    r_wl_en;
+    reg [7:0]                              r_wl_tag;
 
     // ════════════════════════════════════════════════════════════════════
     // Staged result registers (filled by the setup engine for the next
@@ -239,6 +244,8 @@ module VX_dxa_setup import VX_gpu_pkg::*, VX_dxa_pkg::*; (
     reg [3:0]                              s_lg_tcN;
     reg [3:0]                              s_lg_nsteps;
     reg [3:0]                              s_lg_bkK;
+    reg                                    s_wl_en;
+    reg [7:0]                              s_wl_tag;
 
     assign active_core_id          = r_core_id;
     assign active_uuid             = r_uuid;
@@ -416,6 +423,10 @@ module VX_dxa_setup import VX_gpu_pkg::*, VX_dxa_pkg::*; (
             s_lg_tcN           <= '0;
             s_lg_nsteps        <= '0;
             s_lg_bkK           <= '0;
+            r_wl_en            <= 1'b0;
+            r_wl_tag           <= '0;
+            s_wl_en            <= 1'b0;
+            s_wl_tag           <= '0;
         end else begin
             // Default: pipeline_start is a 1-cycle pulse.
             pipeline_start_r <= 1'b0;
@@ -446,6 +457,8 @@ module VX_dxa_setup import VX_gpu_pkg::*, VX_dxa_pkg::*; (
                 r_lg_tcN            <= s_lg_tcN;
                 r_lg_nsteps         <= s_lg_nsteps;
                 r_lg_bkK            <= s_lg_bkK;
+                r_wl_en             <= s_wl_en;
+                r_wl_tag            <= s_wl_tag;
                 state_r             <= TS_ACTIVE;
                 pipeline_start_r    <= 1'b1;
                 setup_state_r       <= SS_IDLE;
@@ -481,6 +494,8 @@ module VX_dxa_setup import VX_gpu_pkg::*, VX_dxa_pkg::*; (
                     s_lg_tcN            <= dec_lg_tcN;
                     s_lg_nsteps         <= dec_lg_nsteps;
                     s_lg_bkK            <= dec_lg_bkK;
+                    s_wl_en             <= dec_wl_en;
+                    s_wl_tag            <= dec_wl_tag;
                     // Rolling-cursor deltas: delta[0] is the inner-dim step.
                     // Higher deltas are precomputed below (Phase 1-3 captures).
                     s_delta[0]          <= dec_stride0;
@@ -591,6 +606,8 @@ module VX_dxa_setup import VX_gpu_pkg::*, VX_dxa_pkg::*; (
     assign setup_params.lg_tcN             = r_lg_tcN;
     assign setup_params.lg_nsteps          = r_lg_nsteps;
     assign setup_params.lg_bkK             = r_lg_bkK;
+    assign setup_params.wl_en              = r_wl_en;
+    assign setup_params.wl_tag             = r_wl_tag;
 
     `UNUSED_VAR (desc_data.size0)
     `UNUSED_VAR (req_data.meta)

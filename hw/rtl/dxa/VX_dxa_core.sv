@@ -29,6 +29,16 @@ module VX_dxa_core import VX_gpu_pkg::*, VX_dxa_pkg::*; #(
     VX_mem_bus_if.master gmem_bus_if[GMEM_OUT_PORTS],
     VX_stream_bus_if.master str_bus_if[NUM_STR_PORTS],
     VX_mem_bus_if.master smem_bus_if[1],
+`ifdef VX_CFG_TSU_ENABLE
+`ifdef VX_CFG_TCU_SEQ_ENABLE
+    // Phase-4 W-slot landing to the socket's core TCU sequencer (one core per socket)
+    output wire                 wl_valid,
+    input  wire                 wl_ready,
+    output dxa_wland_beat_t     wl_beat,
+    output wire                 wl_done_valid,
+    output dxa_wland_done_t     wl_done,
+`endif
+`endif
     output wire busy
 );
     `UNUSED_SPARAM (INSTANCE_ID)
@@ -242,6 +252,15 @@ module VX_dxa_core import VX_gpu_pkg::*, VX_dxa_pkg::*; #(
             .req_if         (worker_req_if[i]),
             .gmem_bus_if    (worker_gmem_bus_if[i]),
             .str_bus_if     (line_str_dummy_if[i +: 1]),
+        `ifdef VX_CFG_TSU_ENABLE
+        `ifdef VX_CFG_TCU_SEQ_ENABLE
+            `UNUSED_PIN (wl_valid),
+            .wl_ready       (1'b0),
+            `UNUSED_PIN (wl_beat),
+            `UNUSED_PIN (wl_done_valid),
+            `UNUSED_PIN (wl_done),
+        `endif
+        `endif
             .smem_bus_if    (worker_smem_bus_if[i])
         );
     end
@@ -251,6 +270,58 @@ module VX_dxa_core import VX_gpu_pkg::*, VX_dxa_pkg::*; #(
         .DATA_SIZE (`VX_CFG_L1_LINE_SIZE),
         .TAG_WIDTH (WORKER_GMEM_TAG_WIDTH)
     ) tsu_gmem_dummy_if[NUM_STR_WORKERS]();
+
+`ifdef VX_CFG_TCU_SEQ_ENABLE
+    // W-slot landing merge: one beat per cycle from the stream workers (round-robin, combinational so a
+    // worker's completion pulse can never overtake its own last beat); completion pulses are held per worker
+    // and forwarded one per cycle.
+    wire [NUM_STR_WORKERS-1:0] tw_valid, tw_ready, tw_done_valid;
+    dxa_wland_beat_t           tw_beat [NUM_STR_WORKERS];
+    dxa_wland_done_t           tw_done [NUM_STR_WORKERS];
+    localparam TW_W = `UP(`CLOG2(NUM_STR_WORKERS));
+    reg  [TW_W-1:0] tw_rr_r;
+    logic [TW_W-1:0] tw_sel;
+    logic            tw_any;
+    always_comb begin
+        tw_sel = tw_rr_r;
+        tw_any = 1'b0;
+        for (integer k = 0; k < NUM_STR_WORKERS; ++k) begin
+            automatic logic [TW_W-1:0] s = TW_W'((32'(tw_rr_r) + k) % NUM_STR_WORKERS);
+            if (!tw_any && tw_valid[s]) begin tw_sel = s; tw_any = 1'b1; end
+        end
+    end
+    assign wl_valid = tw_any;
+    assign wl_beat  = tw_beat[tw_sel];
+    for (genvar i = 0; i < NUM_STR_WORKERS; ++i) begin : g_tw_rdy
+        assign tw_ready[i] = wl_ready && tw_any && (tw_sel == TW_W'(i));
+    end
+    reg [NUM_STR_WORKERS-1:0] tw_dpend_r;
+    dxa_wland_done_t          tw_dval_r [NUM_STR_WORKERS];
+    logic [TW_W-1:0] td_sel;
+    logic            td_any;
+    always_comb begin
+        td_sel = '0;
+        td_any = 1'b0;
+        for (integer k = 0; k < NUM_STR_WORKERS; ++k) begin
+            if (!td_any && tw_dpend_r[k]) begin td_sel = TW_W'(k); td_any = 1'b1; end
+        end
+    end
+    assign wl_done_valid = td_any;
+    assign wl_done       = tw_dval_r[td_sel];
+    always @(posedge clk) begin
+        if (reset) begin
+            tw_rr_r    <= '0;
+            tw_dpend_r <= '0;
+        end else begin
+            if (tw_any && wl_ready) tw_rr_r <= TW_W'((32'(tw_sel) + 1) % NUM_STR_WORKERS);
+            for (integer k = 0; k < NUM_STR_WORKERS; ++k) begin
+                if (td_any && (td_sel == TW_W'(k))) tw_dpend_r[k] <= 1'b0;
+                if (tw_done_valid[k]) begin tw_dpend_r[k] <= 1'b1; tw_dval_r[k] <= tw_done[k]; end
+            end
+        end
+    end
+    `RUNTIME_ASSERT(~|(tw_done_valid & tw_dpend_r), ("%t: *** %s W-landing completion overrun", $time, INSTANCE_ID))
+`endif
 
     for (genvar i = 0; i < NUM_STR_WORKERS; ++i) begin : g_tsu_workers
         assign tsu_gmem_dummy_if[i].req_ready = 1'b0;
@@ -275,6 +346,13 @@ module VX_dxa_core import VX_gpu_pkg::*, VX_dxa_pkg::*; #(
             .req_if         (tsu_worker_req_if[i]),
             .gmem_bus_if    (tsu_gmem_dummy_if[i]),
             .str_bus_if     (str_bus_if[i * TSU_MASTERS_PER_WORKER +: TSU_MASTERS_PER_WORKER]),
+        `ifdef VX_CFG_TCU_SEQ_ENABLE
+            .wl_valid       (tw_valid[i]),
+            .wl_ready       (tw_ready[i]),
+            .wl_beat        (tw_beat[i]),
+            .wl_done_valid  (tw_done_valid[i]),
+            .wl_done        (tw_done[i]),
+        `endif
             .smem_bus_if    (worker_smem_bus_if[NUM_LINE_WORKERS + i])
         );
     end

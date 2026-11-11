@@ -65,6 +65,15 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
     // core store drain (tfence)
     input wire                      store_drained,
 
+`ifdef VX_CFG_TSU_ENABLE
+    // phase-4 W-slot landing from the TSU (one aligned 64 B row segment per beat; done = transfer landed)
+    input  wire                         wl_valid,
+    output wire                         wl_ready,
+    input  VX_dxa_pkg::dxa_wland_beat_t wl_beat,
+    input  wire                         wl_done_valid,
+    input  VX_dxa_pkg::dxa_wland_done_t wl_done,
+`endif
+
     // slot loads (LSU client port)
     VX_lsu_sched_if.master          mem_if,
 
@@ -157,6 +166,7 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
     wire [NW_WIDTH-1:0] f_wid = fcmd.header.wid;
 
     localparam OP_GEMM = 3'd0, OP_ACCST = 3'd1, OP_WAIT = 3'd2, OP_LDX = 3'd3, OP_LDW = 3'd4, OP_CFG = 3'd5, OP_FENCE = 3'd6;
+    localparam OP_LDWS = 3'd7;   // tbuf.ldws: expect one TSU stream landing into a W slot (phase 4, TSU builds)
 
     // ===================================================================================================
     // Per-warp configuration (tcfg)
@@ -240,6 +250,20 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
     wire        ldx_pop;
     wire [NB-1:0] ldw_pop, gm_pop, st_pop;
 
+    // ----- stream-landing expectations (tbuf.ldws), per W slot, 2-deep, in program order -----
+    typedef struct packed {
+        logic [NW_WIDTH-1:0]   wid;
+        logic [GEN_W-1:0]      cap;      // WAR: landing may write once w_rd_done reaches cap
+    } lws_ent_t;
+    lws_ent_t  lws_q [NB][NWS][QD];
+    reg [1:0]  lws_cnt [NB][NWS];
+    reg        lws_wp [NB][NWS], lws_rp [NB][NWS];
+    // landing completion (one transfer = one expectation)
+    wire                 lws_done_ev;
+    wire [1:0]           lws_done_blk, lws_done_slot;
+    lws_ent_t            lws_done_head;
+    `UNUSED_VAR (lws_done_head.cap)
+
     // ===================================================================================================
     // Front decode / accept
     // ===================================================================================================
@@ -285,12 +309,13 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
         OP_LDW:   f_can = (ldw_cnt[f_ldw_blk] != 2'(QD)) && (32'(f_ldw_blk) < NB);
         OP_GEMM:  f_can = (gm_cnt[f_gm_blk] != 2'(QD)) && (32'(f_gm_blk) < NB);
         OP_ACCST: f_can = (st_cnt[f_st_blk] != 2'(QD)) && (32'(f_st_blk) < NB);
+        OP_LDWS:  f_can = (32'(f_ldw_blk) < NB) && (lws_cnt[f_ldw_blk][f_rs2[1:0]] != 2'(QD));
         default:  f_can = 1'b1;
         endcase
     end
     wire f_parks  = (f_op == OP_WAIT) || (f_op == OP_FENCE);
     wire f_fire   = fvalid && f_can && ~wrel_fire && (f_parks || ~res_full);
-    wire f_async  = (f_op == OP_LDX) || (f_op == OP_LDW) || (f_op == OP_GEMM) || (f_op == OP_ACCST);
+    wire f_async  = (f_op == OP_LDX) || (f_op == OP_LDW) || (f_op == OP_GEMM) || (f_op == OP_ACCST) || (f_op == OP_LDWS);
 
     for (genvar s = 0; s < NS; ++s) begin : g_cmd_ready
         assign cmd_ready[s] = f_fire && (fsel == NS_W'(s));
@@ -313,8 +338,10 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
         ("%t: *** %s tacc.st: unsupported control 0x%0h (v1: n_mode 0, notify 0)", $time, INSTANCE_ID, f_rs2))
     `RUNTIME_ASSERT(~(f_fire && (f_op == OP_CFG)) || (f_rs1 < 32'd8),
         ("%t: *** %s tcfg: bad field %0d", $time, INSTANCE_ID, f_rs1))
-    `RUNTIME_ASSERT(~(f_fire && (f_op == 3'd7)),
-        ("%t: *** %s tgemm ISA: reserved funct3 7", $time, INSTANCE_ID))
+`ifndef VX_CFG_TSU_ENABLE
+    `RUNTIME_ASSERT(~(f_fire && (f_op == OP_LDWS)),
+        ("%t: *** %s tbuf.ldws needs a TSU build (VX_CFG_TSU_ENABLE)", $time, INSTANCE_ID))
+`endif
 
     // ===================================================================================================
     // Completion events (decrement pending, bump done counters)
@@ -377,7 +404,8 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
         end else begin
             for (integer w = 0; w < NW; ++w) begin
                 automatic logic [15:0] inc = 16'(f_fire && f_async && (f_wid == NW_WIDTH'(w)));
-                automatic logic [15:0] dec = 16'(ldx_done_ev && (ldx_done_wid == NW_WIDTH'(w)));
+                automatic logic [15:0] dec = 16'(ldx_done_ev && (ldx_done_wid == NW_WIDTH'(w)))
+                                           + 16'(lws_done_ev && (lws_done_head.wid == NW_WIDTH'(w)));
                 for (integer b = 0; b < NB; ++b) begin
                     dec = dec + 16'(ldw_done_ev[b] && (ldw_done_wid[b] == NW_WIDTH'(w)))
                               + 16'(gm_done_ev[b]  && (gm_done_wid[b]  == NW_WIDTH'(w)))
@@ -405,7 +433,7 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
         end else begin
             // issue side (front)
             if (f_fire && (f_op == OP_LDX)) x_ld_iss[f_rs2[2:0]] <= x_ld_iss[f_rs2[2:0]] + GEN_W'(1);
-            if (f_fire && (f_op == OP_LDW)) w_ld_iss[f_ldw_blk][f_rs2[1:0]] <= w_ld_iss[f_ldw_blk][f_rs2[1:0]] + GEN_W'(1);
+            if (f_fire && ((f_op == OP_LDW) || (f_op == OP_LDWS))) w_ld_iss[f_ldw_blk][f_rs2[1:0]] <= w_ld_iss[f_ldw_blk][f_rs2[1:0]] + GEN_W'(1);
             if (f_fire && (f_op == OP_GEMM)) begin
                 x_rd_iss[gc_xs] <= x_rd_iss[gc_xs] + GEN_W'(1);
                 w_rd_iss[f_gm_blk][gc_ws[1:0]] <= w_rd_iss[f_gm_blk][gc_ws[1:0]] + GEN_W'(1);
@@ -420,7 +448,11 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
                 x_rd_done[i] <= x_rd_done[i] + n;
             end
             for (integer b = 0; b < NB; ++b) begin
-                if (ldw_done_ev[b]) w_ld_done[b][ldw_done_slot[b]] <= w_ld_done[b][ldw_done_slot[b]] + GEN_W'(1);
+                for (integer i = 0; i < NWS; ++i) begin
+                    w_ld_done[b][i] <= w_ld_done[b][i]
+                        + GEN_W'(ldw_done_ev[b] && (ldw_done_slot[b] == 2'(i)))
+                        + GEN_W'(lws_done_ev && (lws_done_blk == 2'(b)) && (lws_done_slot == 2'(i)));
+                end
                 if (gm_done_ev[b]) begin
                     w_rd_done[b][gm_done_ws[b]]   <= w_rd_done[b][gm_done_ws[b]] + GEN_W'(1);
                     a_gm_done[b][gm_done_tile[b]] <= a_gm_done[b][gm_done_tile[b]] + GEN_W'(1);
@@ -577,6 +609,59 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
             if (xb_re) rd_r <= mem[xb_ra[bk]];
         end
         assign xb_rd[bk] = rd_r;
+    end
+
+    // ===================================================================================================
+    // Phase-4 stream landing (TSU -> W slot): expectation FIFOs and beat acceptance
+    // ===================================================================================================
+    // A beat for (blk, slot) is accepted when that slot has an outstanding tbuf.ldws whose WAR cap is met
+    // (every tgemm issued before it that reads the slot has finished) and the block's W banks are not taking
+    // an LSU-loader write this cycle. The transfer's completion pulse retires the expectation exactly like a
+    // tbuf.ldw completion (w_ld_done++, the issuing warp's pending count--), so tgemm's RAW interlock and
+    // twait need no change.
+    wire [NB-1:0] wb_lsu_busy;
+`ifdef VX_CFG_TSU_ENABLE
+    wire [1:0] wl_blk  = wl_beat.blk;
+    wire [1:0] wl_slot = wl_beat.slot;
+    lws_ent_t  wl_head;
+    assign wl_head  = lws_q[wl_blk][wl_slot][lws_rp[wl_blk][wl_slot]];
+    assign wl_ready = (32'(wl_blk) < NB) && (lws_cnt[wl_blk][wl_slot] != 2'd0)
+                   && gen_ok(w_rd_done[wl_blk][wl_slot], wl_head.cap) && ~wb_lsu_busy[wl_blk];
+    wire wl_fire = wl_valid && wl_ready;
+    `UNUSED_VAR (wl_head.wid)
+    assign lws_done_ev   = wl_done_valid;
+    assign lws_done_blk  = wl_done.blk;
+    assign lws_done_slot = wl_done.slot;
+    assign lws_done_head = lws_q[wl_done.blk][wl_done.slot][lws_rp[wl_done.blk][wl_done.slot]];
+    `RUNTIME_ASSERT(~wl_done_valid || (lws_cnt[wl_done.blk][wl_done.slot] != 2'd0),
+        ("%t: *** %s stream landing done without a tbuf.ldws (blk=%0d slot=%0d)", $time, INSTANCE_ID, wl_done.blk, wl_done.slot))
+    `RUNTIME_ASSERT(~wl_fire || (32'(wl_beat.seg) < CX),
+        ("%t: *** %s stream landing segment %0d beyond KT_MAX", $time, INSTANCE_ID, wl_beat.seg))
+`else
+    wire       wl_fire = 1'b0;
+    `UNUSED_VAR (wl_fire)
+    assign lws_done_ev   = 1'b0;
+    assign lws_done_blk  = '0;
+    assign lws_done_slot = '0;
+    assign lws_done_head = '0;
+`endif
+    always_ff @(posedge clk) begin
+        if (reset) begin
+            for (integer b = 0; b < NB; ++b) for (integer i = 0; i < NWS; ++i) begin
+                lws_cnt[b][i] <= '0; lws_wp[b][i] <= 1'b0; lws_rp[b][i] <= 1'b0;
+            end
+        end else begin
+            for (integer b = 0; b < NB; ++b) for (integer i = 0; i < NWS; ++i) begin
+                automatic logic push = f_fire && (f_op == OP_LDWS) && (f_ldw_blk == 2'(b)) && (f_rs2[1:0] == 2'(i));
+                automatic logic pop  = lws_done_ev && (lws_done_blk == 2'(b)) && (lws_done_slot == 2'(i));
+                if (push) begin
+                    lws_q[b][i][lws_wp[b][i]] <= '{wid: f_wid, cap: w_rd_iss[b][i]};
+                    lws_wp[b][i] <= ~lws_wp[b][i];
+                end
+                if (pop) lws_rp[b][i] <= ~lws_rp[b][i];
+                lws_cnt[b][i] <= lws_cnt[b][i] + 2'(push) - 2'(pop);
+            end
+        end
     end
 
     // W banks per block
@@ -844,6 +929,22 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
                 end
             end
         end
+    `ifdef VX_CFG_TSU_ENABLE
+        // stream landing: one 64 B row segment = chunks seg*8 .. seg*8+7 of row n -> all 8 banks, one address
+        // (bank = (n + ch) mod 8, entry = (slot*64 + n)*CX + ch/8). Never overlaps an LSU write (wl_ready).
+        if (wl_fire) begin
+            for (integer j = 0; j < 8; ++j) begin
+                automatic logic [2:0] bk = 3'(32'(wl_beat.row) + 32'(j));
+                wb_we[wl_blk][bk]  = 1'b1;
+                wb_wa[wl_blk][bk]  = WA_W'((32'(wl_slot) * WROWS + 32'(wl_beat.row)) * CX + 32'(wl_beat.seg));
+                wb_wd[wl_blk][bk]  = wl_beat.data[j*64 +: 64];
+                wb_wbe[wl_blk][bk] = 8'hFF;
+            end
+        end
+    `endif
+    end
+    for (genvar b = 0; b < NB; ++b) begin : g_wb_lsu_busy
+        assign wb_lsu_busy[b] = rsp_fire && (|mem_if.rsp_data.mask) && (rsp_tag.lid == LID_W'(b + 1));
     end
 
     // loader completion events, row-count registers
@@ -866,6 +967,8 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
             for (integer b = 0; b < NB; ++b) begin
                 if (ld_start[b+1]) w_rows_r[b][lw_head[b].slot] <= lw_head[b].rows;
             end
+            // stream landings are always full 64-row slabs
+            if (lws_done_ev) w_rows_r[lws_done_blk][lws_done_slot] <= 7'd64;
         end
     end
 
@@ -941,6 +1044,7 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
 
     // perf (simulation report)
     reg [63:0] perf_gemms, perf_gemm_k, perf_busy, perf_slot_wait, perf_drain, perf_ldx, perf_ldw, perf_st;
+    reg [63:0] perf_lws, perf_lws_beats;   // stream landings (transfers) and landed 64 B beats
 
     wire [NB-1:0] perf_blk_busy, perf_blk_wait, perf_blk_drain;
 
@@ -1367,7 +1471,7 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
     always_ff @(posedge clk) begin
         if (reset) begin
             perf_gemms <= '0; perf_gemm_k <= '0; perf_busy <= '0; perf_slot_wait <= '0; perf_drain <= '0;
-            perf_ldx <= '0; perf_ldw <= '0; perf_st <= '0;
+            perf_ldx <= '0; perf_ldw <= '0; perf_st <= '0; perf_lws <= '0; perf_lws_beats <= '0;
         end else begin
             perf_gemms     <= perf_gemms + 64'($countones(gm_done_ev));
             perf_busy      <= perf_busy + 64'($countones(perf_blk_busy));
@@ -1375,6 +1479,8 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
             perf_drain     <= perf_drain + 64'($countones(perf_blk_drain));
             perf_ldx       <= perf_ldx + 64'(ldx_done_ev);
             perf_ldw       <= perf_ldw + 64'($countones(ldw_done_ev));
+            perf_lws       <= perf_lws + 64'(lws_done_ev);
+            perf_lws_beats <= perf_lws_beats + 64'(wl_fire);
             perf_st        <= perf_st + 64'($countones(st_done_ev));
             perf_gemm_k    <= perf_gemm_k + 64'(f_fire && (f_op == OP_GEMM) ? f_rs1 : 32'd0);
         end
@@ -1396,15 +1502,15 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
             if (f_fire && f_async) perf_dirty <= 1'b1;
             else if (perf_dirty && perf_idle_cnt[12]) begin
                 perf_dirty <= 1'b0;
-                $display("%s: TCU-SEQ perf: busy_window=%0d tgemms=%0d gemm_k=%0d mac_beats=%0d slot_wait=%0d drain_beats=%0d ldx=%0d ldw=%0d tacc_st=%0d",
-                    INSTANCE_ID, perf_win_cyc, perf_gemms, perf_gemm_k, perf_busy, perf_slot_wait, perf_drain, perf_ldx, perf_ldw, perf_st);
+                $display("%s: TCU-SEQ perf: busy_window=%0d tgemms=%0d gemm_k=%0d mac_beats=%0d slot_wait=%0d drain_beats=%0d ldx=%0d ldw=%0d tacc_st=%0d ldws=%0d ldws_beats=%0d",
+                    INSTANCE_ID, perf_win_cyc, perf_gemms, perf_gemm_k, perf_busy, perf_slot_wait, perf_drain, perf_ldx, perf_ldw, perf_st, perf_lws, perf_lws_beats);
             end
         end
     end
     final begin
         if (perf_gemms != 0 || perf_ldx != 0) begin
-            $display("%s: TCU-SEQ perf: tgemms=%0d gemm_k=%0d mac_beats=%0d slot_wait=%0d drain_beats=%0d ldx=%0d ldw=%0d tacc_st=%0d",
-                INSTANCE_ID, perf_gemms, perf_gemm_k, perf_busy, perf_slot_wait, perf_drain, perf_ldx, perf_ldw, perf_st);
+            $display("%s: TCU-SEQ perf: tgemms=%0d gemm_k=%0d mac_beats=%0d slot_wait=%0d drain_beats=%0d ldx=%0d ldw=%0d tacc_st=%0d ldws=%0d ldws_beats=%0d",
+                INSTANCE_ID, perf_gemms, perf_gemm_k, perf_busy, perf_slot_wait, perf_drain, perf_ldx, perf_ldw, perf_st, perf_lws, perf_lws_beats);
         end
     end
 `endif
