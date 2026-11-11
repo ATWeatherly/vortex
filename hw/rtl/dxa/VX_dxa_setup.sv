@@ -101,6 +101,9 @@ module VX_dxa_setup import VX_gpu_pkg::*, VX_dxa_pkg::*; (
     wire [1:0] dec_dest_mode =
         desc_data.meta[DXA_DESC_META_LAYOUT_LSB +: DXA_DESC_META_LAYOUT_BITS];
     wire dec_dest_kmajor = (dec_dest_mode == DXA_DEST_KMAJOR);
+    // Phase-4 W-slot landing: DEST_KIND == TILEBUF_B; tag {lg_kt, blk, slot} from the issue meta barrier field.
+    wire       dec_wl_en  = (desc_data.meta[DXA_DESC_META_DEST_KIND_LSB +: DXA_DESC_META_DEST_KIND_BITS] == DXA_DEST_KIND_TILEBUF_B);
+    wire [8:0] dec_wl_tag = req_data.meta[4 +: 9];
 
     // Tiled (Flat/BlockMajor) geometry — log shift amounts (computed below,
     // after dec_tile0). tcN rides ESTRIDE2[15:0] and the dense B block K
@@ -190,7 +193,7 @@ module VX_dxa_setup import VX_gpu_pkg::*, VX_dxa_pkg::*; (
     reg                                    r_is_multicast;
     reg [`VX_CFG_NUM_WARPS-1:0]            r_cta_mask;
     reg [31:0]                             r_smem_stride;
-    reg [`VX_CFG_MEM_ADDR_WIDTH-1:0]       r_initial_gmem_base;
+    reg [DXA_GADDR_W-1:0]                  r_initial_gmem_base;
     reg [DXA_SMEM_ADDR_W-1:0]              r_initial_smem_base;
     reg [31:0]                             r_row_len_bytes;
     reg [DXA_MAX_OUTER_DIMS-1:0][31:0]     r_delta;
@@ -205,6 +208,8 @@ module VX_dxa_setup import VX_gpu_pkg::*, VX_dxa_pkg::*; (
     reg [3:0]                              r_lg_tcN;
     reg [3:0]                              r_lg_nsteps;
     reg [3:0]                              r_lg_bkK;
+    reg                                    r_wl_en;
+    reg [8:0]                              r_wl_tag;
 
     // ════════════════════════════════════════════════════════════════════
     // Staged result registers (filled by the setup engine for the next
@@ -219,7 +224,7 @@ module VX_dxa_setup import VX_gpu_pkg::*, VX_dxa_pkg::*; (
     reg                                    s_is_multicast;
     reg [`VX_CFG_NUM_WARPS-1:0]            s_cta_mask;
     reg [31:0]                             s_smem_stride;
-    reg [`VX_CFG_MEM_ADDR_WIDTH-1:0]       s_initial_gmem_base;
+    reg [DXA_GADDR_W-1:0]                  s_initial_gmem_base;
     reg [DXA_SMEM_ADDR_W-1:0]              s_initial_smem_base;
     reg [31:0]                             s_row_len_bytes;
     reg [DXA_MAX_OUTER_DIMS-1:0][31:0]     s_delta;
@@ -239,6 +244,8 @@ module VX_dxa_setup import VX_gpu_pkg::*, VX_dxa_pkg::*; (
     reg [3:0]                              s_lg_tcN;
     reg [3:0]                              s_lg_nsteps;
     reg [3:0]                              s_lg_bkK;
+    reg                                    s_wl_en;
+    reg [8:0]                              s_wl_tag;
 
     assign active_core_id          = r_core_id;
     assign active_uuid             = r_uuid;
@@ -416,6 +423,10 @@ module VX_dxa_setup import VX_gpu_pkg::*, VX_dxa_pkg::*; (
             s_lg_tcN           <= '0;
             s_lg_nsteps        <= '0;
             s_lg_bkK           <= '0;
+            r_wl_en            <= 1'b0;
+            r_wl_tag           <= '0;
+            s_wl_en            <= 1'b0;
+            s_wl_tag           <= '0;
         end else begin
             // Default: pipeline_start is a 1-cycle pulse.
             pipeline_start_r <= 1'b0;
@@ -446,6 +457,8 @@ module VX_dxa_setup import VX_gpu_pkg::*, VX_dxa_pkg::*; (
                 r_lg_tcN            <= s_lg_tcN;
                 r_lg_nsteps         <= s_lg_nsteps;
                 r_lg_bkK            <= s_lg_bkK;
+                r_wl_en             <= s_wl_en;
+                r_wl_tag            <= s_wl_tag;
                 state_r             <= TS_ACTIVE;
                 pipeline_start_r    <= 1'b1;
                 setup_state_r       <= SS_IDLE;
@@ -481,6 +494,8 @@ module VX_dxa_setup import VX_gpu_pkg::*, VX_dxa_pkg::*; (
                     s_lg_tcN            <= dec_lg_tcN;
                     s_lg_nsteps         <= dec_lg_nsteps;
                     s_lg_bkK            <= dec_lg_bkK;
+                    s_wl_en             <= dec_wl_en;
+                    s_wl_tag            <= dec_wl_tag;
                     // Rolling-cursor deltas: delta[0] is the inner-dim step.
                     // Higher deltas are precomputed below (Phase 1-3 captures).
                     s_delta[0]          <= dec_stride0;
@@ -516,7 +531,7 @@ module VX_dxa_setup import VX_gpu_pkg::*, VX_dxa_pkg::*; (
                     // Seed staged base = desc.base + dim0 offset; phases add the
                     // remaining coordN×stride(N-1) products.
                     s_initial_gmem_base <= desc_data.base_addr
-                                         + `VX_CFG_MEM_ADDR_WIDTH'(dec_dim0_offset);
+                                         + DXA_GADDR_W'(dec_dim0_offset);
                     ctr_r               <= '0;
                     setup_state_r       <= SS_RUNNING;
                 end
@@ -529,13 +544,13 @@ module VX_dxa_setup import VX_gpu_pkg::*, VX_dxa_pkg::*; (
                 //   resolved as shifts at launch.
                 if (ctr_r == 4'd3) begin
                     s_initial_gmem_base <= s_initial_gmem_base
-                                         + `VX_CFG_MEM_ADDR_WIDTH'(mul_off_result);
+                                         + DXA_GADDR_W'(mul_off_result);
                 end
 
                 // ── Phase 1 capture at ctr=5 (rank≥3) ──
                 if (ctr_r == 4'd5 && lat_rank >= 3) begin
                     s_initial_gmem_base <= s_initial_gmem_base
-                                         + `VX_CFG_MEM_ADDR_WIDTH'(mul_off_result);
+                                         + DXA_GADDR_W'(mul_off_result);
                     // delta[1] = stride1 - (tile1-1)*stride0
                     s_delta[1] <= lat_stride1 - mul_dlt_result;
                     s_rewind   <= mul_dlt_result;
@@ -544,7 +559,7 @@ module VX_dxa_setup import VX_gpu_pkg::*, VX_dxa_pkg::*; (
                 // ── Phase 2 capture at ctr=7 (rank≥4) ──
                 if (ctr_r == 4'd7 && lat_rank >= 4) begin
                     s_initial_gmem_base <= s_initial_gmem_base
-                                         + `VX_CFG_MEM_ADDR_WIDTH'(mul_off_result);
+                                         + DXA_GADDR_W'(mul_off_result);
                     // delta[2] = stride2 - (tile2-1)*stride1 - (tile1-1)*stride0  (dims 1 and 2 both wrap)
                     s_delta[2] <= lat_stride2 - (mul_dlt_result + s_rewind);
                     s_rewind   <= s_rewind + mul_dlt_result;
@@ -553,7 +568,7 @@ module VX_dxa_setup import VX_gpu_pkg::*, VX_dxa_pkg::*; (
                 // ── Phase 3 capture at ctr=9 (rank=5) ──
                 if (ctr_r == 4'd9 && lat_rank >= 5) begin
                     s_initial_gmem_base <= s_initial_gmem_base
-                                         + `VX_CFG_MEM_ADDR_WIDTH'(mul_off_result);
+                                         + DXA_GADDR_W'(mul_off_result);
                     // delta[3] = stride3 - (tile3-1)*stride2 - (tile2-1)*stride1 - (tile1-1)*stride0
                     s_delta[3] <= lat_stride3 - (mul_dlt_result + s_rewind);
                 end
@@ -591,6 +606,8 @@ module VX_dxa_setup import VX_gpu_pkg::*, VX_dxa_pkg::*; (
     assign setup_params.lg_tcN             = r_lg_tcN;
     assign setup_params.lg_nsteps          = r_lg_nsteps;
     assign setup_params.lg_bkK             = r_lg_bkK;
+    assign setup_params.wl_en              = r_wl_en;
+    assign setup_params.wl_tag             = r_wl_tag;
 
     `UNUSED_VAR (desc_data.size0)
     `UNUSED_VAR (req_data.meta)

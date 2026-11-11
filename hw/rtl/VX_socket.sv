@@ -714,11 +714,22 @@ module VX_socket import VX_gpu_pkg::*, VX_tlb_pkg::*;
     assign per_core_dcr_bus_if[SOCKET_DCR_DXA_IDX].rsp_valid = dxa_dcr_bus_if.rsp_valid;
     assign per_core_dcr_bus_if[SOCKET_DCR_DXA_IDX].rsp_data  = dxa_dcr_bus_if.rsp_data;
 
+`ifdef VX_CFG_TSU_ENABLE
+`ifdef VX_CFG_TCU_SEQ_ENABLE
+    // Phase-4 W-slot landing: the socket's TSU workers write straight into the core's TCU sequencer W slots.
+    `STATIC_ASSERT (`VX_CFG_SOCKET_SIZE == 1, ("W-slot landing (TSU + TCU sequencer) supports one core per socket"))
+    wire                         sock_wl_valid, sock_wl_ready, sock_wl_done_valid;
+    VX_dxa_pkg::dxa_wland_beat_t sock_wl_beat;
+    VX_dxa_pkg::dxa_wland_done_t sock_wl_done;
+`endif
+`endif
+
     VX_dxa_core #(
         .INSTANCE_ID    (`SFORMATF(("%s-dxa", INSTANCE_ID))),
         .NUM_REQS       (`VX_CFG_SOCKET_SIZE),
         .GMEM_OUT_PORTS (1),
-        .NUM_STR_PORTS  (`UP(SOCKET_STR_PORTS))
+        .NUM_STR_PORTS  (`UP(SOCKET_STR_PORTS)),
+        .STR_MASTER_BASE(SOCKET_ID * SOCKET_STR_PORTS)
     ) dxa_core (
         .clk              (clk),
         .reset            (reset),
@@ -730,6 +741,15 @@ module VX_socket import VX_gpu_pkg::*, VX_tlb_pkg::*;
         .smem_bus_if      (dxa_lmem_bus_if),
         .gmem_bus_if      (dxa_gmem_bus_if),
         .str_bus_if       (str_bus_if),
+    `ifdef VX_CFG_TSU_ENABLE
+    `ifdef VX_CFG_TCU_SEQ_ENABLE
+        .wl_valid         (sock_wl_valid),
+        .wl_ready         (sock_wl_ready),
+        .wl_beat          (sock_wl_beat),
+        .wl_done_valid    (sock_wl_done_valid),
+        .wl_done          (sock_wl_done),
+    `endif
+    `endif
         `UNUSED_PIN (busy)
     );
 
@@ -907,6 +927,15 @@ module VX_socket import VX_gpu_pkg::*, VX_tlb_pkg::*;
         `ifdef VX_CFG_EXT_DXA_ENABLE
             .dxa_req_bus_if (per_core_dxa_req_bus_if[core_id]),
             .dxa_lmem_bus_if(per_core_dxa_lmem_bus_if[core_id]),
+        `ifdef VX_CFG_TSU_ENABLE
+        `ifdef VX_CFG_TCU_SEQ_ENABLE
+            .wl_valid       (sock_wl_valid),
+            .wl_ready       (sock_wl_ready),
+            .wl_beat        (sock_wl_beat),
+            .wl_done_valid  (sock_wl_done_valid),
+            .wl_done        (sock_wl_done),
+        `endif
+        `endif
         `endif
 
         `ifdef VX_CFG_EXT_TEX_ENABLE

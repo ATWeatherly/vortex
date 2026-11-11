@@ -21,7 +21,7 @@ module VX_stream_bus_switch import VX_gpu_pkg::*; #(
     parameter BURST_SIZE  = 256,
     parameter BEAT_SIZE   = 64,
     parameter TAG_WIDTH   = UUID_WIDTH + 1,
-    parameter ADDR_WIDTH  = `VX_CFG_MEM_ADDR_WIDTH - `CLOG2(BURST_SIZE),
+    parameter ADDR_WIDTH  = `VX_CFG_TSU_ADDR_WIDTH - `CLOG2(BURST_SIZE),   // = VX_stream_bus_if default
     parameter REQ_OUT_BUF = 0,
     parameter RSP_OUT_BUF = 0,
     parameter SEL_W       = `UP(`CLOG2(NUM_OUTPUTS))

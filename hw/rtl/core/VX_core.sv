@@ -48,6 +48,16 @@ module VX_core import VX_gpu_pkg::*, VX_tlb_pkg::*; #(
 `ifdef VX_CFG_EXT_DXA_ENABLE
     VX_dxa_req_bus_if.master dxa_req_bus_if,
     VX_mem_bus_if.slave     dxa_lmem_bus_if,
+`ifdef VX_CFG_TSU_ENABLE
+`ifdef VX_CFG_TCU_SEQ_ENABLE
+    // phase-4 W-slot landing from the socket's TSU workers
+    input  wire                         wl_valid,
+    output wire                         wl_ready,
+    input  VX_dxa_pkg::dxa_wland_beat_t wl_beat,
+    input  wire                         wl_done_valid,
+    input  VX_dxa_pkg::dxa_wland_done_t wl_done,
+`endif
+`endif
 `endif
 
 `ifdef VX_CFG_EXT_TEX_ENABLE
@@ -334,6 +344,13 @@ module VX_core import VX_gpu_pkg::*, VX_tlb_pkg::*; #(
     `endif
     `ifdef VX_CFG_TCU_SEQ_ENABLE
         .store_drained  (store_drained),
+    `ifdef VX_CFG_TSU_ENABLE
+        .wl_valid       (wl_valid),
+        .wl_ready       (wl_ready),
+        .wl_beat        (wl_beat),
+        .wl_done_valid  (wl_done_valid),
+        .wl_done        (wl_done),
+    `endif
     `endif
 
         .dispatch_if    (dispatch_if),

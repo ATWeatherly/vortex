@@ -1018,6 +1018,7 @@ Instr::Ptr Decoder::decode(uint32_t code, uint64_t uuid) {
       case 4: instr->set_op_type(TcuType::TBUF_LDW); break;
       case 5: instr->set_op_type(TcuType::TCFG); break;
       case 6: instr->set_op_type(TcuType::TFENCE); instr->set_wstall(true); break;
+      case 7: instr->set_op_type(TcuType::TBUF_LDWS); break;
       default: std::abort();
       }
       if (funct3 != 2 && funct3 != 6) {

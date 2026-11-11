@@ -140,6 +140,13 @@ public:
 	// Exposed so that `Core` can bind its single LMEM port pair.
 	TcuTbuf::Ptr& tbuf();
 
+#ifdef VX_CFG_TCU_SEQ_ENABLE
+	// Phase-4 tile-stream landing into the sequencer's W slots (called by the socket DXA/TSU model).
+	// tag = {lg_kt[3:0], blk[1:0], slot[1:0]}; off = dense byte offset in the 64-row x 2^lg_kt image.
+	void seq_land(uint32_t tag, uint64_t off, const void* data, uint32_t size);
+	void seq_land_done(uint32_t tag);
+#endif
+
 	const PerfStats& perf_stats() const;
 
 protected:

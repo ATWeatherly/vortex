@@ -29,7 +29,8 @@ module VX_dxa_worker import VX_gpu_pkg::*, VX_dxa_pkg::*; #(
     parameter GMEM_TAG_WIDTH = SOCKET_MEM_TAG_WIDTH,
     parameter STREAM        = 0,                    // 1: TSU burst worker (stream bus), 0: DXA line worker (socket memory port)
     parameter NUM_STR_PORTS = 1,                    // stream masters owned by this worker (STREAM=1)
-    parameter STR_SEL_LSB   = TSU_SEL_LSB_GRANULE   // granule-address bit selecting the master
+    parameter STR_SEL_LSB   = TSU_SEL_LSB_GRANULE,  // granule-address bit selecting the master
+    parameter STR_MASTER_BASE = 0                   // global index of this worker's master 0 (m_axi_str_<i>)
 ) (
     input wire clk,
     input wire reset,
@@ -39,16 +40,28 @@ module VX_dxa_worker import VX_gpu_pkg::*, VX_dxa_pkg::*; #(
     VX_dxa_worker_req_if.slave req_if,
     VX_mem_bus_if.master gmem_bus_if,
     VX_stream_bus_if.master str_bus_if [NUM_STR_PORTS],
+`ifdef VX_CFG_TSU_ENABLE
+`ifdef VX_CFG_TCU_SEQ_ENABLE
+    // Phase-4 W-slot landing (STREAM workers; line workers tie wl_ready low and never drive wl_*)
+    output wire                 wl_valid,
+    input  wire                 wl_ready,
+    output dxa_wland_beat_t     wl_beat,
+    output wire                 wl_done_valid,
+    output dxa_wland_done_t     wl_done,
+`endif
+`endif
     VX_mem_bus_if.master smem_bus_if
 );
     `UNUSED_SPARAM (INSTANCE_ID)
     `UNUSED_SPARAM (WORKER_ID)
+    `UNUSED_PARAM (STR_MASTER_BASE)   // used only by the VX_CFG_TSU_LINK_GROUP range assert
 
     // Address-generator granule: an L1 line for the line engine, a burst for
     // the stream engine.
     localparam GMEM_BYTES      = STREAM ? TSU_BURST_BYTES : `VX_CFG_L1_LINE_SIZE;
     localparam GMEM_OFF_BITS   = `CLOG2(GMEM_BYTES);
-    localparam GMEM_ADDR_WIDTH = `VX_CFG_MEM_ADDR_WIDTH - GMEM_OFF_BITS;
+    // stream workers address the full TSU width (VX_CFG_TSU_ADDR_WIDTH, all HBM PCs); line workers the memory bus
+    localparam GMEM_ADDR_WIDTH = (STREAM ? `VX_CFG_TSU_ADDR_WIDTH : `VX_CFG_MEM_ADDR_WIDTH) - GMEM_OFF_BITS;
 
     // What smem_wr sees per delivery: a whole line, or one burst beat.
     localparam CL_BYTES        = STREAM ? TSU_BEAT_BYTES : GMEM_BYTES;
@@ -259,10 +272,26 @@ module VX_dxa_worker import VX_gpu_pkg::*, VX_dxa_pkg::*; #(
         localparam STR_SEL_W = `UP(`CLOG2(NUM_STR_PORTS));
         wire [STR_SEL_W-1:0] str_sel;
         if (NUM_STR_PORTS > 1) begin : g_sel
+            // VX_CFG_TSU_SEL_LSB = 28 + log2(32 / STREAM_NUM_MASTERS) must leave the select bits inside the
+            // address (e.g. 4 masters on a 32-bit address would select on bits 31..32: override SEL_LSB).
+            `STATIC_ASSERT(STR_SEL_LSB + STR_SEL_W <= TSU_STR_ADDR_W, ("TSU master-select bits above the stream address"))
             assign str_sel = str_w.req_data.addr[STR_SEL_LSB +: STR_SEL_W];
         end else begin : g_nosel
             assign str_sel = '0;
         end
+
+    `ifdef VX_CFG_TSU_LINK_GROUP
+        // Group-linked platform (platforms.mk TSU_LINK=group): m_axi_str_<i> is linked to HBM[i*g : i*g+g-1]
+        // only, g = 2^(SEL_LSB - 28) (32/n for TSU_LINK=group, 16/n for TSU_LINK=range), and an address outside that range reads garbage on silicon
+        // (u50wgts_2c200, 2026-11-11). Every burst must lie in the PC group of the master it is routed to:
+        // byte-address group index addr >> (28 + log2 g) == STR_MASTER_BASE + str_sel. Flat-memory rtlsim
+        // cannot see the corruption, so this assert is the pre-silicon check.
+        wire [63:0] str_byte_addr = 64'(str_w.req_data.addr) << `CLOG2(TSU_BURST_BYTES);
+        wire [31:0] str_grp = 32'(str_byte_addr >> `VX_CFG_TSU_SEL_LSB);
+        `RUNTIME_ASSERT(~(str_w.req_valid && str_w.req_ready) || (str_grp == 32'(STR_MASTER_BASE + 32'(str_sel))),
+            ("%t: *** %s TSU burst 0x%0h is in PC group %0d but routes to m_axi_str_%0d (group-linked platform: only its own %0d PCs are reachable)",
+             $time, INSTANCE_ID, str_byte_addr, str_grp, STR_MASTER_BASE + 32'(str_sel), 1 << (`VX_CFG_TSU_SEL_LSB - 28)))
+    `endif
 
         VX_stream_bus_switch #(
             .NUM_OUTPUTS (NUM_STR_PORTS),
@@ -348,6 +377,107 @@ module VX_dxa_worker import VX_gpu_pkg::*, VX_dxa_pkg::*; #(
     end
 
     // ════════════════════════════════════════════════════════════════════
+    // Stage 3b: W-slot landing steer (phase 4). A TILEBUF_B transfer on a
+    // stream worker bypasses smem_wr: every delivered beat (a full, aligned
+    // 64 B piece of one weight row) goes straight to the TCU sequencer's W
+    // slot, releases its burst-slot beat on acceptance, and the transfer
+    // completes once the last beat has landed and no burst slot is
+    // outstanding. LMEM transfers take the unchanged smem_wr path.
+    // ════════════════════════════════════════════════════════════════════
+
+    wire                        sm_valid;
+    wire                        sm_ready;
+    wire                        sm_release_en;
+    wire [TAG_W-1:0]            sm_release_tag;
+    wire                        sm_transfer_done;
+
+`ifdef VX_CFG_TSU_ENABLE
+`ifdef VX_CFG_TCU_SEQ_ENABLE
+    if (STREAM != 0) begin : g_wland
+        wire wl_mode = setup_params.wl_en;
+        wire [3:0] wl_lgkt = setup_params.wl_tag[7:4];
+        wire [DXA_WLAND_OFF_W-1:0] wl_off = DXA_WLAND_OFF_W'(sw_smem_byte_addr);
+        wire [DXA_WLAND_OFF_W-1:0] wl_kmask = (DXA_WLAND_OFF_W'(1) << wl_lgkt) - DXA_WLAND_OFF_W'(1);
+        wire [DXA_WLAND_OFF_W-1:0] wl_k = wl_off & wl_kmask;
+        wire wl_fire = wl_valid && wl_ready;
+        reg  wl_last_seen_r, wl_done_r;
+        assign wl_valid      = sw_valid && wl_mode;
+        assign sm_valid      = sw_valid && ~wl_mode;
+        assign sw_ready      = wl_mode ? wl_ready : sm_ready;
+        assign wl_beat.blk   = setup_params.wl_tag[3:2];
+        assign wl_beat.slot  = setup_params.wl_tag[1:0];
+        // row-major image: byte o -> row o >> lg_kt, segment (o & (kt-1)) >> 6; SIMT8 image (tile-local, 512 B per
+        // 8 B k-chunk of 64 rows): byte o -> chunk o >> 9, rows ((o >> 3) & 63) .. +7
+        wire wl_simt = setup_params.wl_tag[8];
+        assign wl_beat.simt  = wl_simt;
+        assign wl_beat.row   = wl_simt ? 6'(wl_off >> 3) : 6'(wl_off >> wl_lgkt);
+        assign wl_beat.seg   = wl_simt ? 8'(wl_off >> 9) : 8'(wl_k >> 6);
+        assign wl_beat.data  = 512'(sw_data);
+        assign sw_release_en  = sm_release_en || wl_fire;
+        assign sw_release_tag = wl_fire ? sw_tag : sm_release_tag;
+        assign wl_done_valid  = wl_done_r;
+        assign wl_done.blk    = setup_params.wl_tag[3:2];
+        assign wl_done.slot   = setup_params.wl_tag[1:0];
+        assign transfer_done  = sm_transfer_done || wl_done_r;
+        always @(posedge clk) begin
+            if (reset || pipeline_start) begin
+                wl_last_seen_r <= 1'b0;
+                wl_done_r      <= 1'b0;
+            end else begin
+                wl_done_r <= 1'b0;
+                if (wl_fire && sw_last) wl_last_seen_r <= 1'b1;
+                if (wl_mode && transfer_active && wl_last_seen_r && (sw_outstanding == '0) && ~wl_done_r) begin
+                    wl_done_r      <= 1'b1;
+                    wl_last_seen_r <= 1'b0;
+                end
+            end
+        end
+        `RUNTIME_ASSERT(~wl_fire || (~sw_oob && (sw_byte_offset == '0) && (32'(sw_valid_length) == 32'(CL_BYTES))
+                                     && (wl_off[5:0] == 6'd0) && (wl_lgkt >= 4'd6) && (wl_lgkt <= 4'd11)),
+            ("%t: *** %s W-slot landing needs full 64 B beats of a 2^lg_kt (64..2048) byte row: off=0x%0h len=%0d oob=%b lgkt=%0d",
+             $time, INSTANCE_ID, sw_byte_offset, sw_valid_length, sw_oob, wl_lgkt))
+        `RUNTIME_ASSERT(~wl_fire || ((32'(wl_off) >> wl_lgkt) < 32'd64),
+            ("%t: *** %s W-slot landing offset 0x%0h is past row 63 of a 2^%0d B-row slot (issue with the LMEM base csr LOCAL_MEM_BASE, not __local_mem() or 0)",
+             $time, INSTANCE_ID, wl_off, wl_lgkt))
+        `RUNTIME_ASSERT(~(sm_release_en && wl_fire), ("%t: *** %s W-landing / smem_wr release collision", $time, INSTANCE_ID))
+        `UNUSED_VAR (wl_k)
+    end else begin : g_no_wland
+        assign wl_valid       = 1'b0;
+        assign wl_beat        = '0;
+        assign wl_done_valid  = 1'b0;
+        assign wl_done        = '0;
+        assign sm_valid       = sw_valid;
+        assign sw_ready       = sm_ready;
+        assign sw_release_en  = sm_release_en;
+        assign sw_release_tag = sm_release_tag;
+        assign transfer_done  = sm_transfer_done;
+        `UNUSED_VAR (wl_ready)
+        `RUNTIME_ASSERT(~(transfer_active && setup_params.wl_en), ("%t: *** %s TILEBUF_B descriptor on the DXA line engine (set the TSU ENGINE bit)", $time, INSTANCE_ID))
+    end
+`else
+    assign sm_valid       = sw_valid;
+    assign sw_ready       = sm_ready;
+    assign sw_release_en  = sm_release_en;
+    assign sw_release_tag = sm_release_tag;
+    assign transfer_done  = sm_transfer_done;
+`endif
+
+    // Line workers drive the VX_CFG_MEM_ADDR_WIDTH memory bus: a descriptor base above it (full-width
+    // VX_CFG_TSU_ADDR_WIDTH descriptor, meant for the TSU) would be silently truncated.
+    if (!STREAM && (DXA_GADDR_W > `VX_CFG_MEM_ADDR_WIDTH)) begin : g_line_base_chk
+        `RUNTIME_ASSERT(~transfer_active || ((setup_params.initial_gmem_base >> `VX_CFG_MEM_ADDR_WIDTH) == '0),
+            ("%t: *** %s DXA line-engine base 0x%0h is above the %0d-bit memory bus (route it to the TSU)",
+             $time, INSTANCE_ID, setup_params.initial_gmem_base, `VX_CFG_MEM_ADDR_WIDTH))
+    end
+`else
+    assign sm_valid       = sw_valid;
+    assign sw_ready       = sm_ready;
+    assign sw_release_en  = sm_release_en;
+    assign sw_release_tag = sm_release_tag;
+    assign transfer_done  = sm_transfer_done;
+`endif
+
+    // ════════════════════════════════════════════════════════════════════
     // Stage 4: SMEM Writer (gmem_req drives smem_wr directly via the
     // sw_* channel; smem_wr's pend slot + deferred-last register handle
     // out-of-order drain).
@@ -372,8 +502,8 @@ module VX_dxa_worker import VX_gpu_pkg::*, VX_dxa_pkg::*; #(
         .active_uuid           (active_uuid),
         .active_bar_addr       (active_bar_addr),
         .active_notify_smem_done (active_notify_smem_done),
-        .sw_valid              (sw_valid),
-        .sw_ready              (sw_ready),
+        .sw_valid              (sm_valid),
+        .sw_ready              (sm_ready),
         .sw_tag                (sw_tag),
         .sw_data               (sw_data),
         .sw_smem_byte_addr     (sw_smem_byte_addr),
@@ -384,10 +514,10 @@ module VX_dxa_worker import VX_gpu_pkg::*, VX_dxa_pkg::*; #(
         .sw_k_row              (sw_k_row),
         .sw_n_base             (sw_n_base),
         .sw_outstanding        (sw_outstanding),
-        .release_en            (sw_release_en),
-        .release_tag           (sw_release_tag),
+        .release_en            (sm_release_en),
+        .release_tag           (sm_release_tag),
         .smem_bus_if           (smem_bus_if),
-        .transfer_done         (transfer_done),
+        .transfer_done         (sm_transfer_done),
         .wr_done_count         (wr_done_count),
         .smem_req_fire         (smem_req_fire),
         .is_multicast          (active_is_multicast),

@@ -73,7 +73,7 @@ module VX_dxa_addr_gen import VX_gpu_pkg::*, VX_dxa_pkg::*; #(
 
     // ---- Registered state ----
     reg                        active_r;
-    reg [`VX_CFG_MEM_ADDR_WIDTH-1:0] gmem_cursor_r;  // Current row's GMEM byte base
+    reg [DXA_GADDR_W-1:0] gmem_cursor_r;  // Current row's GMEM byte base
     reg [31:0]                 row_len_r;            // row_len_bytes (constant)
 
     // Inner-loop counters/flags (advance every beat).
@@ -179,11 +179,12 @@ module VX_dxa_addr_gen import VX_gpu_pkg::*, VX_dxa_pkg::*; #(
     wire dim2_steps = ~dim2_last;
     // dim3 must step otherwise (we already checked is_last_outer).
 
-    wire [`VX_CFG_MEM_ADDR_WIDTH-1:0] step_delta =
-        dim0_steps ? `VX_CFG_MEM_ADDR_WIDTH'(delta_r[0]) :
-        dim1_steps ? `VX_CFG_MEM_ADDR_WIDTH'(delta_r[1]) :
-        dim2_steps ? `VX_CFG_MEM_ADDR_WIDTH'(delta_r[2]) :
-                     `VX_CFG_MEM_ADDR_WIDTH'(delta_r[3]);
+    // deltas are 32-bit two's complement (a wrap delta can be negative): sign-extend into the full-width cursor
+    wire [DXA_GADDR_W-1:0] step_delta =
+        dim0_steps ? DXA_GADDR_W'($signed(delta_r[0])) :
+        dim1_steps ? DXA_GADDR_W'($signed(delta_r[1])) :
+        dim2_steps ? DXA_GADDR_W'($signed(delta_r[2])) :
+                     DXA_GADDR_W'($signed(delta_r[3]));
 
     // K-major SMEM step = (elements in this CL) * per_lane_stride/esize.
     //   Interior CL: valid_length == LINE, so step == tile1 << log2(LINE) — a
@@ -201,7 +202,7 @@ module VX_dxa_addr_gen import VX_gpu_pkg::*, VX_dxa_pkg::*; #(
     // Span (first_off + row_len) for the row about to be entered, and its CL
     // count. At start it comes from setup params; at a row wrap from the
     // post-step cursor (reusing the gmem_cursor_r adder).
-    wire [`VX_CFG_MEM_ADDR_WIDTH-1:0] next_cursor = gmem_cursor_r + step_delta;
+    wire [DXA_GADDR_W-1:0] next_cursor = gmem_cursor_r + step_delta;
     wire [31:0] start_span = 32'(setup_params.initial_gmem_base[CL_OFF_BITS-1:0])
                            + setup_params.row_len_bytes;
     wire [31:0] wrap_span  = 32'(next_cursor[CL_OFF_BITS-1:0]) + row_len_r;
@@ -246,7 +247,7 @@ module VX_dxa_addr_gen import VX_gpu_pkg::*, VX_dxa_pkg::*; #(
             active_r         <= 1'b1;
             gmem_cursor_r    <= setup_params.initial_gmem_base;
             row_len_r        <= setup_params.row_len_bytes;
-            cl_addr_r        <= setup_params.initial_gmem_base[`VX_CFG_MEM_ADDR_WIDTH-1:CL_OFF_BITS];
+            cl_addr_r        <= GMEM_ADDR_WIDTH'(setup_params.initial_gmem_base >> CL_OFF_BITS);
             lines_left_r     <= calc_num_lines(start_span);
             is_first_r       <= 1'b1;
             last_vend_r      <= calc_last_vend(start_span[CL_OFF_BITS-1:0]);
@@ -292,7 +293,7 @@ module VX_dxa_addr_gen import VX_gpu_pkg::*, VX_dxa_pkg::*; #(
                 // row's geometry is recomputed from the post-step cursor; the
                 // next beat is the new row's CL0.
                 gmem_cursor_r <= next_cursor;
-                cl_addr_r     <= next_cursor[`VX_CFG_MEM_ADDR_WIDTH-1:CL_OFF_BITS];
+                cl_addr_r     <= GMEM_ADDR_WIDTH'(next_cursor >> CL_OFF_BITS);
                 lines_left_r  <= calc_num_lines(wrap_span);
                 is_first_r    <= 1'b1;
                 last_vend_r   <= calc_last_vend(wrap_span[CL_OFF_BITS-1:0]);
@@ -336,6 +337,8 @@ module VX_dxa_addr_gen import VX_gpu_pkg::*, VX_dxa_pkg::*; #(
 
     // km_step is LMEM-bounded; only the low DXA_SMEM_ADDR_W bits feed smem_byte_addr_r.
     `UNUSED_VAR (km_step[31:DXA_SMEM_ADDR_W])
+    // W-slot landing fields are consumed by the worker's landing steer, not the address generator.
+    `UNUSED_VAR ({setup_params.wl_en, setup_params.wl_tag})
 
 `ifdef DBG_TRACE_DXA
     always @(posedge clk) begin
