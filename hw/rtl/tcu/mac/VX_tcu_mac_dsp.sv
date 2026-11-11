@@ -11,7 +11,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-`include "VX_define.vh"
+`include "VX_tcu_mac_defs.vh"
 
 // One DSP48E2 MACC cell of the 512-MAC tensor block (balanced-design spec phase 3, option (a)).
 //

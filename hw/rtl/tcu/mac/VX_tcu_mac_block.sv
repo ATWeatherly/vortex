@@ -11,7 +11,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-`include "VX_define.vh"
+`include "VX_tcu_mac_defs.vh"
 
 // 512-MAC int8 tensor block (balanced-design spec phase 3, track B; DSP packing option (a)).
 //
@@ -222,7 +222,10 @@ module VX_tcu_mac_block #(
     // ------------------------------------------------------------------
     // Control pipeline S0 -> S6 (aligned with the DSP M stage at S5)
     // ------------------------------------------------------------------
-    ctl_t ctl3, ctl4, ctl6;
+    ctl_t ctl3, ctl4;
+    /* verilator lint_off UNUSEDSIGNAL */
+    ctl_t ctl6;                          // ctl6.gs is unused (P restart already applied at S5)
+    /* verilator lint_on UNUSEDSIGNAL */
     (* max_fanout = 32 *) ctl_t ctl5;
 
     always_ff @(posedge clk) begin
@@ -418,6 +421,5 @@ module VX_tcu_mac_block #(
     assign out_col   = out_col_r;
     assign out_last  = out_last_r;
 
-    `UNUSED_VAR (ctl6.gs)
 
 endmodule

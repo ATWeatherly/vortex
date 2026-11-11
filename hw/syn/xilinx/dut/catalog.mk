@@ -121,7 +121,7 @@ tcu_PKG  = $(TCU_PKG)
 
 # 512-MAC int8 tensor block (balanced-design spec phase 3), default 8 x 64
 tcumac_PRJ := VX_tcu_mac_block
-tcumac_INC  = $(BASE_INC) -I$(RTL_DIR)/tcu/mac
+tcumac_INC  = -I$(RTL_DIR)/tcu/mac
 
 tensor_PRJ := VX_tensor_top
 tensor_IP  := 1
