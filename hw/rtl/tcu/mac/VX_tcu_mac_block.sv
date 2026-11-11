@@ -32,9 +32,9 @@
 // span; the last group of a span may be shorter.
 //
 // Extraction is time-shared: one extraction unit per 4 DSPs (one row pair x 4
-// adjacent columns), fed by a 4-deep capture chain (FF shift register, no muxes)
-// and rotating a 4-deep accumulator chain in lockstep. A group end loads the
-// capture chain; the unit drains it in 4 cycles. Consecutive group ends must be
+// adjacent columns). A group end captures the 4 P values into registers; the unit
+// reads them through one 4:1 mux over 4 cycles and rotates a 4-deep accumulator
+// chain in lockstep. Consecutive group ends must be
 // >= 4 cycles apart (true for full groups; in_ready inserts bubbles after short
 // last groups).
 //
@@ -271,7 +271,7 @@ module VX_tcu_mac_block #(
     logic [2:0] proc_cnt_r;                       // heads left to process (0..4)
     logic       chain_first_r, chain_last_r, chain_sgn_r;
     (* max_fanout = 32 *) wire proc = (proc_cnt_r != 3'd0);
-    logic [1:0] slot_r;                           // index of the head being processed
+    (* max_fanout = 32 *) logic [1:0] slot_r;     // index of the head being processed (capture mux select)
 
     // X stage (extracted fields registered)
     (* max_fanout = 32 *) logic x_v;
@@ -312,23 +312,24 @@ module VX_tcu_mac_block #(
 
     for (genvar p = 0; p < NP; ++p) begin : g_unit_p
         for (genvar u = 0; u < NU; ++u) begin : g_unit
-            // capture chain: 4 x 48-bit P values (columns 4u .. 4u+3)
+            // capture registers: 4 x 48-bit P values (columns 4u .. 4u+3), loaded together (FF CE only)
+            // and read through ONE 4:1 mux (1 LUT6 per bit) -- a load-or-shift chain would cost a 2:1
+            // mux per bit per stage (3 x 48 LUTs per unit; measured 9.2k LUT at 8x64).
             logic signed [47:0] cap_r [4];
             always_ff @(posedge clk) begin
                 if (cap_ld) begin
                     for (int s = 0; s < 4; ++s) cap_r[s] <= pv[p][4*u + s];
-                end else if (proc) begin
-                    for (int s = 0; s < 3; ++s) cap_r[s] <= cap_r[s+1];
                 end
             end
+            wire signed [47:0] cap_head = cap_r[slot_r];
 
             // X: field extraction of the head
             logic [SEP-1:0]  f_lo;
             logic [29:0]     f_hi;
             logic [31:0]     xs0, xs1;
             always_comb begin
-                f_lo = cap_r[0][SEP-1:0];
-                f_hi = cap_r[0][47:SEP];
+                f_lo = cap_head[SEP-1:0];
+                f_hi = cap_head[47:SEP];
             end
             always_ff @(posedge clk) begin
                 xs0 <= chain_sgn_r ? 32'($signed(f_lo)) : 32'(f_lo);
