@@ -347,7 +347,11 @@ VX_CFG_STREAM_NUM_MASTERS = 32
 VX_CFG_TSU_MASTERS_PER_WORKER = 4
 VX_CFG_TSU_BURST_BYTES = 256
 VX_CFG_TSU_MAX_INFLIGHT = 64
-VX_CFG_TSU_SEL_LSB = 28
+# Master select = the pseudo-channel GROUP index: with n masters each master is attached to 32/n consecutive PCs
+# (HBM[i*32/n .. i*32/n + 32/n - 1]), so the select bits start at 28 + log2(32/n) (n=32: 28, 16: 29, 8: 30). A
+# worker's 4 masters then serve 4 different PC groups and each master only ever sees addresses of its own group
+# (phase 0, 2026-11-11: a master alternating between PCs per 256 B burst collapses to 1.64 GB/s).
+VX_CFG_TSU_SEL_LSB = "expr: 28 + clog2(32 / $VX_CFG_STREAM_NUM_MASTERS)"
 # Conditions test the _ENABLE define (present only when on), like every other expr here: _ENABLED is always
 # defined (0/1), so `if $VX_CFG_TSU_ENABLED` emitted `ifdef` true and sized a TSU worker in TSU-off builds.
 VX_CFG_TSU_MASTERS_PER_SOCKET = "expr: up($VX_CFG_STREAM_NUM_MASTERS / up($VX_CFG_NUM_CORES / $VX_CFG_SOCKET_SIZE)) if $VX_CFG_TSU_ENABLE else 0"

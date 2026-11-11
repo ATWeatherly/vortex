@@ -17,7 +17,8 @@ module VX_dxa_core import VX_gpu_pkg::*, VX_dxa_pkg::*; #(
     parameter `STRING INSTANCE_ID = "",
     parameter NUM_REQS = 1,
     parameter GMEM_OUT_PORTS = 1,
-    parameter NUM_STR_PORTS = `UP(SOCKET_STR_PORTS)   // tile-stream masters (1 dummy when the TSU is off)
+    parameter NUM_STR_PORTS = `UP(SOCKET_STR_PORTS),  // tile-stream masters (1 dummy when the TSU is off)
+    parameter STR_MASTER_BASE = 0                     // global m_axi_str index of this socket's master 0
 ) (
     input wire clk,
     input wire reset,
@@ -178,6 +179,37 @@ module VX_dxa_core import VX_gpu_pkg::*, VX_dxa_pkg::*; #(
         .req_out   (worker_req_if)
     );
 
+`ifdef VX_CFG_TCU_SEQ_ENABLE
+    // W-slot landings are steered to worker (blk mod NUM_STR_WORKERS) so every landing into one W slot goes through
+    // ONE worker, which runs its transfers in order: the sequencer's per-slot expectation FIFO relies on landings
+    // into a slot completing in issue order. Other TSU transfers go to the lowest-index idle worker.
+    localparam TSW_W = `UP(`CLOG2(NUM_STR_WORKERS));
+    wire        tsd_valid = dispatch_tsu_if[0].valid;
+    wire        tsd_is_wl = (dispatch_tsu_if[0].desc_data.meta[DXA_DESC_META_DEST_KIND_LSB +: DXA_DESC_META_DEST_KIND_BITS]
+                             == DXA_DEST_KIND_TILEBUF_B);
+    wire [1:0]  tsd_blk   = dispatch_tsu_if[0].req_data.meta[6 +: 2];   // tag {lg_kt, blk, slot} at meta[11:4]
+    wire [TSW_W-1:0] tsd_wl_tgt = TSW_W'(32'(tsd_blk) % NUM_STR_WORKERS);
+    wire [NUM_STR_WORKERS-1:0] tsd_rdy;
+    for (genvar i = 0; i < NUM_STR_WORKERS; ++i) begin : g_tsu_rdy
+        assign tsd_rdy[i] = tsu_worker_req_if[i].ready;
+    end
+    logic [TSW_W-1:0] tsd_free;
+    logic             tsd_any_free;
+    always_comb begin
+        tsd_free = '0;
+        tsd_any_free = 1'b0;
+        for (integer k = NUM_STR_WORKERS - 1; k >= 0; --k) begin
+            if (tsd_rdy[k]) begin tsd_free = TSW_W'(k); tsd_any_free = 1'b1; end
+        end
+    end
+    wire [TSW_W-1:0] tsd_tgt = tsd_is_wl ? tsd_wl_tgt : tsd_free;
+    for (genvar i = 0; i < NUM_STR_WORKERS; ++i) begin : g_tsu_steer
+        assign tsu_worker_req_if[i].valid     = tsd_valid && (tsd_tgt == TSW_W'(i)) && (tsd_is_wl || tsd_any_free);
+        assign tsu_worker_req_if[i].req_data  = dispatch_tsu_if[0].req_data;
+        assign tsu_worker_req_if[i].desc_data = dispatch_tsu_if[0].desc_data;
+    end
+    assign dispatch_tsu_if[0].ready = tsd_is_wl ? tsd_rdy[tsd_wl_tgt] : tsd_any_free;
+`else
     VX_dxa_dispatch #(
         .NUM_INPUTS  (1),
         .NUM_OUTPUTS (NUM_STR_WORKERS)
@@ -187,6 +219,7 @@ module VX_dxa_core import VX_gpu_pkg::*, VX_dxa_pkg::*; #(
         .req_in    (dispatch_tsu_if),
         .req_out   (tsu_worker_req_if)
     );
+`endif
 `else
     VX_dxa_dispatch #(
         .NUM_INPUTS  (1),
@@ -336,7 +369,8 @@ module VX_dxa_core import VX_gpu_pkg::*, VX_dxa_pkg::*; #(
             .WORKER_ID  (NUM_LINE_WORKERS + i),
             .GMEM_TAG_WIDTH (WORKER_GMEM_TAG_WIDTH),
             .STREAM         (1),
-            .NUM_STR_PORTS  (TSU_MASTERS_PER_WORKER)
+            .NUM_STR_PORTS  (TSU_MASTERS_PER_WORKER),
+            .STR_MASTER_BASE(STR_MASTER_BASE + i * TSU_MASTERS_PER_WORKER)
         ) tsu_worker (
             .clk            (clk),
             .reset          (reset),

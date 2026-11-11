@@ -29,7 +29,8 @@ module VX_dxa_worker import VX_gpu_pkg::*, VX_dxa_pkg::*; #(
     parameter GMEM_TAG_WIDTH = SOCKET_MEM_TAG_WIDTH,
     parameter STREAM        = 0,                    // 1: TSU burst worker (stream bus), 0: DXA line worker (socket memory port)
     parameter NUM_STR_PORTS = 1,                    // stream masters owned by this worker (STREAM=1)
-    parameter STR_SEL_LSB   = TSU_SEL_LSB_GRANULE   // granule-address bit selecting the master
+    parameter STR_SEL_LSB   = TSU_SEL_LSB_GRANULE,  // granule-address bit selecting the master
+    parameter STR_MASTER_BASE = 0                   // global index of this worker's master 0 (m_axi_str_<i>)
 ) (
     input wire clk,
     input wire reset,
@@ -53,6 +54,7 @@ module VX_dxa_worker import VX_gpu_pkg::*, VX_dxa_pkg::*; #(
 );
     `UNUSED_SPARAM (INSTANCE_ID)
     `UNUSED_SPARAM (WORKER_ID)
+    `UNUSED_PARAM (STR_MASTER_BASE)   // used only by the VX_CFG_TSU_LINK_GROUP range assert
 
     // Address-generator granule: an L1 line for the line engine, a burst for
     // the stream engine.
@@ -269,10 +271,26 @@ module VX_dxa_worker import VX_gpu_pkg::*, VX_dxa_pkg::*; #(
         localparam STR_SEL_W = `UP(`CLOG2(NUM_STR_PORTS));
         wire [STR_SEL_W-1:0] str_sel;
         if (NUM_STR_PORTS > 1) begin : g_sel
+            // VX_CFG_TSU_SEL_LSB = 28 + log2(32 / STREAM_NUM_MASTERS) must leave the select bits inside the
+            // address (e.g. 4 masters on a 32-bit address would select on bits 31..32: override SEL_LSB).
+            `STATIC_ASSERT(STR_SEL_LSB + STR_SEL_W <= TSU_STR_ADDR_W, ("TSU master-select bits above the stream address"))
             assign str_sel = str_w.req_data.addr[STR_SEL_LSB +: STR_SEL_W];
         end else begin : g_nosel
             assign str_sel = '0;
         end
+
+    `ifdef VX_CFG_TSU_LINK_GROUP
+        // Group-linked platform (platforms.mk TSU_LINK=group): m_axi_str_<i> is linked to HBM[i*g : i*g+g-1]
+        // only, g = 32 / STREAM_NUM_MASTERS, and an address outside that range reads garbage on silicon
+        // (u50wgts_2c200, 2026-11-11). Every burst must lie in the PC group of the master it is routed to:
+        // byte-address group index addr >> (28 + log2 g) == STR_MASTER_BASE + str_sel. Flat-memory rtlsim
+        // cannot see the corruption, so this assert is the pre-silicon check.
+        wire [63:0] str_byte_addr = 64'(str_w.req_data.addr) << `CLOG2(TSU_BURST_BYTES);
+        wire [31:0] str_grp = 32'(str_byte_addr >> `VX_CFG_TSU_SEL_LSB);
+        `RUNTIME_ASSERT(~(str_w.req_valid && str_w.req_ready) || (str_grp == 32'(STR_MASTER_BASE + 32'(str_sel))),
+            ("%t: *** %s TSU burst 0x%0h is in PC group %0d but routes to m_axi_str_%0d (group-linked platform: only its own %0d PCs are reachable)",
+             $time, INSTANCE_ID, str_byte_addr, str_grp, STR_MASTER_BASE + 32'(str_sel), 32 / `VX_CFG_STREAM_NUM_MASTERS))
+    `endif
 
         VX_stream_bus_switch #(
             .NUM_OUTPUTS (NUM_STR_PORTS),
@@ -413,6 +431,9 @@ module VX_dxa_worker import VX_gpu_pkg::*, VX_dxa_pkg::*; #(
                                      && (wl_off[5:0] == 6'd0) && (wl_lgkt >= 4'd6) && (wl_lgkt <= 4'd11)),
             ("%t: *** %s W-slot landing needs full 64 B beats of a 2^lg_kt (64..2048) byte row: off=0x%0h len=%0d oob=%b lgkt=%0d",
              $time, INSTANCE_ID, sw_byte_offset, sw_valid_length, sw_oob, wl_lgkt))
+        `RUNTIME_ASSERT(~wl_fire || ((32'(wl_off) >> wl_lgkt) < 32'd64),
+            ("%t: *** %s W-slot landing offset 0x%0h is past row 63 of a 2^%0d B-row slot (issue with smem operand 0, not __local_mem())",
+             $time, INSTANCE_ID, wl_off, wl_lgkt))
         `RUNTIME_ASSERT(~(sm_release_en && wl_fire), ("%t: *** %s W-landing / smem_wr release collision", $time, INSTANCE_ID))
         `UNUSED_VAR (wl_k)
     end else begin : g_no_wland

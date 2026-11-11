@@ -728,7 +728,8 @@ module VX_socket import VX_gpu_pkg::*, VX_tlb_pkg::*;
         .INSTANCE_ID    (`SFORMATF(("%s-dxa", INSTANCE_ID))),
         .NUM_REQS       (`VX_CFG_SOCKET_SIZE),
         .GMEM_OUT_PORTS (1),
-        .NUM_STR_PORTS  (`UP(SOCKET_STR_PORTS))
+        .NUM_STR_PORTS  (`UP(SOCKET_STR_PORTS)),
+        .STR_MASTER_BASE(SOCKET_ID * SOCKET_STR_PORTS)
     ) dxa_core (
         .clk              (clk),
         .reset            (reset),
