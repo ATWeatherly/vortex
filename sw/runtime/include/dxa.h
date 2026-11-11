@@ -302,8 +302,14 @@ inline int set_tile_geometry(
 // Route an already-programmed descriptor to the tile-stream engine (256 B
 // bursts on the dedicated stream masters) instead of the DXA line engine.
 // Like set_layout, META is re-packed from scratch: pass the same rank,
-// elem_bytes and layout used when programming the slot. DestKind other than
-// LMEM is reserved for the tile-buffer landing of phase 4. Only valid on a
+// elem_bytes and layout used when programming the slot. DestKind::TilebufB
+// (phase 4) lands the transfer in a TCU-sequencer W slot instead of LMEM: the
+// kernel expects it with tbuf.ldws and issues it with the W-slot tag
+// (vx_tsu_wslot_tag, bench docs/spec/tgemm_isa.md); TilebufA stays reserved.
+// TSU descriptor bases are full width (VX_CFG_TSU_ADDR_WIDTH, e.g. 33 bits on
+// the 8 GB U50): program_* writes BASE_HI, so the 64-bit host can point a
+// stream anywhere in device memory while kernel pointers stay 32-bit; the
+// line engine still requires a base below 2^VX_CFG_MEM_ADDR_WIDTH. Only valid on a
 // device built with VX_CFG_TSU_ENABLE (vx_dev_caps / has_tsu); on a device
 // without the TSU the ENGINE bit is ignored and the line engine runs it.
 enum class DestKind : uint32_t {
