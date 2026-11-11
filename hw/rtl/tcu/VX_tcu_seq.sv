@@ -1380,6 +1380,27 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
         end
     end
 `ifndef SYNTHESIS
+    // Hosts that never close the device skip final blocks: also print the cumulative counters each time every
+    // warp's pending count has stayed zero for 4096 cycles after new work (one line per kernel call).
+    reg perf_dirty;
+    reg [63:0] perf_win_cyc;
+    reg [12:0] perf_idle_cnt;
+    always_ff @(posedge clk) begin
+        automatic logic all_idle = 1'b1;
+        for (integer w = 0; w < NW; ++w) if (pending[w] != 16'd0) all_idle = 1'b0;
+        if (reset) begin
+            perf_dirty <= 1'b0; perf_win_cyc <= '0; perf_idle_cnt <= '0;
+        end else begin
+            perf_win_cyc  <= perf_dirty ? perf_win_cyc + 64'd1 : 64'd0;
+            perf_idle_cnt <= (all_idle && !(f_fire && f_async)) ? perf_idle_cnt + 13'd1 : 13'd0;
+            if (f_fire && f_async) perf_dirty <= 1'b1;
+            else if (perf_dirty && perf_idle_cnt[12]) begin
+                perf_dirty <= 1'b0;
+                $display("%s: TCU-SEQ perf: busy_window=%0d tgemms=%0d gemm_k=%0d mac_beats=%0d slot_wait=%0d drain_beats=%0d ldx=%0d ldw=%0d tacc_st=%0d",
+                    INSTANCE_ID, perf_win_cyc, perf_gemms, perf_gemm_k, perf_busy, perf_slot_wait, perf_drain, perf_ldx, perf_ldw, perf_st);
+            end
+        end
+    end
     final begin
         if (perf_gemms != 0 || perf_ldx != 0) begin
             $display("%s: TCU-SEQ perf: tgemms=%0d gemm_k=%0d mac_beats=%0d slot_wait=%0d drain_beats=%0d ldx=%0d ldw=%0d tacc_st=%0d",
