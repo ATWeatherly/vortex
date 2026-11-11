@@ -81,7 +81,12 @@ VX_CFG_PLATFORM_MEMORY_NUM_BANKS = 2
 VX_CFG_PLATFORM_MEMORY_ADDR_WIDTH = "expr: 48 if $VX_CFG_XLEN_64 else 32"
 VX_CFG_PLATFORM_MEMORY_DATA_SIZE = 64
 VX_CFG_PLATFORM_MEMORY_INTERLEAVE = 1
-VX_CFG_PLATFORM_MEMORY_PEAK_BW = 460000 # 460 GB/s
+# Alveo U50: one HBM2 stack, 32 pseudo-channels, 316 GB/s (data sheet). 460 GB/s is the two-stack
+# U280 / U55C figure. Measured on the U50 (hw/syn/xilinx/xrt_tgen/RESULTS.md, branch rtl30/memport-32m): one
+# master per pseudo-channel, 256 B bursts, 16 outstanding (the platform's per-port cap) -> 10.7 GB/s reads /
+# 11.4 writes per PC, linear to 341.9 / 363.5 GB/s with 32 masters (hbm_aclk scaled to 355.6 MHz). One merged
+# port: 13.2 GB/s at 256 B bursts, 4.46 GB/s with 64 B single-beat reads.
+VX_CFG_PLATFORM_MEMORY_PEAK_BW = 316000 # 316 GB/s
 VX_CFG_PLATFORM_CLOCK_RATE = 400
 # DRAM the simulators model behind each memory bank (one channel per bank),
 # as a data sheet gives it: the JEDEC standard, its data rate (MT/s per pin),
