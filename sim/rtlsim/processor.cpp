@@ -188,6 +188,8 @@ public:
     // Model before context: the model holds a reference to the context it was
     // built with, so releasing the context first would leave that reference
     // dangling through the model's own destruction.
+    // Run SystemVerilog final blocks (end-of-run perf summaries) first.
+    device_->final();
     delete device_;
     delete context_;
   }

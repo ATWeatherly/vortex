@@ -98,6 +98,10 @@ ifneq (,$(filter -DVX_CFG_EXT_TCU_ENABLE, $(XCONFIGS)))
 		# No explicit TCU type — VX_config.vh defaults to DPI for simulation
 		RTL_INCLUDE += -I$(RTL_DIR)/tcu/dpi
 	endif
+	# TCU-side sequencer (tgemm ISA) drives the 512-MAC block
+	ifneq (,$(filter -DVX_CFG_TCU_SEQ_ENABLE, $(XCONFIGS)))
+		RTL_INCLUDE += -I$(RTL_DIR)/tcu/mac
+	endif
 endif
 
 # Add DXA extension sources
