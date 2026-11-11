@@ -162,13 +162,20 @@ private:
       }
       ram_.write(static_cast<const uint8_t*>(src), addr, bytes);
     };
+    // DCR accesses also run under g_sim_run_mu: the cache-flush DCR read (VX_DCR_BASE_CACHE_FLUSH) runs
+    // ProcessorImpl::flush_caches(), which ticks the process-wide SimPlatform from this (host / CP) thread. With two
+    // devices in one process that tick raced the OTHER device's background run() on the same platform ("channel is
+    // empty" assertion, hangs, segfaults; seen with stories110M VX_TP_LOCAL_N=2, 2026-11-11). DCR writes take the lock
+    // too: they reach cluster/core objects that the running device's tick may be walking.
     h.vortex_dcr_write = [this](uint32_t addr, uint32_t value) {
+      std::lock_guard<std::mutex> g(g_sim_run_mu);
       processor_.dcr_write(addr, value);
     };
     h.vortex_dcr_read = [this](uint32_t addr, uint32_t tag) -> uint32_t {
-      // Wait for any background processor_.run() to finish before reading DCR.
+      // Wait for any background processor_.run() of THIS device to finish before reading DCR.
       if (future_.valid()) future_.wait();
       uint32_t v = 0;
+      std::lock_guard<std::mutex> g(g_sim_run_mu);
       processor_.dcr_read(addr, tag, &v);
       return v;
     };
