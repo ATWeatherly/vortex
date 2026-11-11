@@ -54,7 +54,11 @@ module VX_dxa_core import VX_gpu_pkg::*, VX_dxa_pkg::*; #(
     localparam NUM_STR_WORKERS  = 0;
 `endif
     localparam NUM_WORKERS      = NUM_LINE_WORKERS + NUM_STR_WORKERS;
+    // VX_CFG_NUM_DXA_CORES=0 (TSU builds only): no line workers -- every descriptor must be a TSU one
+    // (the sequencer-only tgemm path streams W tiles through the TSU and loads X through tbuf.ldx).
+    localparam NUM_LINE_ARR     = `UP(NUM_LINE_WORKERS);
     `STATIC_ASSERT(NUM_WORKERS == DXA_LMEM_NUM_WORKERS, ("DXA worker count mismatch with VX_gpu_pkg"))
+    `STATIC_ASSERT(NUM_LINE_WORKERS > 0 || NUM_STR_WORKERS > 0, ("VX_CFG_NUM_DXA_CORES=0 needs the TSU (VX_CFG_TSU_ENABLE)"))
 
     // ================================================================
     // Descriptor table (single read port, driven by dispatch queue)
@@ -153,7 +157,7 @@ module VX_dxa_core import VX_gpu_pkg::*, VX_dxa_pkg::*; #(
 
     // Engine select: the descriptor's ENGINE meta bit routes a launch to the
     // line workers (DXA) or the tile-stream workers (TSU).
-    VX_dxa_worker_req_if worker_req_if[`VX_CFG_NUM_DXA_CORES]();
+    VX_dxa_worker_req_if worker_req_if[NUM_LINE_ARR]();
 
 `ifdef VX_CFG_TSU_ENABLE
     wire dispatch_is_tsu = (desc_read_data.meta[DXA_DESC_META_ENGINE_LSB] == DXA_ENGINE_TSU);
@@ -170,15 +174,28 @@ module VX_dxa_core import VX_gpu_pkg::*, VX_dxa_pkg::*; #(
     assign dispatch_tsu_if[0].desc_data = dispatch_in_if[0].desc_data;
     assign dispatch_in_if[0].ready = dispatch_is_tsu ? dispatch_tsu_if[0].ready : dispatch_dxa_if[0].ready;
 
+if (NUM_LINE_WORKERS != 0) begin : g_line_dispatch
     VX_dxa_dispatch #(
         .NUM_INPUTS  (1),
-        .NUM_OUTPUTS (`VX_CFG_NUM_DXA_CORES)
+        .NUM_OUTPUTS (NUM_LINE_WORKERS)
     ) issue_dispatch (
         .clk       (clk),
         .reset     (reset),
         .req_in    (dispatch_dxa_if),
         .req_out   (worker_req_if)
     );
+end else begin : g_no_line_dispatch
+    // no line workers: a non-TSU descriptor has nowhere to go (it would hang the issuing warp)
+    assign dispatch_dxa_if[0].ready = 1'b0;
+    assign worker_req_if[0].valid     = 1'b0;
+    assign worker_req_if[0].req_data  = '0;
+    assign worker_req_if[0].desc_data = '0;
+    `UNUSED_VAR (dispatch_dxa_if[0].req_data)
+    `UNUSED_VAR (dispatch_dxa_if[0].desc_data)
+    `UNUSED_VAR (worker_req_if[0].ready)
+    `RUNTIME_ASSERT(~dispatch_dxa_if[0].valid,
+        ("%t: *** %s: DXA (line-worker) descriptor issued on a build without line workers (VX_CFG_NUM_DXA_CORES=0)", $time, INSTANCE_ID))
+end
 
 `ifdef VX_CFG_TCU_SEQ_ENABLE
     // W-slot landings are steered to worker (blk mod NUM_STR_WORKERS) so every landing into one W slot goes through
@@ -236,13 +253,13 @@ module VX_dxa_core import VX_gpu_pkg::*, VX_dxa_pkg::*; #(
     // ================================================================
     // Workers
     // ================================================================
-    localparam GMEM_ARB_SEL_BITS = `ARB_SEL_BITS(`VX_CFG_NUM_DXA_CORES, GMEM_OUT_PORTS);
+    localparam GMEM_ARB_SEL_BITS = `ARB_SEL_BITS(NUM_LINE_ARR, GMEM_OUT_PORTS);
     localparam WORKER_GMEM_TAG_WIDTH = SOCKET_MEM_TAG_WIDTH - GMEM_ARB_SEL_BITS;
 
     VX_mem_bus_if #(
         .DATA_SIZE (`VX_CFG_L1_LINE_SIZE),
         .TAG_WIDTH (WORKER_GMEM_TAG_WIDTH)
-    ) worker_gmem_bus_if[`VX_CFG_NUM_DXA_CORES]();
+    ) worker_gmem_bus_if[NUM_LINE_ARR]();
 
     VX_mem_bus_if #(
         .DATA_SIZE   (DXA_LMEM_WORD_SIZE),
@@ -257,13 +274,13 @@ module VX_dxa_core import VX_gpu_pkg::*, VX_dxa_pkg::*; #(
         .BURST_SIZE (TSU_BURST_BYTES),
         .BEAT_SIZE  (TSU_BEAT_BYTES),
         .TAG_WIDTH  (TSU_STR_TAG_W)
-    ) line_str_dummy_if[`VX_CFG_NUM_DXA_CORES]();
+    ) line_str_dummy_if[NUM_LINE_ARR]();
 
 `ifdef PERF_ENABLE
     dxa_perf_t worker_dxa_perf [NUM_WORKERS];
 `endif
 
-    for (genvar i = 0; i < `VX_CFG_NUM_DXA_CORES; ++i) begin : g_workers
+    for (genvar i = 0; i < NUM_LINE_WORKERS; ++i) begin : g_workers
         assign line_str_dummy_if[i].req_ready = 1'b0;
         assign line_str_dummy_if[i].rsp_valid = 1'b0;
         assign line_str_dummy_if[i].rsp_data  = '0;
@@ -394,19 +411,43 @@ module VX_dxa_core import VX_gpu_pkg::*, VX_dxa_pkg::*; #(
     // ================================================================
     // Output arbitration
     // ================================================================
+if (NUM_LINE_WORKERS != 0) begin : g_gmem_arb
     VX_mem_bus_arb #(
-        .NUM_INPUTS  (`VX_CFG_NUM_DXA_CORES),
+        .NUM_INPUTS  (NUM_LINE_WORKERS),
         .NUM_OUTPUTS (GMEM_OUT_PORTS),
         .DATA_SIZE   (`VX_CFG_L1_LINE_SIZE),
         .TAG_WIDTH   (WORKER_GMEM_TAG_WIDTH),
         .ARBITER     ("R"),
-        .REQ_OUT_BUF ((`VX_CFG_NUM_DXA_CORES > 1) ? 3 : 0)
+        .REQ_OUT_BUF ((NUM_LINE_WORKERS > 1) ? 3 : 0)
     ) gmem_arb (
         .clk        (clk),
         .reset      (reset),
         .bus_in_if  (worker_gmem_bus_if),
         .bus_out_if (gmem_bus_if)
     );
+end else begin : g_gmem_tieoff
+    // no line workers: the socket memory port of the DXA core stays idle
+    assign worker_gmem_bus_if[0].req_ready = 1'b0;
+    assign worker_gmem_bus_if[0].rsp_valid = 1'b0;
+    assign worker_gmem_bus_if[0].rsp_data  = '0;
+    `UNUSED_VAR (worker_gmem_bus_if[0].req_valid)
+    `UNUSED_VAR (worker_gmem_bus_if[0].req_data)
+    `UNUSED_VAR (worker_gmem_bus_if[0].rsp_ready)
+    assign line_str_dummy_if[0].req_ready = 1'b0;
+    assign line_str_dummy_if[0].rsp_valid = 1'b0;
+    assign line_str_dummy_if[0].rsp_data  = '0;
+    `UNUSED_VAR (line_str_dummy_if[0].req_valid)
+    `UNUSED_VAR (line_str_dummy_if[0].req_data)
+    `UNUSED_VAR (line_str_dummy_if[0].rsp_ready)
+    for (genvar i = 0; i < GMEM_OUT_PORTS; ++i) begin : g_port
+        assign gmem_bus_if[i].req_valid = 1'b0;
+        assign gmem_bus_if[i].req_data  = '0;
+        assign gmem_bus_if[i].rsp_ready = 1'b1;
+        `UNUSED_VAR (gmem_bus_if[i].req_ready)
+        `UNUSED_VAR (gmem_bus_if[i].rsp_valid)
+        `UNUSED_VAR (gmem_bus_if[i].rsp_data)
+    end
+end
 
     VX_mem_bus_arb #(
         .NUM_INPUTS  (NUM_WORKERS),
@@ -438,7 +479,7 @@ module VX_dxa_core import VX_gpu_pkg::*, VX_dxa_pkg::*; #(
     end
 
     wire [NUM_WORKERS-1:0] worker_idle;
-    for (genvar i = 0; i < `VX_CFG_NUM_DXA_CORES; ++i) begin : g_worker_idle
+    for (genvar i = 0; i < NUM_LINE_WORKERS; ++i) begin : g_worker_idle
         assign worker_idle[i] = worker_req_if[i].ready;
     end
 `ifdef VX_CFG_TSU_ENABLE
@@ -475,7 +516,7 @@ module VX_dxa_core import VX_gpu_pkg::*, VX_dxa_pkg::*; #(
 `ifdef DBG_TRACE_DXA
     // Interface-array indexing must be elaboration-time constant; use a
     // genvar loop instead of an integer loop.
-    for (genvar w = 0; w < `VX_CFG_NUM_DXA_CORES; ++w) begin : g_trace_worker
+    for (genvar w = 0; w < NUM_LINE_WORKERS; ++w) begin : g_trace_worker
         always @(posedge clk) begin
             if (~reset && worker_req_if[w].valid) begin
                 `TRACE(1, ("%t: %s dispatch-issue: worker=%0d, core=%0d, wid=%0d, meta=0x%0h\n",

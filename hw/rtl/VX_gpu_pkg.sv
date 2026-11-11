@@ -1528,7 +1528,10 @@ package VX_gpu_pkg;
     // Tag width of the WGMMA tile-buffer side; the TCU-side sequencer (tacc.st) shares the TCU LMEM
     // port through one more 2:1 arbiter, which adds a select bit.
     localparam TCU_LMEM_WG_TAG_W = TCU_LMEM_BLK_TAG_W + `ARB_SEL_BITS(TCU_LMEM_NUM_MASTERS, 1);
-`ifdef VX_CFG_TCU_SEQ_ENABLE
+`ifdef VX_CFG_TCU_SEQ_ONLY
+    // sequencer-only: no tile buffers, the sequencer is the port's only master (no 2:1 arbiter)
+    localparam TCU_LMEM_TAG_W = TCU_LMEM_WG_TAG_W;
+`elsif VX_CFG_TCU_SEQ_ENABLE
     localparam TCU_LMEM_TAG_W = TCU_LMEM_WG_TAG_W + 1;
 `else
     localparam TCU_LMEM_TAG_W = TCU_LMEM_WG_TAG_W;
@@ -1536,13 +1539,13 @@ package VX_gpu_pkg;
 
     // LMEM DMA port parameters. (The raster FWD needs no LMEM DMA agent —
     // the raster stamp rides the launch itself.)
-    localparam LMEM_DMA_EN         = (`VX_CFG_EXT_DXA_ENABLED + `VX_CFG_TCU_WGMMA_ENABLED) != 0;
+    localparam LMEM_DMA_EN         = (`VX_CFG_EXT_DXA_ENABLED + `TCU_LMEM_PORT_ENABLED) != 0;
     localparam LMEM_DMA_DATA_SIZE  = `VX_CFG_LMEM_NUM_BANKS * LSU_WORD_SIZE;
     localparam LMEM_DMA_ADDR_WIDTH = `VX_CFG_LMEM_LOG_SIZE - `CLOG2(`VX_CFG_LMEM_NUM_BANKS * LSU_WORD_SIZE);
     localparam LMEM_DMA_ATTR_W     = `MAX(DXA_LMEM_ATTR_W, TCU_LMEM_ATTR_W);
     localparam LMEM_DMA_DXA_IDX    = 0;
     localparam LMEM_DMA_TCU_IDX    = LMEM_DMA_DXA_IDX + `VX_CFG_EXT_DXA_ENABLED;
-    localparam LMEM_DMA_INPUTS     = `VX_CFG_EXT_DXA_ENABLED + `VX_CFG_TCU_WGMMA_ENABLED;
+    localparam LMEM_DMA_INPUTS     = `VX_CFG_EXT_DXA_ENABLED + `TCU_LMEM_PORT_ENABLED;
     localparam LMEM_DMA_IN_TAG_MAX = `MAX(DXA_LMEM_OUT_TAG_W, TCU_LMEM_TAG_W);
     localparam LMEM_DMA_TAG_WIDTH  = LMEM_DMA_IN_TAG_MAX + `ARB_SEL_BITS(LMEM_DMA_INPUTS, 1);
 

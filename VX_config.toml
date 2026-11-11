@@ -329,6 +329,10 @@ VX_CFG_TCU_FEDP2K = false
 # twait / tbuf.ldx / tbuf.ldw / tcfg / tfence on CUSTOM0 funct7=5. Off by default.
 VX_CFG_TCU_SEQ_ENABLE = false
 VX_CFG_NUM_TCU_SEQ_BLOCKS = 4
+# Sequencer-only tensor unit (requires VX_CFG_TCU_SEQ_ENABLE, excludes VX_CFG_TCU_WGMMA_ENABLE): no WMMA/WGMMA
+# FEDP blocks (VX_tcu_core), tile buffers or TCU uop expansion; CUSTOM0 funct7=2 (WMMA/WGMMA) is not decoded.
+# The sequencer keeps the TCU LMEM port (tacc.st). Off by default.
+VX_CFG_TCU_SEQ_ONLY = false
 
 [dxa]
 # Cluster-level DXA engine count, decoupled from cores/socket size.

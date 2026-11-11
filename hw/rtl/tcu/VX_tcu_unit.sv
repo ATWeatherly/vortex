@@ -25,8 +25,8 @@ module VX_tcu_unit import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
     output tcu_perf_t       tcu_perf,
 `endif
 
-`ifdef VX_CFG_TCU_WGMMA_ENABLE
-    // Bank-parallel LMEM read port
+`ifdef TCU_LMEM_PORT_ENABLE
+    // Bank-parallel LMEM port (WGMMA tile buffers and/or the sequencer's tacc.st)
     VX_mem_bus_if.master     tcu_lmem_if,
 `endif
 
@@ -81,6 +81,72 @@ module VX_tcu_unit import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
     VX_result_if #(
         .data_t (tcu_result_t)
     ) per_block_result_if[BLOCK_SIZE]();
+
+`ifdef VX_CFG_TCU_SEQ_ONLY
+    // -----------------------------------------------------------------------
+    // Sequencer-only tensor unit (VX_CFG_TCU_SEQ_ONLY): every TCU op is a sequencer command (the decoder
+    // does not produce WMMA / WGMMA / TCU_LD), so the lane-dispatch slices feed VX_tcu_seq directly and its
+    // commit packets are the only results. No VX_tcu_core FEDP blocks, tile buffers or LMEM arbiter.
+    // -----------------------------------------------------------------------
+    wire [BLOCK_SIZE-1:0] seq_cmd_valid, seq_cmd_ready;
+    tcu_execute_t         seq_cmd_data [BLOCK_SIZE];
+    wire [BLOCK_SIZE-1:0] seq_res_valid, seq_res_ready;
+    tcu_result_t          seq_res_data [BLOCK_SIZE];
+
+    for (genvar bi = 0; bi < BLOCK_SIZE; ++bi) begin : g_seq_only
+        assign seq_cmd_valid[bi] = per_block_execute_if[bi].valid;
+        assign seq_cmd_data[bi]  = per_block_execute_if[bi].data;
+        assign per_block_execute_if[bi].ready = seq_cmd_ready[bi];
+        assign per_block_result_if[bi].valid = seq_res_valid[bi];
+        assign per_block_result_if[bi].data  = seq_res_data[bi];
+        assign seq_res_ready[bi] = per_block_result_if[bi].ready;
+        `RUNTIME_ASSERT(~(per_block_execute_if[bi].valid && per_block_execute_if[bi].data.op_type != INST_TCU_SEQ),
+            ("%t: *** %s: non-sequencer TCU op %0d on a VX_CFG_TCU_SEQ_ONLY build (block %0d)", $time, INSTANCE_ID,
+             per_block_execute_if[bi].data.op_type, bi))
+    end
+
+    VX_tcu_seq #(
+        .INSTANCE_ID (`SFORMATF(("%s-seq", INSTANCE_ID)))
+    ) tcu_seq (
+        .clk           (clk),
+        .reset         (reset),
+        .cmd_valid     (seq_cmd_valid),
+        .cmd_data      (seq_cmd_data),
+        .cmd_ready     (seq_cmd_ready),
+        .res_valid     (seq_res_valid),
+        .res_data      (seq_res_data),
+        .res_ready     (seq_res_ready),
+        .unlock_valid  (sched_unlock_if.valid),
+        .unlock_wid    (sched_unlock_if.wid),
+        .store_drained (store_drained),
+    `ifdef VX_CFG_TSU_ENABLE
+        .wl_valid      (wl_valid),
+        .wl_ready      (wl_ready),
+        .wl_beat       (wl_beat),
+        .wl_done_valid (wl_done_valid),
+        .wl_done       (wl_done),
+    `endif
+        .mem_if        (tcu_mem_if),
+        .lmem_if       (tcu_lmem_if)
+    );
+
+    VX_lane_gather #(
+        .BLOCK_SIZE (BLOCK_SIZE),
+        .NUM_LANES  (NUM_LANES),
+        .OUT_BUF    (3)
+    ) lane_gather (
+        .clk       (clk),
+        .reset     (reset),
+        .result_if (per_block_result_if),
+        .commit_if (commit_if)
+    );
+
+`ifdef PERF_ENABLE
+    // legacy-datapath counters read as zero (the sequencer has its own counter class)
+    assign tcu_perf = '0;
+`endif
+
+`else // !VX_CFG_TCU_SEQ_ONLY
 
     // -----------------------------------------------------------------------
     // Split each per_block_execute_if between two consumers:
@@ -504,5 +570,7 @@ module VX_tcu_unit import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
 `endif
 
 `undef TCU_WG_LMEM_IF
+
+`endif // VX_CFG_TCU_SEQ_ONLY
 
 endmodule

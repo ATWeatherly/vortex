@@ -124,7 +124,16 @@ module VX_uop_sequencer import
         .uop_count (uop_out_count[UOP_PACKLD])
     );
 
-`ifdef VX_CFG_EXT_TCU_ENABLE
+`ifdef VX_CFG_TCU_SEQ_ONLY
+    // ------------------------------------------------------------------
+    // Sequencer-only TCU (VX_CFG_TCU_SEQ_ONLY): no MMA ops are decoded and sequencer commands are single
+    // uops, so the TCU expander slot is tied off (constant-zero select; synthesis removes the slot).
+    // ------------------------------------------------------------------
+    assign uop_in_valid[UOP_TCU]  = 1'b0;
+    assign uop_out_data[UOP_TCU]  = '0;
+    assign uop_out_count[UOP_TCU] = UOP_CTR_W'(1);
+    `UNUSED_VAR ({uop_in_start[UOP_TCU], uop_in_next[UOP_TCU]})
+`elsif VX_CFG_EXT_TCU_ENABLE
     // ------------------------------------------------------------------
     // TCU uop expander
     // ------------------------------------------------------------------

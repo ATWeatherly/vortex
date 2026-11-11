@@ -126,8 +126,32 @@
         `error "VX_CFG_TCU_SEQ_ENABLE v1 cannot be combined with the RTU (shared scheduler unlock port)"
     `endif
     `ifndef VX_CFG_TCU_WGMMA_ENABLE
-        `error "VX_CFG_TCU_SEQ_ENABLE requires VX_CFG_TCU_WGMMA_ENABLE (TCU LMEM DMA port)"
+    `ifndef VX_CFG_TCU_SEQ_ONLY
+        `error "VX_CFG_TCU_SEQ_ENABLE requires VX_CFG_TCU_WGMMA_ENABLE (TCU LMEM DMA port) or VX_CFG_TCU_SEQ_ONLY"
     `endif
+    `endif
+`endif
+// Sequencer-only tensor unit: the legacy WMMA/WGMMA datapath (VX_tcu_core FEDP blocks, tile buffers, TCU uop
+// expansion) is not built; the sequencer owns the TCU LMEM port by itself.
+`ifdef VX_CFG_TCU_SEQ_ONLY
+    `ifndef VX_CFG_TCU_SEQ_ENABLE
+        `error "VX_CFG_TCU_SEQ_ONLY requires VX_CFG_TCU_SEQ_ENABLE"
+    `endif
+    `ifdef VX_CFG_TCU_WGMMA_ENABLE
+        `error "VX_CFG_TCU_SEQ_ONLY excludes VX_CFG_TCU_WGMMA_ENABLE (no WGMMA datapath)"
+    `endif
+`endif
+// The TCU LMEM DMA port (TCU -> VX_mem_unit LMEM DMA arbiter): WGMMA tile buffers and/or the sequencer.
+// Internal derived macro -- not a VX_CFG_* knob.
+`ifdef VX_CFG_TCU_WGMMA_ENABLE
+    `define TCU_LMEM_PORT_ENABLE
+`elsif VX_CFG_TCU_SEQ_ONLY
+    `define TCU_LMEM_PORT_ENABLE
+`endif
+`ifdef TCU_LMEM_PORT_ENABLE
+    `define TCU_LMEM_PORT_ENABLED 1
+`else
+    `define TCU_LMEM_PORT_ENABLED 0
 `endif
 `ifdef TCU_META_ENABLE
     `define TCU_MEMCLIENT_ENABLE
