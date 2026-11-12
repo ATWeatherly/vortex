@@ -356,6 +356,10 @@ VX_CFG_STREAM_NUM_MASTERS = 32
 VX_CFG_TSU_MASTERS_PER_WORKER = 4
 VX_CFG_TSU_BURST_BYTES = 256
 VX_CFG_TSU_MAX_INFLIGHT = 64
+# Sequencer builds (VX_CFG_TCU_SEQ_ENABLE): stream workers only land W slots (TILEBUF_B descriptors, tbuf.ldws);
+# their LMEM writer (VX_dxa_smem_wr) is removed (~5.5k LUT per worker). A TSU descriptor to LMEM is then a fatal
+# RUNTIME_ASSERT. Off by default.
+VX_CFG_TSU_WLAND_ONLY = false
 # Master select = the pseudo-channel GROUP index: with n masters each master is attached to 32/n consecutive PCs
 # (HBM[i*32/n .. i*32/n + 32/n - 1]), so the select bits start at 28 + log2(32/n) (n=32: 28, 16: 29, 8: 30). A
 # worker's 4 masters then serve 4 different PC groups and each master only ever sees addresses of its own group
