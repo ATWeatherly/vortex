@@ -834,6 +834,12 @@ VX_CSR_MPM_DXA_TSU_BURSTS  = 0xB09  # tile-stream bursts issued (all stream mast
 VX_CSR_MPM_DXA_TSU_BURSTS_H  = 0xB89
 VX_CSR_MPM_DXA_TSU_BYTES  = 0xB0A  # bytes requested by tile-stream bursts
 VX_CSR_MPM_DXA_TSU_BYTES_H  = 0xB8A
+VX_CSR_MPM_DXA_TSU_LAND_BEATS  = 0xB0B  # W-slot landing beats accepted by the sequencer (64 B each)
+VX_CSR_MPM_DXA_TSU_LAND_BEATS_H  = 0xB8B
+VX_CSR_MPM_DXA_TSU_LAND_STALL  = 0xB0C  # cycles a landing beat waited for the sequencer (0 with the start gate)
+VX_CSR_MPM_DXA_TSU_LAND_STALL_H  = 0xB8C
+VX_CSR_MPM_DXA_TSU_MAX_OUTST  = 0xB0D  # max stream bursts outstanding in one worker (high-water mark)
+VX_CSR_MPM_DXA_TSU_MAX_OUTST_H  = 0xB8D
 
 [csr_mpm_tcu]
 # PERF: WGMMA tile-buffer (per-core; summed across blocks)
@@ -866,6 +872,38 @@ VX_CSR_MPM_TCU_WG_STARVE      = 0xB0F  # no uop presented while the block is mid
 VX_CSR_MPM_TCU_WG_STARVE_H    = 0xB8F
 VX_CSR_MPM_TCU_WG_IDLE        = 0xB10  # no uop presented, block between instructions
 VX_CSR_MPM_TCU_WG_IDLE_H      = 0xB90
+# TCU sequencer (VX_CFG_TCU_SEQ_ENABLE, PERF_ENABLE; per core, summed over blocks). Block-cycles not in exec/wait/st/xld/twait
+# are SIMT / idle: 4 x mcycle minus their sum.
+VX_CSR_MPM_TCU_SEQ_MAC = 0xB11  # block-cycles a MAC beat fires (tgemm k bytes)
+VX_CSR_MPM_TCU_SEQ_MAC_H = 0xB91
+VX_CSR_MPM_TCU_SEQ_EXEC = 0xB12  # block-cycles a tgemm is in the fill/MAC/drain pipe
+VX_CSR_MPM_TCU_SEQ_EXEC_H = 0xB92
+VX_CSR_MPM_TCU_SEQ_WAIT_X = 0xB13  # block-cycles the queued tgemm waits for its X slot
+VX_CSR_MPM_TCU_SEQ_WAIT_X_H = 0xB93
+VX_CSR_MPM_TCU_SEQ_WAIT_W = 0xB14  # ... for its W slot (landing / ldw)
+VX_CSR_MPM_TCU_SEQ_WAIT_W_H = 0xB94
+VX_CSR_MPM_TCU_SEQ_WAIT_A = 0xB15  # ... for its acc tile (tacc.st)
+VX_CSR_MPM_TCU_SEQ_WAIT_A_H = 0xB95
+VX_CSR_MPM_TCU_SEQ_LAND_WAIT = 0xB16  # block-cycles the fill waits for a partly landed slot (watermark)
+VX_CSR_MPM_TCU_SEQ_LAND_WAIT_H = 0xB96
+VX_CSR_MPM_TCU_SEQ_EARLY = 0xB17  # tgemms started on a partly landed slot
+VX_CSR_MPM_TCU_SEQ_EARLY_H = 0xB97
+VX_CSR_MPM_TCU_SEQ_ST_CYC = 0xB18  # block-cycles no tgemm, tacc.st queued/active (incl. STF)
+VX_CSR_MPM_TCU_SEQ_ST_CYC_H = 0xB98
+VX_CSR_MPM_TCU_SEQ_XLD_CYC = 0xB19  # block-cycles no tgemm/st, X load queued/active
+VX_CSR_MPM_TCU_SEQ_XLD_CYC_H = 0xB99
+VX_CSR_MPM_TCU_SEQ_TWAIT_CYC = 0xB1A  # block-cycles none of the above, a warp parked in twait/tfence
+VX_CSR_MPM_TCU_SEQ_TWAIT_CYC_H = 0xB9A
+VX_CSR_MPM_TCU_SEQ_N_GEMM = 0xB1B  # tgemm.i8 completed
+VX_CSR_MPM_TCU_SEQ_N_GEMM_H = 0xB9B
+VX_CSR_MPM_TCU_SEQ_N_LDX = 0xB1C  # tbuf.ldx completed
+VX_CSR_MPM_TCU_SEQ_N_LDX_H = 0xB9C
+VX_CSR_MPM_TCU_SEQ_N_LDW = 0xB1D  # tbuf.ldw completed
+VX_CSR_MPM_TCU_SEQ_N_LDW_H = 0xB9D
+VX_CSR_MPM_TCU_SEQ_N_LDWS = 0xB1E  # tbuf.ldws landings completed
+VX_CSR_MPM_TCU_SEQ_N_LDWS_H = 0xB9E
+VX_CSR_MPM_TCU_SEQ_N_ST = 0xB1F  # tacc.st completed
+VX_CSR_MPM_TCU_SEQ_N_ST_H = 0xB9F
 
 [csr_mpm_tex]
 # PERF: texture unit (per-core; summed across blocks)

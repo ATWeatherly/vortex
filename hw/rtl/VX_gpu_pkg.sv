@@ -1286,6 +1286,26 @@ package VX_gpu_pkg;
         logic [PERF_CTR_BITS-1:0] wg_starve;          // no uop presented, block mid-WGMMA expansion
         logic [PERF_CTR_BITS-1:0] wg_idle;            // no uop presented, block between instructions
     } tcu_perf_t;
+`ifdef VX_CFG_TCU_SEQ_ENABLE
+    // TCU sequencer (class TCU, VX_CSR_MPM_TCU_SEQ_*): per core, block-summed
+    typedef struct packed {
+        logic [PERF_CTR_BITS-1:0] mac;         // block-cycles a MAC beat fires
+        logic [PERF_CTR_BITS-1:0] exec;        // block-cycles a tgemm is in the fill / MAC / drain pipe
+        logic [PERF_CTR_BITS-1:0] wait_x;      // queued tgemm waits for its X slot
+        logic [PERF_CTR_BITS-1:0] wait_w;      // ... for its W slot
+        logic [PERF_CTR_BITS-1:0] wait_a;      // ... for its acc tile
+        logic [PERF_CTR_BITS-1:0] land_wait;   // fill waits for a partly landed slot
+        logic [PERF_CTR_BITS-1:0] early;       // tgemms started on a partly landed slot
+        logic [PERF_CTR_BITS-1:0] st_cyc;      // no tgemm, tacc.st queued / active
+        logic [PERF_CTR_BITS-1:0] xld_cyc;     // no tgemm / st, X load queued / active
+        logic [PERF_CTR_BITS-1:0] tw_cyc;      // none of the above, a warp parked in twait / tfence
+        logic [PERF_CTR_BITS-1:0] n_gemm;
+        logic [PERF_CTR_BITS-1:0] n_ldx;
+        logic [PERF_CTR_BITS-1:0] n_ldw;
+        logic [PERF_CTR_BITS-1:0] n_ldws;
+        logic [PERF_CTR_BITS-1:0] n_st;
+    } tcu_seq_perf_t;
+`endif
 `endif
 
     typedef struct packed {
@@ -1304,6 +1324,9 @@ package VX_gpu_pkg;
         logic [PERF_CTR_BITS-1:0] noslot_stalls;
         logic [PERF_CTR_BITS-1:0] tsu_bursts;      // tile-stream bursts issued (all stream masters)
         logic [PERF_CTR_BITS-1:0] tsu_bytes;       // bytes requested by those bursts
+        logic [PERF_CTR_BITS-1:0] tsu_land_beats;  // W-slot landing beats accepted by the sequencer
+        logic [PERF_CTR_BITS-1:0] tsu_land_stall;  // cycles a landing beat waited for the sequencer
+        logic [PERF_CTR_BITS-1:0] tsu_max_outst;   // max bursts outstanding in one worker
     } dxa_perf_t;
 `endif
 
@@ -1449,6 +1472,9 @@ package VX_gpu_pkg;
         issue_perf_t              issue;
     `ifdef VX_CFG_EXT_TCU_ENABLE
         tcu_perf_t                tcu;
+    `ifdef VX_CFG_TCU_SEQ_ENABLE
+        tcu_seq_perf_t            tcu_seq;
+    `endif
     `endif
     `ifdef VX_CFG_VM_ENABLE
         mmu_perf_t                mmu;
