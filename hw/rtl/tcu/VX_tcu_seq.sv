@@ -12,6 +12,7 @@
 // limitations under the License.
 
 `include "VX_define.vh"
+`include "VX_fpu_define.vh"   // FP_FLAGS_BITS (VX_CFG_TCU_SEQ_STF dequant unit): per-file preprocessing (gen_sources -P) needs it here
 
 `ifdef VX_CFG_TCU_SEQ_ENABLE
 
@@ -927,10 +928,38 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
     // the fp32 dequant store unit (tacc.st fp) takes the LSU client port when no loader requests it
     wire           dqr_valid;
     lsu_req_data_t dqr_req;
+`ifdef VX_CFG_TCU_SEQ_LDREQ_NOREG
     assign mem_if.req_valid = ld_any || dqr_valid;
     assign mem_if.req_data  = ld_any ? lq_req[ld_sel] : dqr_req;
     wire ld_req_fire = ld_any && mem_if.req_ready;
     wire dqr_fire    = ~ld_any && dqr_valid && mem_if.req_ready;
+`else
+    // Loader request register (default): the loaders' requests (slot loads only, never stores) pass a 2-entry
+    // skid buffer before the LSU client port, so the loader address cone (queue head, row x stride, lane
+    // addresses) does not chain into the LSU scheduler's request queue in one cycle (2-core post-place critical
+    // path at 150 MHz). The dequant unit's stores keep the direct path (their acceptance is their completion);
+    // they still yield to the loaders: the port goes to them only while the buffer is empty.
+    wire           lb_valid, lb_ready_in;
+    lsu_req_data_t lb_req;
+    VX_elastic_buffer #(
+        .DATAW   ($bits(lsu_req_data_t)),
+        .SIZE    (2),
+        .OUT_REG (1)
+    ) ld_req_buf (
+        .clk       (clk),
+        .reset     (reset),
+        .valid_in  (ld_any),
+        .ready_in  (lb_ready_in),
+        .data_in   (lq_req[ld_sel]),
+        .data_out  (lb_req),
+        .ready_out (mem_if.req_ready),
+        .valid_out (lb_valid)
+    );
+    assign mem_if.req_valid = lb_valid || dqr_valid;
+    assign mem_if.req_data  = lb_valid ? lb_req : dqr_req;
+    wire ld_req_fire = ld_any && lb_ready_in;
+    wire dqr_fire    = ~lb_valid && dqr_valid && mem_if.req_ready;
+`endif
     for (genvar l = 0; l < NLD; ++l) begin : g_lq_grant
         assign lq_grant[l] = ld_req_fire && (ld_sel == LID_RR_W'(l));
     end
