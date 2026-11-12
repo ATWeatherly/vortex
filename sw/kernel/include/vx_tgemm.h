@@ -35,6 +35,11 @@ extern "C" {
 #define VX_TCFG_W_STRIDE    5
 #define VX_TCFG_ACC_STRIDE  6
 #define VX_TCFG_NOTIFY_BAR  7
+// tacc.st fp32 dequant (VX_CFG_TCU_SEQ_STF): per-weight-row scales (64 fp32), per-batch-column scales (8 fp32),
+// {mlim[11:8], nlim[6:0]} valid batch columns / weight rows of the tile; ACC_STRIDE = C row (weight row) stride, bytes
+#define VX_TCFG_WSCALE      8
+#define VX_TCFG_XSCALE      9
+#define VX_TCFG_LIMITS      10
 
 #define VX_TCFG_W_ROWMAJOR  0
 #define VX_TCFG_W_SIMT8     1
@@ -52,6 +57,12 @@ static inline uint32_t vx_tgemm_ctl(uint32_t acc_tile, uint32_t x_slot, uint32_t
 
 static inline uint32_t vx_tacc_ctl(uint32_t acc_tile, uint32_t n_mode, uint32_t notify) {
   return (acc_tile & 0x3f) | ((n_mode & 3) << 6) | ((notify & 1) << 8);
+}
+
+// tacc.st ctl bit 9: write the tile as fp32 C[dst + n*ACC_STRIDE + 4m] = 0.0f + ((float)acc[m][n] * ws[n]) * xs[m]
+// to global memory (VX_CFG_TCU_SEQ_STF), instead of the int32 tile to LMEM
+static inline uint32_t vx_tacc_ctl_fp(uint32_t acc_tile, uint32_t n_mode) {
+  return vx_tacc_ctl(acc_tile, n_mode, 0) | (1u << 9);
 }
 
 static inline void vx_tcfg(uint32_t field, uint32_t value) {
