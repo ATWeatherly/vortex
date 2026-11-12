@@ -411,22 +411,53 @@ module VX_dxa_worker import VX_gpu_pkg::*, VX_dxa_pkg::*; #(
         wire [DXA_WLAND_OFF_W-1:0] wl_off = DXA_WLAND_OFF_W'(sw_smem_byte_addr);
         wire [DXA_WLAND_OFF_W-1:0] wl_kmask = (DXA_WLAND_OFF_W'(1) << wl_lgkt) - DXA_WLAND_OFF_W'(1);
         wire [DXA_WLAND_OFF_W-1:0] wl_k = wl_off & wl_kmask;
-        wire wl_fire = wl_valid && wl_ready;
         reg  wl_last_seen_r, wl_done_r;
-        assign wl_valid      = sw_valid && wl_mode;
-        assign sm_valid      = sw_valid && ~wl_mode;
-        assign sw_ready      = wl_mode ? wl_ready : sm_ready;
-        assign wl_beat.blk   = setup_params.wl_tag[3:2];
-        assign wl_beat.slot  = setup_params.wl_tag[1:0];
+        dxa_wland_beat_t wl_beat_w;
+        assign wl_beat_w.blk   = setup_params.wl_tag[3:2];
+        assign wl_beat_w.slot  = setup_params.wl_tag[1:0];
         // row-major image: byte o -> row o >> lg_kt, segment (o & (kt-1)) >> 6; SIMT8 image (tile-local, 512 B per
         // 8 B k-chunk of 64 rows): byte o -> chunk o >> 9, rows ((o >> 3) & 63) .. +7
         wire wl_simt = setup_params.wl_tag[8];
-        assign wl_beat.simt  = wl_simt;
-        assign wl_beat.row   = wl_simt ? 6'(wl_off >> 3) : 6'(wl_off >> wl_lgkt);
-        assign wl_beat.seg   = wl_simt ? 8'(wl_off >> 9) : 8'(wl_k >> 6);
-        assign wl_beat.data  = 512'(sw_data);
-        assign sw_release_en  = sm_release_en || wl_fire;
-        assign sw_release_tag = wl_fire ? sw_tag : sm_release_tag;
+        assign wl_beat_w.simt  = wl_simt;
+        assign wl_beat_w.row   = wl_simt ? 6'(wl_off >> 3) : 6'(wl_off >> wl_lgkt);
+        assign wl_beat_w.seg   = wl_simt ? 8'(wl_off >> 9) : 8'(wl_k >> 6);
+        assign wl_beat_w.data  = 512'(sw_data);
+        assign sm_valid      = sw_valid && ~wl_mode;
+        // wl_take: a beat leaves the burst tracker (its burst-slot beat is released). wl_empty: no accepted beat
+        // is still on its way to the sequencer (the transfer may complete).
+        wire wl_take;
+        wire wl_empty;
+    `ifdef VX_CFG_TSU_WLAND_NOREG
+        assign wl_valid  = sw_valid && wl_mode;
+        assign wl_beat   = wl_beat_w;
+        assign sw_ready  = wl_mode ? wl_ready : sm_ready;
+        assign wl_take   = wl_valid && wl_ready;
+        assign wl_empty  = 1'b1;
+    `else
+        // Landing register (default): a 2-entry skid buffer between the burst tracker and the sequencer's W-bank
+        // write ports, so the slot-table read / beat-window / landing-address cone (the 2-core synth critical path)
+        // and the sequencer's wl_ready cone do not chain into one cycle. Full throughput, +1 cycle per beat.
+        wire wq_ready_in;
+        assign wl_take  = sw_valid && wl_mode && wq_ready_in;
+        assign sw_ready = wl_mode ? wq_ready_in : sm_ready;
+        VX_elastic_buffer #(
+            .DATAW   ($bits(dxa_wland_beat_t)),
+            .SIZE    (2),
+            .OUT_REG (1)
+        ) wl_buf (
+            .clk       (clk),
+            .reset     (reset),
+            .valid_in  (sw_valid && wl_mode),
+            .ready_in  (wq_ready_in),
+            .data_in   (wl_beat_w),
+            .data_out  (wl_beat),
+            .ready_out (wl_ready),
+            .valid_out (wl_valid)
+        );
+        assign wl_empty = ~wl_valid;
+    `endif
+        assign sw_release_en  = sm_release_en || wl_take;
+        assign sw_release_tag = wl_take ? sw_tag : sm_release_tag;
         assign wl_done_valid  = wl_done_r;
         assign wl_done.blk    = setup_params.wl_tag[3:2];
         assign wl_done.slot   = setup_params.wl_tag[1:0];
@@ -437,21 +468,21 @@ module VX_dxa_worker import VX_gpu_pkg::*, VX_dxa_pkg::*; #(
                 wl_done_r      <= 1'b0;
             end else begin
                 wl_done_r <= 1'b0;
-                if (wl_fire && sw_last) wl_last_seen_r <= 1'b1;
-                if (wl_mode && transfer_active && wl_last_seen_r && (sw_outstanding == '0) && ~wl_done_r) begin
+                if (wl_take && sw_last) wl_last_seen_r <= 1'b1;
+                if (wl_mode && transfer_active && wl_last_seen_r && (sw_outstanding == '0) && wl_empty && ~wl_done_r) begin
                     wl_done_r      <= 1'b1;
                     wl_last_seen_r <= 1'b0;
                 end
             end
         end
-        `RUNTIME_ASSERT(~wl_fire || (~sw_oob && (sw_byte_offset == '0) && (32'(sw_valid_length) == 32'(CL_BYTES))
+        `RUNTIME_ASSERT(~wl_take || (~sw_oob && (sw_byte_offset == '0) && (32'(sw_valid_length) == 32'(CL_BYTES))
                                      && (wl_off[5:0] == 6'd0) && (wl_lgkt >= 4'd6) && (wl_lgkt <= 4'd11)),
             ("%t: *** %s W-slot landing needs full 64 B beats of a 2^lg_kt (64..2048) byte row: off=0x%0h len=%0d oob=%b lgkt=%0d",
              $time, INSTANCE_ID, sw_byte_offset, sw_valid_length, sw_oob, wl_lgkt))
-        `RUNTIME_ASSERT(~wl_fire || ((32'(wl_off) >> wl_lgkt) < 32'd64),
+        `RUNTIME_ASSERT(~wl_take || ((32'(wl_off) >> wl_lgkt) < 32'd64),
             ("%t: *** %s W-slot landing offset 0x%0h is past row 63 of a 2^%0d B-row slot (issue with the LMEM base csr LOCAL_MEM_BASE, not __local_mem() or 0)",
              $time, INSTANCE_ID, wl_off, wl_lgkt))
-        `RUNTIME_ASSERT(~(sm_release_en && wl_fire), ("%t: *** %s W-landing / smem_wr release collision", $time, INSTANCE_ID))
+        `RUNTIME_ASSERT(~(sm_release_en && wl_take), ("%t: *** %s W-landing / smem_wr release collision", $time, INSTANCE_ID))
         `UNUSED_VAR (wl_k)
     end else begin : g_no_wland
         assign wl_valid       = 1'b0;
