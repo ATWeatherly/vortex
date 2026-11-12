@@ -29,7 +29,7 @@ module VX_mem_unit import VX_gpu_pkg::*; #(
     VX_txbar_bus_if.master  dxa_txbar_bus_if,
 `endif
 
-`ifdef VX_CFG_TCU_WGMMA_ENABLE
+`ifdef TCU_LMEM_PORT_ENABLE
     // TCU LMEM read port
     VX_mem_bus_if.slave     tcu_lmem_if,
 `endif
@@ -161,7 +161,7 @@ module VX_mem_unit import VX_gpu_pkg::*; #(
         // address translation is needed here.
         `ASSIGN_VX_MEM_BUS_IF_EX (dma_arb_in_if[LMEM_DMA_DXA_IDX], dxa_lmem_bus_if, LMEM_DMA_IN_TAG_W, DXA_LMEM_OUT_TAG_W, UUID_WIDTH);
     `endif
-    `ifdef VX_CFG_TCU_WGMMA_ENABLE
+    `ifdef TCU_LMEM_PORT_ENABLE
         `ASSIGN_VX_MEM_BUS_IF_EX (dma_arb_in_if[LMEM_DMA_TCU_IDX], tcu_lmem_if, LMEM_DMA_IN_TAG_W, TCU_LMEM_TAG_W, UUID_WIDTH);
     `endif
 

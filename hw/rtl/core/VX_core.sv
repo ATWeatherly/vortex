@@ -147,7 +147,7 @@ module VX_core import VX_gpu_pkg::*, VX_tlb_pkg::*; #(
         .TAG_WIDTH (ICACHE_TAG_WIDTH_BASE)
     ) mmu_icache_if[1]();
 
-`ifdef VX_CFG_TCU_WGMMA_ENABLE
+`ifdef TCU_LMEM_PORT_ENABLE
     localparam TCU_LMEM_BANK_ADDR_W = `VX_CFG_LMEM_LOG_SIZE - `CLOG2(LSU_WORD_SIZE) - `CLOG2(`VX_CFG_LMEM_NUM_BANKS);
     VX_mem_bus_if #(
         .DATA_SIZE  (`VX_CFG_LMEM_NUM_BANKS * LSU_WORD_SIZE),
@@ -360,7 +360,7 @@ module VX_core import VX_gpu_pkg::*, VX_tlb_pkg::*; #(
 
         .dcr_csr_if     (dcr_csr_if),
 
-    `ifdef VX_CFG_TCU_WGMMA_ENABLE
+    `ifdef TCU_LMEM_PORT_ENABLE
         .tcu_lmem_if    (tcu_lmem_if),
     `endif
     `ifdef VX_CFG_EXT_DXA_ENABLE
@@ -462,7 +462,7 @@ module VX_core import VX_gpu_pkg::*, VX_tlb_pkg::*; #(
         .lmem_perf     (lmem_perf),
         .coalescer_perf(coalescer_perf),
     `endif
-    `ifdef VX_CFG_TCU_WGMMA_ENABLE
+    `ifdef TCU_LMEM_PORT_ENABLE
         .tcu_lmem_if   (tcu_lmem_if),
     `endif
     `ifdef VX_CFG_EXT_DXA_ENABLE

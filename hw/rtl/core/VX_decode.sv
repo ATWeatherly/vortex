@@ -674,6 +674,7 @@ module VX_decode import
                         op_type = INST_OP_BITS'(funct3);
                     end
                 `ifdef VX_CFG_EXT_TCU_ENABLE
+                `ifndef VX_CFG_TCU_SEQ_ONLY   // sequencer-only TCU: WMMA / WGMMA / TCU_LD are not decoded
                     7'h02: begin
                         ex_type = EX_TCU;
                     `ifdef TCU_META_ENABLE
@@ -747,6 +748,7 @@ module VX_decode import
                             `USED_FREG (rs3);
                         end
                     end
+                `endif
                 `endif
                 `ifdef VX_CFG_TCU_SEQ_ENABLE
                     7'h05: begin // TCU-side sequencer (tgemm ISA): funct3 0 tgemm.i8, 1 tacc.st, 2 twait,
@@ -968,6 +970,14 @@ module VX_decode import
     ///////////////////////////////////////////////////////////////////////////
 
     wire fetch_fire = fetch_if.valid && fetch_if.ready;
+
+`ifdef VX_CFG_TCU_SEQ_ONLY
+    // A WMMA / WGMMA / TCU_LD (CUSTOM0 funct7=2) reaching decode on a sequencer-only build has no datapath: it
+    // decodes as a no-op on hardware; in simulation it is a hard error so a kernel that still uses one is caught.
+    `RUNTIME_ASSERT(~(fetch_fire && opcode == INST_EXT1 && funct7 == 7'h02),
+        ("%t: *** %s: WMMA/WGMMA/TCU_LD instruction on a VX_CFG_TCU_SEQ_ONLY build: wid=%0d PC=0x%0h instr=0x%0h",
+         $time, INSTANCE_ID, fetch_if.data.wid, to_fullPC(fetch_if.data.PC), instr))
+`endif
 
     // Register decode_sched_if to break the long combinational path.
     reg                  decode_sched_valid_r;

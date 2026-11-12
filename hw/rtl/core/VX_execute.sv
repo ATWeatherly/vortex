@@ -86,7 +86,7 @@ module VX_execute import VX_gpu_pkg::*; #(
     VX_branch_ctl_if.master branch_ctl_if [`VX_CFG_NUM_ALU_BLOCKS],
     VX_warp_ctl_if.master   warp_ctl_if,
 
-`ifdef VX_CFG_TCU_WGMMA_ENABLE
+`ifdef TCU_LMEM_PORT_ENABLE
     // TCU tile-buffer local-memory read port
     VX_mem_bus_if.master    tcu_lmem_if,
 `endif
@@ -144,7 +144,7 @@ module VX_execute import VX_gpu_pkg::*; #(
     `ifdef PERF_ENABLE
         .tcu_perf       (tcu_perf),
     `endif
-    `ifdef VX_CFG_TCU_WGMMA_ENABLE
+    `ifdef TCU_LMEM_PORT_ENABLE
         .tcu_lmem_if    (tcu_lmem_if),
     `endif
     `ifdef TCU_MEMCLIENT_ENABLE

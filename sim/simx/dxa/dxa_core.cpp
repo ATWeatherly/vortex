@@ -36,6 +36,20 @@ namespace {
 // One GMEM port: the DXA joins its socket's L2-facing arb as a single peer.
 constexpr uint32_t kDxaMemPorts = 1;
 
+// Worker pool. SimX runs line (DXA) and stream (TSU) transfers on one pool of VX_CFG_NUM_DXA_CORES workers.
+// VX_CFG_NUM_DXA_CORES=0 (TSU builds, RTL VX_dxa_core: no line workers) sizes the pool by the TSU worker count
+// instead and only TSU descriptors may run (a line descriptor is a hard error, as the RTL assert).
+#if VX_CFG_NUM_DXA_CORES > 0
+constexpr uint32_t kDxaWorkers     = VX_CFG_NUM_DXA_CORES;
+constexpr bool     kDxaLineWorkers = true;
+#elif defined(VX_CFG_TSU_ENABLE)
+constexpr uint32_t kDxaWorkers     = VX_CFG_NUM_TSU_CORES;
+constexpr bool     kDxaLineWorkers = false;
+#else
+#error "VX_CFG_NUM_DXA_CORES=0 needs the TSU (VX_CFG_TSU_ENABLE)"
+#endif
+static_assert(kDxaWorkers > 0, "DXA worker pool is empty");
+
 // LMEM "word" granularity for splitting DXA writes. The LocalMem bank
 // model applies byteen relative to a VX_CFG_MEM_BLOCK_SIZE-aligned address,
 // so each LineWork's destination must lie within one VX_CFG_MEM_BLOCK_SIZE-aligned
@@ -138,10 +152,10 @@ public:
     : simobject_(simobject)
     , gmem_arb_(gmem_arb)
     , socket_id_(socket_id)
-    , workers_(VX_CFG_NUM_DXA_CORES)
+    , workers_(kDxaWorkers)
     , cycle_(0)
   {
-    for (uint32_t i = 0; i < VX_CFG_NUM_DXA_CORES; ++i)
+    for (uint32_t i = 0; i < kDxaWorkers; ++i)
       workers_[i].worker_id = i;
   }
 
@@ -405,6 +419,11 @@ private:
     }
 
     w.desc = descriptors_.at(req.desc_slot);
+    if (!kDxaLineWorkers && !desc_is_tsu(w.desc.meta)) {
+      std::cerr << "*** dxa: line-worker (non-TSU) descriptor " << req.desc_slot
+                << " issued on a build without line workers (VX_CFG_NUM_DXA_CORES=0)" << std::endl;
+      std::abort();
+    }
     w.smem_stride = w.desc.smem_stride;
     w.wl = desc_is_wland(w.desc.meta);
     w.wl_tag = req.bar_id & 0x1ffu;   // {simt8, lg_kt, blk, slot}
@@ -968,13 +987,13 @@ DxaCore::DxaCore(const SimContext& ctx, const char* name, Socket* socket)
 {
   __unused(socket);
 
-  // Build the GMEM arbiter (VX_CFG_NUM_DXA_CORES workers → kDxaMemPorts L2-facing).
+  // Build the GMEM arbiter (kDxaWorkers workers → kDxaMemPorts L2-facing).
   // Tag layout used by workers: high bit packs worker_id, low bits the
   // per-worker inflight slot. We pass TAG_SEL_IDX so the arb can route
   // responses back to the right input.
   char sname[100];
   snprintf(sname, 100, "%s-gmem-arb", name);
-  gmem_arb_ = MemArbiter::Create(sname, ArbiterType::RoundRobin, VX_CFG_NUM_DXA_CORES, kDxaMemPorts);
+  gmem_arb_ = MemArbiter::Create(sname, ArbiterType::RoundRobin, kDxaWorkers, kDxaMemPorts);
   for (uint32_t i = 0; i < kDxaMemPorts; ++i) {
     gmem_arb_->ReqOut.at(i).bind(&gmem_req_out.at(i));
     gmem_rsp_in.at(i).bind(&gmem_arb_->RspIn.at(i));
