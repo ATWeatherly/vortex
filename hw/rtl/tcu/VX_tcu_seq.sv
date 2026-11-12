@@ -106,7 +106,12 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
     localparam KW_W    = `CLOG2(KT_MAX / 4);     // 32-bit word index within a row
     localparam CH_W    = `CLOG2(KT_MAX / 8);     // chunk index within a row
     localparam NLD     = NB + 1;                 // loaders: 0 = X, 1..NB = W of block b-1
-    localparam LID_W   = `CLOG2(NLD);
+    localparam LID_W   = `CLOG2(NLD + 1);        // + the dequant store unit's LSU id (= NLD)
+`ifdef VX_CFG_TCU_SEQ_STF
+    localparam NCFG    = 11;                     // + WSCALE, XSCALE, LIMITS (tacc.st fp32 dequant, G4)
+`else
+    localparam NCFG    = 8;
+`endif
     localparam GEN_W   = 8;
     localparam ACC_D   = NTILE * 32;             // 32 drained beats per tile
     localparam ACC_W   = 2 * 8 * 32;             // one beat: 2 columns x 8 rows x int32
@@ -171,9 +176,12 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
     // ===================================================================================================
     // Per-warp configuration (tcfg)
     // ===================================================================================================
-    reg [31:0] cfg_r [NW][8];
+    reg [31:0] cfg_r [NW][NCFG];
     localparam CFG_KT = 0, CFG_XROWS = 1, CFG_XSTRIDE = 2, CFG_WROWS = 3, CFG_WLAYOUT = 4, CFG_WSTRIDE = 5,
                CFG_ACCSTRIDE = 6, CFG_NOTIFY = 7;
+`ifdef VX_CFG_TCU_SEQ_STF
+    localparam CFG_WSCALE = 8, CFG_XSCALE = 9, CFG_LIMITS = 10;
+`endif
     wire [31:0] fc_kt      = cfg_r[f_wid][CFG_KT];
     wire [31:0] fc_xrows   = cfg_r[f_wid][CFG_XROWS];
     wire [31:0] fc_xstride = cfg_r[f_wid][CFG_XSTRIDE];
@@ -239,6 +247,11 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
         logic [31:0]           stride;
         logic [3:0]            tile;
         logic [GEN_W-1:0]      cap;
+        logic                  fp;        // tacc.st fp32 dequant to global (VX_CFG_TCU_SEQ_STF)
+        logic [31:0]           wsp;       // &ws[n0]: 64 per-weight-row fp32 scales
+        logic [31:0]           xsp;       // &xs[m0]: 8 per-batch-column fp32 scales
+        logic [6:0]            nlim;      // valid weight rows 1..64
+        logic [3:0]            mlim;      // valid batch columns 1..8
     } st_cmd_t;
 
     // ----- queues (2-deep) -----
@@ -333,12 +346,19 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
     wire [10:0] gc_koff  = f_rs2[27:17];
     wire [1:0]  sc_mode  = f_rs2[7:6];
     wire        sc_ntfy  = f_rs2[8];
+`ifdef VX_CFG_TCU_SEQ_STF
+    wire        sc_fp    = f_rs2[9];
+`else
+    wire        sc_fp    = 1'b0;
+    `RUNTIME_ASSERT(~(f_fire && (f_op == OP_ACCST)) || ~f_rs2[9],
+        ("%t: *** %s tacc.st fp32 dequant needs VX_CFG_TCU_SEQ_STF", $time, INSTANCE_ID))
+`endif
     `UNUSED_VAR ({f_rs2[31:28], gc_tile_full})
     `RUNTIME_ASSERT(~(f_fire && (f_op == OP_GEMM)) || ((gc_mode == 2'd0) && (gc_ws[3:2] == f_gm_blk) && ~gc_ntfy),
         ("%t: *** %s tgemm: unsupported control 0x%0h (v1: n_mode 0, notify 0, w_slot block == acc block)", $time, INSTANCE_ID, f_rs2))
     `RUNTIME_ASSERT(~(f_fire && (f_op == OP_ACCST)) || ((sc_mode == 2'd0) && ~sc_ntfy),
         ("%t: *** %s tacc.st: unsupported control 0x%0h (v1: n_mode 0, notify 0)", $time, INSTANCE_ID, f_rs2))
-    `RUNTIME_ASSERT(~(f_fire && (f_op == OP_CFG)) || (f_rs1 < 32'd8),
+    `RUNTIME_ASSERT(~(f_fire && (f_op == OP_CFG)) || (f_rs1 < 32'(NCFG)),
         ("%t: *** %s tcfg: bad field %0d", $time, INSTANCE_ID, f_rs1))
 `ifndef VX_CFG_TSU_ENABLE
     `RUNTIME_ASSERT(~(f_fire && (f_op == OP_LDWS)),
@@ -378,6 +398,11 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
                 cfg_r[w][CFG_WSTRIDE]   <= 32'd2048;
                 cfg_r[w][CFG_ACCSTRIDE] <= 32'd0;
                 cfg_r[w][CFG_NOTIFY]    <= 32'd0;
+            `ifdef VX_CFG_TCU_SEQ_STF
+                cfg_r[w][CFG_WSCALE]    <= 32'd0;
+                cfg_r[w][CFG_XSCALE]    <= 32'd0;
+                cfg_r[w][CFG_LIMITS]    <= 32'h0000_0840;   // mlim 8, nlim 64
+            `endif
             end
             wait_v     <= '0;
             wait_fence <= '0;
@@ -386,7 +411,7 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
                 rr_slice_r <= NS_W'((32'(fsel) + 1) % NS);
             end
             if (f_fire && (f_op == OP_CFG)) begin
-                cfg_r[f_wid][f_rs1[2:0]] <= f_rs2;
+                cfg_r[f_wid][`CLOG2(NCFG)'(f_rs1)] <= f_rs2;
             end
             if (f_fire && f_parks) begin
                 wait_v[f_wid]     <= 1'b1;
@@ -508,6 +533,15 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
         f_st.stride = (fc_accstr == 32'd0) ? 32'd256 : fc_accstr;
         f_st.tile   = f_rs2[3:0];
         f_st.cap    = a_gm_iss[f_st_blk][f_rs2[3:0]];
+        f_st.fp     = sc_fp;
+    `ifdef VX_CFG_TCU_SEQ_STF
+        f_st.wsp    = cfg_r[f_wid][CFG_WSCALE];
+        f_st.xsp    = cfg_r[f_wid][CFG_XSCALE];
+        f_st.nlim   = 7'(cfg_r[f_wid][CFG_LIMITS][6:0]);
+        f_st.mlim   = 4'(cfg_r[f_wid][CFG_LIMITS][11:8]);
+    `else
+        f_st.wsp    = '0; f_st.xsp = '0; f_st.nlim = '0; f_st.mlim = '0;
+    `endif
     end
     `RUNTIME_ASSERT(~(f_fire && (f_op == OP_LDX)) || ((fc_kt[3:0] == 4'd0) && (fc_kt <= 32'(KT_MAX)) && (fc_xrows >= 32'd1) && (fc_xrows <= 32'd8) && (f_rs1[1:0] == 2'd0) && (fc_xstride[1:0] == 2'd0)),
         ("%t: *** %s tbuf.ldx: illegal (src=0x%0h kt=%0d rows=%0d stride=%0d)", $time, INSTANCE_ID, f_rs1, fc_kt, fc_xrows, fc_xstride))
@@ -886,9 +920,13 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
             end
         end
     end
-    assign mem_if.req_valid = ld_any;
-    assign mem_if.req_data  = lq_req[ld_sel];
+    // the fp32 dequant store unit (tacc.st fp) takes the LSU client port when no loader requests it
+    wire           dqr_valid;
+    lsu_req_data_t dqr_req;
+    assign mem_if.req_valid = ld_any || dqr_valid;
+    assign mem_if.req_data  = ld_any ? lq_req[ld_sel] : dqr_req;
     wire ld_req_fire = ld_any && mem_if.req_ready;
+    wire dqr_fire    = ~ld_any && dqr_valid && mem_if.req_ready;
     for (genvar l = 0; l < NLD; ++l) begin : g_lq_grant
         assign lq_grant[l] = ld_req_fire && (ld_sel == LID_RR_W'(l));
     end
@@ -907,7 +945,9 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
     if (LSU_CLIENT_TAG_WIDTH > $bits(ld_tag_t)) begin : g_tag_unused
         `UNUSED_VAR (mem_if.rsp_data.tag[LSU_CLIENT_TAG_WIDTH-1:$bits(ld_tag_t)])
     end
-    wire rsp_fire = mem_if.rsp_valid;
+    wire rsp_is_dq = (rsp_tag.lid == LID_W'(NLD));
+    wire rsp_fire  = mem_if.rsp_valid && ~rsp_is_dq;     // loader responses (the dequant unit's: dq_rsp_fire)
+    wire dq_rsp_fire = mem_if.rsp_valid && rsp_is_dq;
     wire [3:0] rsp_nwords = 4'($countones(mem_if.rsp_data.mask));
 
     // loader sequencing
@@ -987,7 +1027,7 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
             if (rsp_tag.lid == LID_W'(0)) begin
                 row = rsp_tag.row;
                 ch  = CH_W'((32'(rsp_tag.kw) + 32'(2 * p)) >> 1);
-            end else if (lc_layout[rsp_tag.lid]) begin
+            end else if (lc_layout[rsp_is_dq ? LID_W'(0) : rsp_tag.lid]) begin
                 row = rsp_tag.row + 8'(p);
                 ch  = CH_W'(32'(rsp_tag.kw) >> 1);
             end else begin
@@ -1021,17 +1061,20 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
         // (bank = (n + ch) mod 8, entry = (slot*64 + n)*CX + ch/8). Never overlaps an LSU write (wl_ready).
         // SIMT8 beat: 8 B piece j = chunk c (= seg) of row r0 + j (r0 = row, a multiple of 8) -> bank (r0 + j + c)
         // mod 8, entry (slot*64 + r0 + j)*CX + c/8: 8 distinct banks, one address each.
-        for (integer l = 0; l < WLL; ++l) begin
-            if (wl_fire[l]) begin
+        // Block b is only ever written by lane b mod WLL (lane rule, asserted above): static lane per block, so
+        // each block's bank write ports see one lane instead of a WLL-way mux (seq-area OOC: -32k LUT per core).
+        for (integer b = 0; b < NB; ++b) begin
+            automatic integer l = b % WLL;
+            if (wl_fire[l] && (wl_blk[l] == 2'(b))) begin
                 for (integer j = 0; j < 8; ++j) begin
                     automatic logic [2:0] bk = wl_beat[l].simt ? 3'(32'(wl_beat[l].row) + 32'(j) + 32'(wl_beat[l].seg))
                                                                : 3'(32'(wl_beat[l].row) + 32'(j));
-                    wb_we[wl_blk[l]][bk]  = 1'b1;
-                    wb_wa[wl_blk[l]][bk]  = wl_beat[l].simt
+                    wb_we[b][bk]  = 1'b1;
+                    wb_wa[b][bk]  = wl_beat[l].simt
                         ? WA_W'((32'(wl_slot[l]) * WROWS + 32'(wl_beat[l].row) + 32'(j)) * CX + (32'(wl_beat[l].seg) >> 3))
                         : WA_W'((32'(wl_slot[l]) * WROWS + 32'(wl_beat[l].row)) * CX + 32'(wl_beat[l].seg));
-                    wb_wd[wl_blk[l]][bk]  = wl_beat[l].data[j*64 +: 64];
-                    wb_wbe[wl_blk[l]][bk] = 8'hFF;
+                    wb_wd[b][bk]  = wl_beat[l].data[j*64 +: 64];
+                    wb_wbe[b][bk] = 8'hFF;
                 end
             end
         end
@@ -1150,6 +1193,20 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
     reg  [63:0]   perf_land_wait, perf_early;
     wire [NB-1:0] perf_blk_wx, perf_blk_ww, perf_blk_wa;   // slot_wait split by the unmet interlock (X / W / acc tile)
     reg  [63:0]   perf_wait_x, perf_wait_w, perf_wait_a;
+    // Cycle accounting per block inside the perf window (one category per block-cycle, in this priority):
+    // exec = a tgemm in the fill/MAC/drain pipe; qwait = a tgemm queued but blocked (slot_wait);
+    // st = no tgemm, tacc.st queued/active; xld = no tgemm/st, an X load queued/active (core X loader);
+    // twait = none of those, a warp parked in twait/tfence; other = SIMT epilogue / issue / window tail.
+    wire [NB-1:0] acb_exec, acb_qwait, acb_st, acb_xld, acb_tw, acb_oth;
+
+    // tacc.st fp32 dequant: block store engines <-> the core's shared dequant store unit (below g_blk)
+    wire [NB-1:0]        dqs_want;        // block b's store head is a tacc.st fp waiting for / owning the unit
+    wire [NB-1:0]        dqb_rd;          // block b read one of its tile's beats for the unit this cycle
+    wire [ACC_W-1:0]     dqb_data [NB];   // ... the beat (valid the cycle after dqb_rd)
+    wire [NB-1:0]        dqs_done;        // the unit finished block b's tile
+    wire                 dq_own_v;
+    wire [BK_W-1:0]      dq_own;
+    wire                 dq_beat_space;
 
     for (genvar b = 0; b < NB; ++b) begin : g_blk
         // ------------------------------------------------ MAC fill
@@ -1439,6 +1496,7 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
 
         // ------------------------------------------------ store engine (tacc.st)
         st_cmd_t sh;
+        `UNUSED_VAR (sh)   // the dequant fields are read by the store unit from st_q
         assign sh = st_q[b][st_rp[b]];
         wire sh_ok = (st_cnt[b] != 0) && gen_ok(a_gm_done[b][sh.tile], sh.cap);
 
@@ -1452,8 +1510,15 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
         reg [2:0]  so_rd_i_d;
         reg [LMEM_ROW_W-1:0] so_last_row;
 
-        assign st_rd_req  = (so_ph == 3'd1) && (so_i < 4'd8);
-        assign st_rd_addr = ACC_A_W'(32'(sh.tile) * 32 + 32'(so_q) * 8 + 32'(so_i));
+        // phase 5 (tacc.st fp): stream the tile's 32 beats to the dequant unit once it owns this block
+        reg  [5:0] so_bi;
+        wire so_fp_rd = (so_ph == 3'd5) && dq_own_v && (dq_own == BK_W'(b)) && (so_bi < 6'd32) && dq_beat_space;
+        assign st_rd_req  = ((so_ph == 3'd1) && (so_i < 4'd8)) || so_fp_rd;
+        assign st_rd_addr = (so_ph == 3'd5) ? ACC_A_W'(32'(sh.tile) * 32 + 32'(so_bi))
+                                            : ACC_A_W'(32'(sh.tile) * 32 + 32'(so_q) * 8 + 32'(so_i));
+        assign dqs_want[b] = (so_ph == 3'd5);
+        assign dqb_rd[b]   = st_rd_gnt && (so_ph == 3'd5);
+        assign dqb_data[b] = acc_rd;
 
         // chunk (j, m) of quarter q: 8 int32 = beats 0..7 of the quarter, lane (j, m)
         wire       so_j = so_i[3];
@@ -1507,7 +1572,7 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
                 so_rd_d <= st_rd_gnt;
                 case (so_ph)
                 3'd0: if (sh_ok) begin
-                    so_ph <= 3'd1; so_q <= '0; so_i <= '0;
+                    so_ph <= sh.fp ? 3'd5 : 3'd1; so_q <= '0; so_i <= '0; so_bi <= '0;
                 end
                 3'd1: begin
                     if (st_rd_gnt) so_i <= so_i + 4'd1;
@@ -1534,6 +1599,10 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
                 end
                 3'd3: if (dq_grant[b]) so_ph <= 3'd4;
                 3'd4: if (dq_rsp[b]) so_ph <= 3'd0;
+                3'd5: begin
+                    if (st_rd_gnt) so_bi <= so_bi + 6'd1;
+                    if (dqs_done[b]) so_ph <= 3'd0;
+                end
                 default: so_ph <= 3'd0;
                 endcase
             end
@@ -1541,7 +1610,7 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
             if (so_rd_d) so_buf[so_rd_i_d] <= acc_rd;
         end
         `UNUSED_VAR (so_rd_i_d)
-        assign st_pop[b]       = (so_ph == 3'd4) && dq_rsp[b];
+        assign st_pop[b]       = ((so_ph == 3'd4) && dq_rsp[b]) || ((so_ph == 3'd5) && dqs_done[b]);
         assign st_done_ev[b]   = st_pop[b];
         assign st_done_wid[b]  = sh.wid;
         assign st_done_tile[b] = sh.tile;
@@ -1554,7 +1623,274 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
         assign perf_blk_wx[b]    = perf_blk_wait[b] && ~gen_ok(x_ld_done[gh.xs], gh.capx);
         assign perf_blk_ww[b]    = perf_blk_wait[b] && ~(gh_w_done || gh_w_strm);
         assign perf_blk_wa[b]    = perf_blk_wait[b] && ~gen_ok(a_st_done[b][gh.tile], gh.capa);
+        assign acb_exec[b]  = fl_act || (|gb_v) || (sp_cnt != 0);
+        assign acb_qwait[b] = ~acb_exec[b] && gh_v;
+        assign acb_st[b]    = ~acb_exec[b] && ~gh_v && ((so_ph != 3'd0) || (st_cnt[b] != 2'd0));
+        assign acb_xld[b]   = ~acb_exec[b] && ~gh_v && ~acb_st[b] && ((ldx_cnt != 2'd0) || ld_act[0]);
+        assign acb_tw[b]    = ~acb_exec[b] && ~gh_v && ~acb_st[b] && ~acb_xld[b] && (|wait_v);
+        assign acb_oth[b]   = ~acb_exec[b] && ~gh_v && ~acb_st[b] && ~acb_xld[b] && ~(|wait_v);
     end
+
+    // ===================================================================================================
+    // tacc.st fp32 dequant store unit (VX_CFG_TCU_SEQ_STF; one per core, shared by the blocks)
+    // ===================================================================================================
+    // tacc.st with ctl bit 9 writes the int32 tile as fp32 straight to global memory:
+    //   C[dst + n*stride + 4*m] = (0.0f + ((float)acc[m][n] * ws[n]) * xs[m])  for n < nlim, m < mlim
+    // (ws = 64 fp32 at WSCALE, xs = 8 fp32 at XSCALE, stride = ACC_STRIDE bytes; IEEE RNE, the same FPU units
+    // as the core: int->fp32 VX_fcvt_unit, two VX_fma_unit multiplies, +0.0 turns -0 into +0), i.e. the host's
+    // rescale order bit for bit, so no SIMT epilogue is needed. Per tile: fetch the 64 + 8 scales (9 LSU reads),
+    // stream the 32 accumulator beats from the owning block, 2 values per cycle through the pipe, one 32 B LSU
+    // store per weight row (8 batch columns). Completion = the last row's store accepted by the LSU.
+`ifdef VX_CFG_TCU_SEQ_STF
+    localparam DQ_LC  = `VX_CFG_FCVT_LATENCY;
+    localparam DQ_LM  = `VX_CFG_FMA_LATENCY;
+    localparam DQ_LAT = DQ_LC + 2 * DQ_LM;
+    localparam DQ_SFD = 8;                       // store FIFO rows
+    localparam [LID_W-1:0] DQ_LID = LID_W'(NLD);
+
+    // ---- ownership / command
+    reg              dq_v;                       // a tile is being processed
+    reg  [BK_W-1:0]  dq_b;
+    st_cmd_t         dq_cmd;
+    reg  [1:0]       dq_ph;                      // 0 scales, 1 run
+    reg  [BK_W-1:0]  dq_rr;
+    logic [BK_W-1:0] dq_pick;
+    logic            dq_wany;
+    always_comb begin
+        dq_pick = dq_rr;
+        dq_wany  = 1'b0;
+        for (integer i = 0; i < NB; ++i) begin
+            automatic logic [BK_W-1:0] c = BK_W'((32'(dq_rr) + i) % NB);
+            if (!dq_wany && dqs_want[c]) begin dq_pick = c; dq_wany = 1'b1; end
+        end
+    end
+    assign dq_own_v = dq_v && (dq_ph == 2'd1);
+    assign dq_own   = dq_b;
+
+    // ---- scale fetch
+    reg  [31:0]      dq_ws [64];
+    reg  [31:0]      dq_xs [8];
+    reg  [3:0]       dq_k;                       // next scale request 0..8 (9 = all issued)
+    reg  [7:0]       dq_wexp, dq_wgot;
+    wire [6:0]       dq_k8 = {1'b0, dq_k[2:0], 3'b000};
+    `UNUSED_VAR (dq_cmd)
+    logic [7:0]      dq_kmask;
+    always_comb begin
+        for (integer l = 0; l < 8; ++l)
+            dq_kmask[l] = (dq_k == 4'd8) ? (4'(l) < dq_cmd.mlim) : ((32'(dq_k8) + l) < 32'(dq_cmd.nlim));
+    end
+    wire dq_scl_req = dq_v && (dq_ph == 2'd0) && (dq_k < 4'd9) && (|dq_kmask);
+    wire dq_scl_skip = dq_v && (dq_ph == 2'd0) && (dq_k < 4'd9) && ~(|dq_kmask);
+
+    // ---- beat FIFO (2 deep) fed by the owner block
+    reg  [ACC_W-1:0] dq_bf [2];
+    reg  [1:0]       dq_bf_cnt;
+    reg              dq_bf_wp, dq_bf_rp;
+    reg              dq_rd_d;
+    wire             dq_bf_push = dq_rd_d;
+    assign dq_beat_space = (32'(dq_bf_cnt) + 32'(dq_rd_d)) < 2;
+
+    // ---- issue: beat bi, sub-cycle c = {j, mp}: values (m = 2mp, 2mp+1) of weight row n = 32j + bi
+    reg  [4:0]       dq_bi;
+    reg  [2:0]       dq_c;
+    reg  [3:0]       dq_rows_fl;                 // rows started, not yet in the store FIFO / skipped
+    reg  [3:0]       dq_sf_cnt;
+    wire             dq_row_start = (dq_c[1:0] == 2'd0);
+    wire             dq_can_issue = dq_own_v && (dq_bf_cnt != 2'd0)
+                                 && (~dq_row_start || ((32'(dq_sf_cnt) + 32'(dq_rows_fl)) < DQ_SFD));
+    wire [ACC_W-1:0] dq_beat = dq_bf[dq_bf_rp];
+    wire [5:0]       dq_n_in  = {dq_c[2], dq_bi};     // beat bi holds weight columns bi (j=0) and bi + 32 (j=1)
+    wire [1:0]       dq_mp_in = dq_c[1:0];
+    wire [31:0]      dq_iv0 = dq_beat[(32'(dq_c[2]) * 8 + 2 * 32'(dq_c[1:0]))     * 32 +: 32];
+    wire [31:0]      dq_iv1 = dq_beat[(32'(dq_c[2]) * 8 + 2 * 32'(dq_c[1:0]) + 1) * 32 +: 32];
+
+    // metadata pipe (valid, n, mp) over the full datapath latency
+    reg  [DQ_LAT:0]  pv;
+    reg  [5:0]       pn  [DQ_LAT+1];
+    reg  [1:0]       pmp [DQ_LAT+1];
+    always_ff @(posedge clk) begin
+        if (reset) pv <= '0;
+        else       pv <= {pv[DQ_LAT-1:0], dq_can_issue};
+        pn[0] <= dq_n_in; pmp[0] <= dq_mp_in;
+        for (integer i = 1; i <= DQ_LAT; ++i) begin pn[i] <= pn[i-1]; pmp[i] <= pmp[i-1]; end
+    end
+    // stage indices: inputs at cycle 0 -> fcvt result after DQ_LC, x ws after DQ_LC + DQ_LM, x xs after DQ_LAT
+    wire [31:0] dq_f  [2];
+    wire [31:0] dq_p1 [2];
+    wire [31:0] dq_p2 [2];
+    for (genvar k = 0; k < 2; ++k) begin : g_dq_lane
+        wire [`FP_FLAGS_BITS-1:0] dq_ff_c, dq_ff_1, dq_ff_2;
+        `UNUSED_VAR (dq_ff_c)
+        VX_fcvt_unit #(
+            .LATENCY (DQ_LC),
+            .FLEN    (32),
+            .OUT_REG (1)      // as the core FPU: result after exactly LATENCY cycles
+        ) fcvt (
+            .clk (clk), .reset (reset), .enable (1'b1), .mask (dq_can_issue),
+            .frm (INST_FRM_RNE),
+            .is_itof (1'b1), .is_ftoi (1'b0), .is_f2f (1'b0), .is_signed (1'b1), .is_int64 (1'b0),
+            .src_fmt (1'b0), .dst_fmt (1'b0), .src_h (1'b0), .dst_h (1'b0),
+            .dataa  (`VX_CFG_XLEN'(k ? dq_iv1 : dq_iv0)),
+            .result (dq_f[k]),
+            .fflags (dq_ff_c)
+        );
+        VX_fma_unit #(
+            .LATENCY (DQ_LM), .MAN_BITS (23), .EXP_BITS (8), .USE_DSP (1)
+        ) mul1 (
+            .clk (clk), .reset (reset), .enable (1'b1), .mask (pv[DQ_LC-1]),
+            .op_type (INST_FPU_BITS'(INST_FPU_MUL)), .fmt ('0), .frm (INST_FRM_RNE),
+            .dataa (dq_f[k]), .datab (dq_ws[pn[DQ_LC-1]]), .datac ('0),
+            .result (dq_p1[k]), .fflags (dq_ff_1)
+        );
+        VX_fma_unit #(
+            .LATENCY (DQ_LM), .MAN_BITS (23), .EXP_BITS (8), .USE_DSP (1)
+        ) mul2 (
+            .clk (clk), .reset (reset), .enable (1'b1), .mask (pv[DQ_LC+DQ_LM-1]),
+            .op_type (INST_FPU_BITS'(INST_FPU_MUL)), .fmt ('0), .frm (INST_FRM_RNE),
+            .dataa (dq_p1[k]), .datab (dq_xs[{pmp[DQ_LC+DQ_LM-1], 1'(k)}]), .datac ('0),
+            .result (dq_p2[k]), .fflags (dq_ff_2)
+        );
+        `UNUSED_VAR (dq_ff_1)
+        `UNUSED_VAR (dq_ff_2)
+    end
+    // output: (0.0f + x) == x except -0 -> +0
+    wire        dq_ov  = pv[DQ_LAT-1];
+    wire [5:0]  dq_on  = pn[DQ_LAT-1];
+    wire [1:0]  dq_omp = pmp[DQ_LAT-1];
+    wire [31:0] dq_o0  = (dq_p2[0] == 32'h8000_0000) ? 32'd0 : dq_p2[0];
+    wire [31:0] dq_o1  = (dq_p2[1] == 32'h8000_0000) ? 32'd0 : dq_p2[1];
+    reg  [31:0] dq_rowb [8];
+    wire        dq_row_done = dq_ov && (dq_omp == 2'd3);
+    wire        dq_row_skip = dq_row_done && (7'(dq_on) >= dq_cmd.nlim);
+
+    // store FIFO
+    reg  [5:0]       dq_sf_n [DQ_SFD];
+    reg  [255:0]     dq_sf_d [DQ_SFD];
+    reg  [2:0]       dq_sf_wp, dq_sf_rp;
+    wire             dq_sf_push = dq_row_done && ~dq_row_skip;
+    wire             dq_st_req  = dq_v && (dq_ph == 2'd1) && (dq_sf_cnt != 4'd0);
+    reg  [6:0]       dq_retired;
+
+    // LSU request (scale read or row store)
+    always_comb begin
+        dqr_req = '0;
+        if (dq_ph == 2'd0) begin
+            automatic ld_tag_t t;
+            t = '0; t.lid = DQ_LID; t.row = 8'(dq_k);
+            dqr_req.rw = 1'b0;
+            for (integer l = 0; l < 8; ++l) begin
+                dqr_req.mask[l]   = dq_kmask[l];
+                dqr_req.addr[l]   = LSU_ADDR_WIDTH'((((dq_k == 4'd8) ? dq_cmd.xsp : dq_cmd.wsp) >> 2)
+                                                    + ((dq_k == 4'd8) ? 32'd0 : 32'(dq_k8)) + 32'(l));
+                dqr_req.byteen[l] = {LSU_WORD_SIZE{1'b1}};
+            end
+            dqr_req.tag = LSU_CLIENT_TAG_WIDTH'(t);
+        end else begin
+            automatic ld_tag_t t;
+            automatic logic [31:0] ra;
+            t = '0; t.lid = DQ_LID;
+            ra = dq_cmd.dst + 32'(dq_sf_n[dq_sf_rp]) * dq_cmd.stride;
+            dqr_req.rw = 1'b1;
+            for (integer l = 0; l < 8; ++l) begin
+                dqr_req.mask[l]   = (4'(l) < dq_cmd.mlim);
+                dqr_req.addr[l]   = LSU_ADDR_WIDTH'((ra >> 2) + 32'(l));
+                dqr_req.byteen[l] = {LSU_WORD_SIZE{1'b1}};
+                dqr_req.data[l]   = dq_sf_d[dq_sf_rp][l*32 +: 32];
+            end
+            dqr_req.tag = LSU_CLIENT_TAG_WIDTH'(t);
+        end
+    end
+    assign dqr_valid = dq_scl_req || dq_st_req;
+    wire dq_st_fire = dqr_fire && (dq_ph == 2'd1);
+
+    always_ff @(posedge clk) begin
+        if (reset) begin
+            dq_v <= 1'b0; dq_rr <= '0; dq_ph <= '0;
+            dq_bf_cnt <= '0; dq_bf_wp <= 1'b0; dq_bf_rp <= 1'b0; dq_rd_d <= 1'b0;
+            dq_sf_cnt <= '0; dq_sf_wp <= '0; dq_sf_rp <= '0; dq_rows_fl <= '0;
+        end else begin
+            dq_rd_d <= dq_v && dqb_rd[dq_b];
+            if (~dq_v) begin
+                if (dq_wany) begin
+                    dq_v <= 1'b1; dq_b <= dq_pick; dq_cmd <= st_q[dq_pick][st_rp[dq_pick]];
+                    dq_ph <= 2'd0; dq_k <= '0; dq_wexp <= '0; dq_wgot <= '0;
+                    dq_bi <= '0; dq_c <= '0; dq_retired <= '0;
+                    dq_rr <= BK_W'((32'(dq_pick) + 1) % NB);
+                end
+            end else begin
+                // scale phase
+                if ((dq_ph == 2'd0) && ((dqr_fire && dq_scl_req) || dq_scl_skip)) begin
+                    dq_k <= dq_k + 4'd1;
+                    dq_wexp <= dq_wexp + 8'($countones(dq_kmask & {8{dqr_fire}}));
+                end
+                if (dq_rsp_fire) dq_wgot <= dq_wgot + 8'($countones(mem_if.rsp_data.mask));
+                if ((dq_ph == 2'd0) && (dq_k == 4'd9) && (dq_wgot == dq_wexp)) dq_ph <= 2'd1;
+                // run phase: issue
+                if (dq_can_issue) begin
+                    dq_c <= dq_c + 3'd1;
+                    if (dq_c == 3'd7) dq_bi <= dq_bi + 5'd1;
+                end
+                if (dq_ov) begin dq_rowb[{dq_omp, 1'b0}] <= dq_o0; dq_rowb[{dq_omp, 1'b1}] <= dq_o1; end
+                dq_retired <= dq_retired + 7'(dq_row_skip) + 7'(dq_st_fire);
+                if (dq_retired == 7'd64) begin
+                    dq_v <= 1'b0;
+                end
+            end
+            // beat FIFO
+            if (dq_bf_push) begin dq_bf[dq_bf_wp] <= dqb_data[dq_b]; dq_bf_wp <= ~dq_bf_wp; end
+            if (dq_can_issue && (dq_c == 3'd7)) dq_bf_rp <= ~dq_bf_rp;
+            dq_bf_cnt <= dq_bf_cnt + 2'(dq_bf_push) - 2'(dq_can_issue && (dq_c == 3'd7));
+            // rows in flight / store FIFO
+            dq_rows_fl <= dq_rows_fl + 4'(dq_can_issue && dq_row_start) - 4'(dq_row_done);
+            if (dq_sf_push) begin
+                dq_sf_n[dq_sf_wp] <= dq_on;
+                dq_sf_d[dq_sf_wp] <= {dq_o1, dq_o0, dq_rowb[5], dq_rowb[4], dq_rowb[3], dq_rowb[2], dq_rowb[1], dq_rowb[0]};
+                dq_sf_wp <= dq_sf_wp + 3'd1;
+            end
+            if (dq_st_fire) dq_sf_rp <= dq_sf_rp + 3'd1;
+            dq_sf_cnt <= dq_sf_cnt + 4'(dq_sf_push) - 4'(dq_st_fire);
+        end
+        if (dq_rsp_fire && (dq_ph == 2'd0)) begin
+            for (integer l = 0; l < 8; ++l) begin
+                if (mem_if.rsp_data.mask[l]) begin
+                    if (rsp_tag.row == 8'd8) dq_xs[l] <= mem_if.rsp_data.data[l];
+                    else                     dq_ws[{rsp_tag.row[2:0], 3'(l)}] <= mem_if.rsp_data.data[l];
+                end
+            end
+        end
+    end
+`ifdef DQ_DEBUG
+    always @(posedge clk) begin
+        if (dq_rsp_fire) $display("%t DQ rsp row=%0d mask=%b d0=%h d1=%h", $time, rsp_tag.row, mem_if.rsp_data.mask, mem_if.rsp_data.data[0], mem_if.rsp_data.data[1]);
+        if (dqr_fire) $display("%t DQ req ph=%0d k=%0d rw=%b a0=%h m=%b d0=%h", $time, dq_ph, dq_k, dqr_req.rw, dqr_req.addr[0], dqr_req.mask, dqr_req.data[0]);
+        if (dq_can_issue && dq_n_in < 2) $display("%t DQ iss n=%0d mp=%0d iv0=%h iv1=%h", $time, dq_n_in, dq_mp_in, dq_iv0, dq_iv1);
+        if (pv[DQ_LC-1] && pn[DQ_LC-1] < 2) $display("%t DQ cvt n=%0d f0=%h ws=%h", $time, pn[DQ_LC-1], dq_f[0], dq_ws[pn[DQ_LC-1]]);
+        if (pv[DQ_LC+DQ_LM-1] && pn[DQ_LC+DQ_LM-1] < 2) $display("%t DQ m1 n=%0d p1=%h xs=%h", $time, pn[DQ_LC+DQ_LM-1], dq_p1[0], dq_xs[{pmp[DQ_LC+DQ_LM-1], 1'b0}]);
+        if (dq_ov && dq_on < 2) $display("%t DQ out n=%0d mp=%0d o0=%h o1=%h", $time, dq_on, dq_omp, dq_o0, dq_o1);
+    end
+`endif
+    for (genvar b = 0; b < NB; ++b) begin : g_dqs_done
+        assign dqs_done[b] = dq_v && (dq_b == BK_W'(b)) && (dq_retired == 7'd64);
+    end
+    `RUNTIME_ASSERT(~(dq_rsp_fire && (dq_ph != 2'd0)), ("%t: *** %s dequant: unexpected LSU response", $time, INSTANCE_ID))
+    `RUNTIME_ASSERT(~(dq_v && dq_cmd.fp && ((dq_cmd.dst[1:0] != 2'd0) || (dq_cmd.stride[1:0] != 2'd0) || (dq_cmd.wsp[1:0] != 2'd0) || (dq_cmd.xsp[1:0] != 2'd0)
+                      || (dq_cmd.nlim == 7'd0) || (dq_cmd.nlim > 7'd64) || (dq_cmd.mlim == 4'd0) || (dq_cmd.mlim > 4'd8))),
+        ("%t: *** %s tacc.st fp: bad operands (dst/stride/scales 4 B aligned, 1 <= nlim <= 64, 1 <= mlim <= 8)", $time, INSTANCE_ID))
+`else
+    assign dqr_valid = 1'b0;
+    assign dqr_req   = '0;
+    assign dqs_done  = '0;
+    assign dq_own_v  = 1'b0;
+    assign dq_own    = '0;
+    assign dq_beat_space = 1'b0;
+    `UNUSED_VAR (dqs_want)
+    `UNUSED_VAR (dqb_rd)
+    for (genvar b = 0; b < NB; ++b) begin : g_dqb_unused
+        `UNUSED_VAR (dqb_data[b])
+    end
+    `UNUSED_VAR (dq_rsp_fire)
+    `UNUSED_VAR (dqr_fire)
+`endif
 
     // ===================================================================================================
     // LMEM DMA port (store engines, round-robin; tag value = block)
@@ -1623,8 +1959,25 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
     // Hosts that never close the device skip final blocks: also print the cumulative counters each time every
     // warp's pending count has stayed zero for 4096 cycles after new work (one line per kernel call).
     reg perf_dirty;
+    reg [63:0] acc_exec, acc_qwait, acc_st, acc_xld, acc_tw, acc_oth;
+    always_ff @(posedge clk) begin
+        if (reset) begin
+            acc_exec <= '0; acc_qwait <= '0; acc_st <= '0; acc_xld <= '0; acc_tw <= '0; acc_oth <= '0;
+        end else if (perf_dirty) begin
+            acc_exec  <= acc_exec  + 64'($countones(acb_exec));
+            acc_qwait <= acc_qwait + 64'($countones(acb_qwait));
+            acc_st    <= acc_st    + 64'($countones(acb_st));
+            acc_xld   <= acc_xld   + 64'($countones(acb_xld));
+            acc_tw    <= acc_tw    + 64'($countones(acb_tw));
+            acc_oth   <= acc_oth   + 64'($countones(acb_oth));
+        end
+    end
     reg [63:0] perf_win_cyc;
-    reg [12:0] perf_idle_cnt;
+`ifndef VX_TCU_SEQ_PERF_IDLE_LOG2
+`define VX_TCU_SEQ_PERF_IDLE_LOG2 12     // a perf window closes after 2^N idle cycles (fp32 tacc.st kernels end right after twait: use ~6)
+`endif
+    localparam PIL = `VX_TCU_SEQ_PERF_IDLE_LOG2;
+    reg [PIL:0] perf_idle_cnt;
     always_ff @(posedge clk) begin
         automatic logic all_idle = 1'b1;
         for (integer w = 0; w < NW; ++w) if (pending[w] != 16'd0) all_idle = 1'b0;
@@ -1632,12 +1985,13 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
             perf_dirty <= 1'b0; perf_win_cyc <= '0; perf_idle_cnt <= '0;
         end else begin
             perf_win_cyc  <= perf_dirty ? perf_win_cyc + 64'd1 : 64'd0;
-            perf_idle_cnt <= (all_idle && !(f_fire && f_async)) ? perf_idle_cnt + 13'd1 : 13'd0;
+            perf_idle_cnt <= (all_idle && !(f_fire && f_async)) ? perf_idle_cnt + (PIL+1)'(1) : '0;
             if (f_fire && f_async) perf_dirty <= 1'b1;
-            else if (perf_dirty && perf_idle_cnt[12]) begin
+            else if (perf_dirty && perf_idle_cnt[PIL]) begin
                 perf_dirty <= 1'b0;
-                $display("%s: TCU-SEQ perf: busy_window=%0d tgemms=%0d gemm_k=%0d mac_beats=%0d slot_wait=%0d drain_beats=%0d ldx=%0d ldw=%0d tacc_st=%0d ldws=%0d ldws_beats=%0d land_wait=%0d early=%0d wait_x=%0d wait_w=%0d wait_a=%0d",
-                    INSTANCE_ID, perf_win_cyc, perf_gemms, perf_gemm_k, perf_busy, perf_slot_wait, perf_drain, perf_ldx, perf_ldw, perf_st, perf_lws, perf_lws_beats, perf_land_wait, perf_early, perf_wait_x, perf_wait_w, perf_wait_a);
+                $display("%s: TCU-SEQ perf: busy_window=%0d tgemms=%0d gemm_k=%0d mac_beats=%0d slot_wait=%0d drain_beats=%0d ldx=%0d ldw=%0d tacc_st=%0d ldws=%0d ldws_beats=%0d land_wait=%0d early=%0d wait_x=%0d wait_w=%0d wait_a=%0d acc_exec=%0d acc_qwait=%0d acc_st=%0d acc_xld=%0d acc_tw=%0d acc_oth=%0d",
+                    INSTANCE_ID, perf_win_cyc, perf_gemms, perf_gemm_k, perf_busy, perf_slot_wait, perf_drain, perf_ldx, perf_ldw, perf_st, perf_lws, perf_lws_beats, perf_land_wait, perf_early, perf_wait_x, perf_wait_w, perf_wait_a,
+                    acc_exec, acc_qwait, acc_st, acc_xld, acc_tw, acc_oth);
             end
         end
     end

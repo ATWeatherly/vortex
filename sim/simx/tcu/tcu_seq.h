@@ -53,7 +53,9 @@ public:
   static constexpr uint32_t kGlobalLat = 200;
   static constexpr uint32_t kFenceDrain = 64;
 
-  enum CfgField : uint32_t { KT = 0, X_ROWS, X_STRIDE, W_ROWS, W_LAYOUT, W_STRIDE, ACC_STRIDE, NOTIFY_BAR, NUM_CFG };
+  // WSCALE / XSCALE / LIMITS: tacc.st fp32 dequant (ctl bit 9, RTL VX_CFG_TCU_SEQ_STF)
+  enum CfgField : uint32_t { KT = 0, X_ROWS, X_STRIDE, W_ROWS, W_LAYOUT, W_STRIDE, ACC_STRIDE, NOTIFY_BAR,
+                             WSCALE, XSCALE, LIMITS, NUM_CFG };
 
   struct PerfStats {
     uint64_t gemms = 0, gemm_k = 0, loads_x = 0, loads_w = 0, acc_st = 0, busy = 0, landings = 0;
@@ -197,6 +199,7 @@ private:
   static void default_cfg(std::array<uint32_t, NUM_CFG>& c) {
     c.fill(0);
     c[KT] = 2048; c[X_ROWS] = 8; c[X_STRIDE] = 2048; c[W_ROWS] = 64; c[W_LAYOUT] = 0; c[W_STRIDE] = 2048;
+    c[LIMITS] = 0x840;
   }
 
   static uint32_t rows_of(uint32_t mode) { return 8u >> mode; }
@@ -320,6 +323,7 @@ private:
     uint32_t acc_tile = ctl & 0x3fu, b = acc_tile >> 4, t = acc_tile & 0xfu;
     uint32_t mode = (ctl >> 6) & 3u;
     bool notify = (ctl >> 8) & 1u;
+    if (((ctl >> 9) & 1u) && b < kBlocks) return acc_st_fp(wid, dst, ctl, now);
     if (b >= kBlocks || mode > 2 || !mem_.is_lmem(dst) || (dst & 3u)) {
       std::cerr << "*** tacc.st: illegal dst 0x" << std::hex << dst << " ctl 0x" << ctl << std::dec << std::endl;
       std::abort();
@@ -334,6 +338,41 @@ private:
     uint64_t start = std::max({now + 1, acc_ready_.at(b).at(t), acc_st_free_.at(b)});
     acc_st_free_.at(b) = start + dur;
     push(start + dur, wid, b, notify, c[NOTIFY_BAR]);
+    ++perf_.acc_st;
+    return true;
+  }
+
+  // tacc.st fp: C[dst + n*ACC_STRIDE + 4m] = 0.0f + ((float)acc[m][n] * ws[n]) * xs[m], n < nlim, m < mlim (fp32 RNE,
+  // each operation rounded: the host's rescale order). Timing: scale fetch + 2 values per cycle (RTL dequant unit).
+  bool acc_st_fp(uint32_t wid, uint32_t dst, uint32_t ctl, uint64_t now) {
+    auto& c = cfg_.at(wid);
+    uint32_t acc_tile = ctl & 0x3fu, b = acc_tile >> 4, t = acc_tile & 0xfu, mode = (ctl >> 6) & 3u;
+    const uint32_t nlim = c[LIMITS] & 0x7fu, mlim = (c[LIMITS] >> 8) & 0xfu, stride = c[ACC_STRIDE];
+    if (mode != 0 || mem_.is_lmem(dst) || (dst & 3u) || (stride & 3u) || stride == 0 || nlim == 0 || nlim > 64
+        || mlim == 0 || mlim > 8 || ((ctl >> 8) & 1u)) {
+      std::cerr << "*** tacc.st fp: illegal dst 0x" << std::hex << dst << " ctl 0x" << ctl << " limits 0x" << c[LIMITS]
+                << std::dec << " stride " << stride << std::endl;
+      std::abort();
+    }
+    if (outstanding(b, now) >= kQueueDepth) return false;
+    float ws[64], xs[8];
+    mem_.read(c[WSCALE], ws, (uint64_t)nlim * 4);
+    mem_.read(c[XSCALE], xs, (uint64_t)mlim * 4);
+    const auto& D = acc_.at(b).at(t);
+    for (uint32_t n = 0; n < nlim; ++n) {
+      float row[8];
+      for (uint32_t m = 0; m < mlim; ++m) {
+        volatile float f  = (float)D[m * 64 + n];
+        volatile float p1 = f * ws[n];
+        volatile float p2 = p1 * xs[m];
+        row[m] = 0.0f + p2;
+      }
+      mem_.write((uint64_t)dst + (uint64_t)n * stride, row, (uint64_t)mlim * 4);
+    }
+    uint64_t dur = kGlobalLat + 64 * 8 / 2;
+    uint64_t start = std::max({now + 1, acc_ready_.at(b).at(t), acc_st_free_.at(b)});
+    acc_st_free_.at(b) = start + 64 * 8 / 2;
+    push(start + dur, wid, b);
     ++perf_.acc_st;
     return true;
   }
