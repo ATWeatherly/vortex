@@ -258,7 +258,11 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
     ldx_cmd_t  ldx_q [QD];   reg [1:0] ldx_cnt;   reg ldx_wp, ldx_rp;
     ldw_cmd_t  ldw_q [NB][QD]; reg [1:0] ldw_cnt [NB]; reg ldw_wp [NB], ldw_rp [NB];
     gemm_cmd_t gm_q  [NB][QD]; reg [1:0] gm_cnt  [NB]; reg gm_wp  [NB], gm_rp  [NB];
-    st_cmd_t   st_q  [NB][QD]; reg [1:0] st_cnt  [NB]; reg st_wp  [NB], st_rp  [NB];
+    // tacc.st queue: deeper with the fp32 dequant store (STF), so a warp can queue all of its n-tiles' stores and
+    // move on to its next CTA while the shared dequant unit drains them (ISA §4: the depth is back-pressure only)
+    localparam STQD = QD;   // (8 measured with STF: no gain, 4096x5120 N=32 PIPE400 -10 %)
+    localparam STQ_W = `CLOG2(STQD);
+    st_cmd_t   st_q  [NB][STQD]; reg [STQ_W:0] st_cnt [NB]; reg [STQ_W-1:0] st_wp [NB], st_rp [NB];
 
     wire        ldx_pop;
     wire [NB-1:0] ldw_pop, gm_pop, st_pop;
@@ -323,7 +327,7 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
         OP_LDX:   f_can = (ldx_cnt != 2'(QD));
         OP_LDW:   f_can = (ldw_cnt[f_ldw_blk] != 2'(QD)) && (32'(f_ldw_blk) < NB);
         OP_GEMM:  f_can = (gm_cnt[f_gm_blk] != 2'(QD)) && (32'(f_gm_blk) < NB);
-        OP_ACCST: f_can = (st_cnt[f_st_blk] != 2'(QD)) && (32'(f_st_blk) < NB);
+        OP_ACCST: f_can = (st_cnt[f_st_blk] != (STQ_W+1)'(STQD)) && (32'(f_st_blk) < NB);
         OP_LDWS:  f_can = (32'(f_ldw_blk) < NB) && (lws_cnt[f_ldw_blk][f_rs2[1:0]] != 2'(QD));
         default:  f_can = 1'b1;
         endcase
@@ -556,7 +560,7 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
             for (integer b = 0; b < NB; ++b) begin
                 ldw_cnt[b] <= '0; ldw_wp[b] <= 1'b0; ldw_rp[b] <= 1'b0;
                 gm_cnt[b]  <= '0; gm_wp[b]  <= 1'b0; gm_rp[b]  <= 1'b0;
-                st_cnt[b]  <= '0; st_wp[b]  <= 1'b0; st_rp[b]  <= 1'b0;
+                st_cnt[b]  <= '0; st_wp[b]  <= '0; st_rp[b]  <= '0;
             end
         end else begin
             begin
@@ -575,9 +579,9 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
                 if (pg) begin gm_q[b][gm_wp[b]] <= f_gm; gm_wp[b] <= ~gm_wp[b]; end
                 if (gm_pop[b]) gm_rp[b] <= ~gm_rp[b];
                 gm_cnt[b] <= gm_cnt[b] + 2'(pg) - 2'(gm_pop[b]);
-                if (ps) begin st_q[b][st_wp[b]] <= f_st; st_wp[b] <= ~st_wp[b]; end
-                if (st_pop[b]) st_rp[b] <= ~st_rp[b];
-                st_cnt[b] <= st_cnt[b] + 2'(ps) - 2'(st_pop[b]);
+                if (ps) begin st_q[b][st_wp[b]] <= f_st; st_wp[b] <= st_wp[b] + STQ_W'(1); end
+                if (st_pop[b]) st_rp[b] <= st_rp[b] + STQ_W'(1);
+                st_cnt[b] <= st_cnt[b] + (STQ_W+1)'(ps) - (STQ_W+1)'(st_pop[b]);
             end
         end
     end
@@ -1613,7 +1617,7 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
         assign perf_blk_wa[b]    = perf_blk_wait[b] && ~gen_ok(a_st_done[b][gh.tile], gh.capa);
         assign acb_exec[b]  = fl_act || (|gb_v) || (sp_cnt != 0);
         assign acb_qwait[b] = ~acb_exec[b] && gh_v;
-        assign acb_st[b]    = ~acb_exec[b] && ~gh_v && ((so_ph != 3'd0) || (st_cnt[b] != 2'd0));
+        assign acb_st[b]    = ~acb_exec[b] && ~gh_v && ((so_ph != 3'd0) || (st_cnt[b] != '0));
         assign acb_xld[b]   = ~acb_exec[b] && ~gh_v && ~acb_st[b] && ((ldx_cnt != 2'd0) || ld_act[0]);
         assign acb_tw[b]    = ~acb_exec[b] && ~gh_v && ~acb_st[b] && ~acb_xld[b] && (|wait_v);
         assign acb_oth[b]   = ~acb_exec[b] && ~gh_v && ~acb_st[b] && ~acb_xld[b] && ~(|wait_v);
@@ -1636,41 +1640,60 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
     localparam DQ_SFD = 8;                       // store FIFO rows
     localparam [LID_W-1:0] DQ_LID = LID_W'(NLD);
 
-    // ---- ownership / command
-    reg              dq_v;                       // a tile is being processed
-    reg  [BK_W-1:0]  dq_b;
-    st_cmd_t         dq_cmd;
-    reg  [1:0]       dq_ph;                      // 0 scales, 1 run
+    // ---- two tile contexts: one may fetch its scales while the other runs (tag row[7] = context)
+    reg  [1:0]       cx_v;                       // context holds a tile
+    reg  [1:0]       cx_rdy;                     // its scales have arrived
+    reg  [BK_W-1:0]  cx_b   [2];
+    st_cmd_t         cx_cmd [2];
+    reg  [3:0]       cx_k   [2];                 // next scale request 0..8 (9 = all issued)
+    reg  [7:0]       cx_wexp [2], cx_wgot [2];
+    reg  [31:0]      cx_ws  [2][64];
+    reg  [31:0]      cx_xs  [2][8];
+    reg              cx_old;                     // the context assigned first (runs first)
+    reg              dq_run;                     // a context is running
+    reg              dq_rc;                      // ... which one
+
+    // assignment: a block whose store head is a tacc.st fp and that holds no context yet
+    logic [NB-1:0]   dq_cand;
+    always_comb begin
+        for (integer b = 0; b < NB; ++b)
+            dq_cand[b] = dqs_want[b] && ~(cx_v[0] && (cx_b[0] == BK_W'(b))) && ~(cx_v[1] && (cx_b[1] == BK_W'(b)));
+    end
     reg  [BK_W-1:0]  dq_rr;
     logic [BK_W-1:0] dq_pick;
     logic            dq_wany;
     always_comb begin
         dq_pick = dq_rr;
-        dq_wany  = 1'b0;
+        dq_wany = 1'b0;
         for (integer i = 0; i < NB; ++i) begin
             automatic logic [BK_W-1:0] c = BK_W'((32'(dq_rr) + i) % NB);
-            if (!dq_wany && dqs_want[c]) begin dq_pick = c; dq_wany = 1'b1; end
+            if (!dq_wany && dq_cand[c]) begin dq_pick = c; dq_wany = 1'b1; end
         end
     end
-    assign dq_own_v = dq_v && (dq_ph == 2'd1);
-    assign dq_own   = dq_b;
+    wire dq_free_ctx = cx_v[0] ? 1'b1 : 1'b0;    // index of a free context (0 if both free)
+    wire dq_assign   = dq_wany && ~(&cx_v);
 
-    // ---- scale fetch
-    reg  [31:0]      dq_ws [64];
-    reg  [31:0]      dq_xs [8];
-    reg  [3:0]       dq_k;                       // next scale request 0..8 (9 = all issued)
-    reg  [7:0]       dq_wexp, dq_wgot;
-    wire [6:0]       dq_k8 = {1'b0, dq_k[2:0], 3'b000};
-    `UNUSED_VAR (dq_cmd)
-    logic [7:0]      dq_kmask;
+    // ---- scale fetch: the oldest context still fetching
+    wire  dq_fc_v = (cx_v[cx_old] && ~cx_rdy[cx_old] && (cx_k[cx_old] < 4'd9)) || (cx_v[~cx_old] && ~cx_rdy[~cx_old] && (cx_k[~cx_old] < 4'd9));
+    wire  dq_fc   = (cx_v[cx_old] && ~cx_rdy[cx_old] && (cx_k[cx_old] < 4'd9)) ? cx_old : ~cx_old;
+    wire [3:0]  dq_k  = cx_k[dq_fc];
+    wire [6:0]  dq_k8 = {1'b0, dq_k[2:0], 3'b000};
+    logic [7:0] dq_kmask;
     always_comb begin
         for (integer l = 0; l < 8; ++l)
-            dq_kmask[l] = (dq_k == 4'd8) ? (4'(l) < dq_cmd.mlim) : ((32'(dq_k8) + l) < 32'(dq_cmd.nlim));
+            dq_kmask[l] = (dq_k == 4'd8) ? (4'(l) < cx_cmd[dq_fc].mlim) : ((32'(dq_k8) + l) < 32'(cx_cmd[dq_fc].nlim));
     end
-    wire dq_scl_req = dq_v && (dq_ph == 2'd0) && (dq_k < 4'd9) && (|dq_kmask);
-    wire dq_scl_skip = dq_v && (dq_ph == 2'd0) && (dq_k < 4'd9) && ~(|dq_kmask);
+    wire dq_scl_req  = dq_fc_v && (|dq_kmask);
+    wire dq_scl_skip = dq_fc_v && ~(|dq_kmask);
 
-    // ---- beat FIFO (2 deep) fed by the owner block
+    // ---- running context
+    st_cmd_t     dq_cmd;
+    assign dq_cmd   = cx_cmd[dq_rc];
+    `UNUSED_VAR (dq_cmd)
+    assign dq_own_v = dq_run;
+    assign dq_own   = cx_b[dq_rc];
+
+    // ---- beat FIFO (2 deep) fed by the running context's block
     reg  [ACC_W-1:0] dq_bf [2];
     reg  [1:0]       dq_bf_cnt;
     reg              dq_bf_wp, dq_bf_rp;
@@ -1684,7 +1707,7 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
     reg  [3:0]       dq_rows_fl;                 // rows started, not yet in the store FIFO / skipped
     reg  [3:0]       dq_sf_cnt;
     wire             dq_row_start = (dq_c[1:0] == 2'd0);
-    wire             dq_can_issue = dq_own_v && (dq_bf_cnt != 2'd0)
+    wire             dq_can_issue = dq_run && (dq_bf_cnt != 2'd0)
                                  && (~dq_row_start || ((32'(dq_sf_cnt) + 32'(dq_rows_fl)) < DQ_SFD));
     wire [ACC_W-1:0] dq_beat = dq_bf[dq_bf_rp];
     wire [5:0]       dq_n_in  = {dq_c[2], dq_bi};     // beat bi holds weight columns bi (j=0) and bi + 32 (j=1)
@@ -1702,7 +1725,6 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
         pn[0] <= dq_n_in; pmp[0] <= dq_mp_in;
         for (integer i = 1; i <= DQ_LAT; ++i) begin pn[i] <= pn[i-1]; pmp[i] <= pmp[i-1]; end
     end
-    // stage indices: inputs at cycle 0 -> fcvt result after DQ_LC, x ws after DQ_LC + DQ_LM, x xs after DQ_LAT
     wire [31:0] dq_f  [2];
     wire [31:0] dq_p1 [2];
     wire [31:0] dq_p2 [2];
@@ -1727,7 +1749,7 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
         ) mul1 (
             .clk (clk), .reset (reset), .enable (1'b1), .mask (pv[DQ_LC-1]),
             .op_type (INST_FPU_BITS'(INST_FPU_MUL)), .fmt ('0), .frm (INST_FRM_RNE),
-            .dataa (dq_f[k]), .datab (dq_ws[pn[DQ_LC-1]]), .datac ('0),
+            .dataa (dq_f[k]), .datab (cx_ws[dq_rc][pn[DQ_LC-1]]), .datac ('0),
             .result (dq_p1[k]), .fflags (dq_ff_1)
         );
         VX_fma_unit #(
@@ -1735,7 +1757,7 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
         ) mul2 (
             .clk (clk), .reset (reset), .enable (1'b1), .mask (pv[DQ_LC+DQ_LM-1]),
             .op_type (INST_FPU_BITS'(INST_FPU_MUL)), .fmt ('0), .frm (INST_FRM_RNE),
-            .dataa (dq_p1[k]), .datab (dq_xs[{pmp[DQ_LC+DQ_LM-1], 1'(k)}]), .datac ('0),
+            .dataa (dq_p1[k]), .datab (cx_xs[dq_rc][{pmp[DQ_LC+DQ_LM-1], 1'(k)}]), .datac ('0),
             .result (dq_p2[k]), .fflags (dq_ff_2)
         );
         `UNUSED_VAR (dq_ff_1)
@@ -1747,7 +1769,7 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
     wire [1:0]  dq_omp = pmp[DQ_LAT-1];
     wire [31:0] dq_o0  = (dq_p2[0] == 32'h8000_0000) ? 32'd0 : dq_p2[0];
     wire [31:0] dq_o1  = (dq_p2[1] == 32'h8000_0000) ? 32'd0 : dq_p2[1];
-    reg  [31:0] dq_rowb [8];
+    reg  [31:0] dq_rowb [6];
     wire        dq_row_done = dq_ov && (dq_omp == 2'd3);
     wire        dq_row_skip = dq_row_done && (7'(dq_on) >= dq_cmd.nlim);
 
@@ -1756,19 +1778,21 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
     reg  [255:0]     dq_sf_d [DQ_SFD];
     reg  [2:0]       dq_sf_wp, dq_sf_rp;
     wire             dq_sf_push = dq_row_done && ~dq_row_skip;
-    wire             dq_st_req  = dq_v && (dq_ph == 2'd1) && (dq_sf_cnt != 4'd0);
+    wire             dq_st_req  = dq_run && (dq_sf_cnt != 4'd0);
     reg  [6:0]       dq_retired;
+    wire             dq_fin     = dq_run && (dq_retired == 7'd64);
 
-    // LSU request (scale read or row store)
+    // LSU request: a scale read (priority) or a row store
+    wire dq_sel_scl = dq_scl_req;
     always_comb begin
         dqr_req = '0;
-        if (dq_ph == 2'd0) begin
+        if (dq_sel_scl) begin
             automatic ld_tag_t t;
-            t = '0; t.lid = DQ_LID; t.row = 8'(dq_k);
+            t = '0; t.lid = DQ_LID; t.row = {dq_fc, 3'b000, dq_k};
             dqr_req.rw = 1'b0;
             for (integer l = 0; l < 8; ++l) begin
                 dqr_req.mask[l]   = dq_kmask[l];
-                dqr_req.addr[l]   = LSU_ADDR_WIDTH'((((dq_k == 4'd8) ? dq_cmd.xsp : dq_cmd.wsp) >> 2)
+                dqr_req.addr[l]   = LSU_ADDR_WIDTH'((((dq_k == 4'd8) ? cx_cmd[dq_fc].xsp : cx_cmd[dq_fc].wsp) >> 2)
                                                     + ((dq_k == 4'd8) ? 32'd0 : 32'(dq_k8)) + 32'(l));
                 dqr_req.byteen[l] = {LSU_WORD_SIZE{1'b1}};
             end
@@ -1789,43 +1813,51 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
         end
     end
     assign dqr_valid = dq_scl_req || dq_st_req;
-    wire dq_st_fire = dqr_fire && (dq_ph == 2'd1);
+    wire dq_scl_fire = dqr_fire && dq_sel_scl;
+    wire dq_st_fire  = dqr_fire && ~dq_sel_scl;
+    wire dq_rsp_ctx  = rsp_tag.row[7];
 
     always_ff @(posedge clk) begin
         if (reset) begin
-            dq_v <= 1'b0; dq_rr <= '0; dq_ph <= '0;
+            cx_v <= '0; cx_rdy <= '0; cx_old <= 1'b0; dq_run <= 1'b0; dq_rc <= 1'b0; dq_rr <= '0;
             dq_bf_cnt <= '0; dq_bf_wp <= 1'b0; dq_bf_rp <= 1'b0; dq_rd_d <= 1'b0;
             dq_sf_cnt <= '0; dq_sf_wp <= '0; dq_sf_rp <= '0; dq_rows_fl <= '0;
         end else begin
-            dq_rd_d <= dq_v && dqb_rd[dq_b];
-            if (~dq_v) begin
-                if (dq_wany) begin
-                    dq_v <= 1'b1; dq_b <= dq_pick; dq_cmd <= st_q[dq_pick][st_rp[dq_pick]];
-                    dq_ph <= 2'd0; dq_k <= '0; dq_wexp <= '0; dq_wgot <= '0;
-                    dq_bi <= '0; dq_c <= '0; dq_retired <= '0;
-                    dq_rr <= BK_W'((32'(dq_pick) + 1) % NB);
-                end
-            end else begin
-                // scale phase
-                if ((dq_ph == 2'd0) && ((dqr_fire && dq_scl_req) || dq_scl_skip)) begin
-                    dq_k <= dq_k + 4'd1;
-                    dq_wexp <= dq_wexp + 8'($countones(dq_kmask & {8{dqr_fire}}));
-                end
-                if (dq_rsp_fire) dq_wgot <= dq_wgot + 8'($countones(mem_if.rsp_data.mask));
-                if ((dq_ph == 2'd0) && (dq_k == 4'd9) && (dq_wgot == dq_wexp)) dq_ph <= 2'd1;
-                // run phase: issue
-                if (dq_can_issue) begin
-                    dq_c <= dq_c + 3'd1;
-                    if (dq_c == 3'd7) dq_bi <= dq_bi + 5'd1;
-                end
-                if (dq_ov) begin dq_rowb[{dq_omp, 1'b0}] <= dq_o0; dq_rowb[{dq_omp, 1'b1}] <= dq_o1; end
-                dq_retired <= dq_retired + 7'(dq_row_skip) + 7'(dq_st_fire);
-                if (dq_retired == 7'd64) begin
-                    dq_v <= 1'b0;
-                end
+            dq_rd_d <= dq_run && dqb_rd[cx_b[dq_rc]];
+            // assign a context
+            if (dq_assign) begin
+                cx_v[dq_free_ctx] <= 1'b1; cx_rdy[dq_free_ctx] <= 1'b0;
+                cx_b[dq_free_ctx] <= dq_pick; cx_cmd[dq_free_ctx] <= st_q[dq_pick][st_rp[dq_pick]];
+                cx_k[dq_free_ctx] <= '0; cx_wexp[dq_free_ctx] <= '0; cx_wgot[dq_free_ctx] <= '0;
+                if (~(|cx_v)) cx_old <= dq_free_ctx;
+                dq_rr <= BK_W'((32'(dq_pick) + 1) % NB);
+            end
+            // scale requests / responses
+            if (dq_scl_fire || dq_scl_skip) begin
+                cx_k[dq_fc] <= cx_k[dq_fc] + 4'd1;
+                cx_wexp[dq_fc] <= cx_wexp[dq_fc] + 8'(dq_scl_fire ? $countones(dq_kmask) : 0);
+            end
+            if (dq_rsp_fire) cx_wgot[dq_rsp_ctx] <= cx_wgot[dq_rsp_ctx] + 8'($countones(mem_if.rsp_data.mask));
+            for (integer c = 0; c < 2; ++c) begin
+                if (cx_v[c] && ~cx_rdy[c] && (cx_k[c] == 4'd9) && (cx_wgot[c] == cx_wexp[c])
+                    && ~(dq_rsp_fire && (dq_rsp_ctx == 1'(c)))) cx_rdy[c] <= 1'b1;
+            end
+            // start the oldest ready context
+            if (~dq_run && cx_v[cx_old] && cx_rdy[cx_old]) begin
+                dq_run <= 1'b1; dq_rc <= cx_old; dq_bi <= '0; dq_c <= '0; dq_retired <= '0;
+            end
+            // run
+            if (dq_can_issue) begin
+                dq_c <= dq_c + 3'd1;
+                if (dq_c == 3'd7) dq_bi <= dq_bi + 5'd1;
+            end
+            if (dq_ov && (dq_omp != 2'd3)) begin dq_rowb[{dq_omp, 1'b0}] <= dq_o0; dq_rowb[{dq_omp, 1'b1}] <= dq_o1; end
+            if (dq_run) dq_retired <= dq_retired + 7'(dq_row_skip) + 7'(dq_st_fire);
+            if (dq_fin) begin
+                dq_run <= 1'b0; cx_v[dq_rc] <= 1'b0; cx_old <= ~dq_rc;
             end
             // beat FIFO
-            if (dq_bf_push) begin dq_bf[dq_bf_wp] <= dqb_data[dq_b]; dq_bf_wp <= ~dq_bf_wp; end
+            if (dq_bf_push) begin dq_bf[dq_bf_wp] <= dqb_data[cx_b[dq_rc]]; dq_bf_wp <= ~dq_bf_wp; end
             if (dq_can_issue && (dq_c == 3'd7)) dq_bf_rp <= ~dq_bf_rp;
             dq_bf_cnt <= dq_bf_cnt + 2'(dq_bf_push) - 2'(dq_can_issue && (dq_c == 3'd7));
             // rows in flight / store FIFO
@@ -1838,30 +1870,20 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
             if (dq_st_fire) dq_sf_rp <= dq_sf_rp + 3'd1;
             dq_sf_cnt <= dq_sf_cnt + 4'(dq_sf_push) - 4'(dq_st_fire);
         end
-        if (dq_rsp_fire && (dq_ph == 2'd0)) begin
+        if (dq_rsp_fire) begin
             for (integer l = 0; l < 8; ++l) begin
                 if (mem_if.rsp_data.mask[l]) begin
-                    if (rsp_tag.row == 8'd8) dq_xs[l] <= mem_if.rsp_data.data[l];
-                    else                     dq_ws[{rsp_tag.row[2:0], 3'(l)}] <= mem_if.rsp_data.data[l];
+                    if (rsp_tag.row[3:0] == 4'd8) cx_xs[dq_rsp_ctx][l] <= mem_if.rsp_data.data[l];
+                    else                          cx_ws[dq_rsp_ctx][{rsp_tag.row[2:0], 3'(l)}] <= mem_if.rsp_data.data[l];
                 end
             end
         end
     end
-`ifdef DQ_DEBUG
-    always @(posedge clk) begin
-        if (dq_rsp_fire) $display("%t DQ rsp row=%0d mask=%b d0=%h d1=%h", $time, rsp_tag.row, mem_if.rsp_data.mask, mem_if.rsp_data.data[0], mem_if.rsp_data.data[1]);
-        if (dqr_fire) $display("%t DQ req ph=%0d k=%0d rw=%b a0=%h m=%b d0=%h", $time, dq_ph, dq_k, dqr_req.rw, dqr_req.addr[0], dqr_req.mask, dqr_req.data[0]);
-        if (dq_can_issue && dq_n_in < 2) $display("%t DQ iss n=%0d mp=%0d iv0=%h iv1=%h", $time, dq_n_in, dq_mp_in, dq_iv0, dq_iv1);
-        if (pv[DQ_LC-1] && pn[DQ_LC-1] < 2) $display("%t DQ cvt n=%0d f0=%h ws=%h", $time, pn[DQ_LC-1], dq_f[0], dq_ws[pn[DQ_LC-1]]);
-        if (pv[DQ_LC+DQ_LM-1] && pn[DQ_LC+DQ_LM-1] < 2) $display("%t DQ m1 n=%0d p1=%h xs=%h", $time, pn[DQ_LC+DQ_LM-1], dq_p1[0], dq_xs[{pmp[DQ_LC+DQ_LM-1], 1'b0}]);
-        if (dq_ov && dq_on < 2) $display("%t DQ out n=%0d mp=%0d o0=%h o1=%h", $time, dq_on, dq_omp, dq_o0, dq_o1);
-    end
-`endif
     for (genvar b = 0; b < NB; ++b) begin : g_dqs_done
-        assign dqs_done[b] = dq_v && (dq_b == BK_W'(b)) && (dq_retired == 7'd64);
+        assign dqs_done[b] = dq_fin && (cx_b[dq_rc] == BK_W'(b));
     end
-    `RUNTIME_ASSERT(~(dq_rsp_fire && (dq_ph != 2'd0)), ("%t: *** %s dequant: unexpected LSU response", $time, INSTANCE_ID))
-    `RUNTIME_ASSERT(~(dq_v && dq_cmd.fp && ((dq_cmd.dst[1:0] != 2'd0) || (dq_cmd.stride[1:0] != 2'd0) || (dq_cmd.wsp[1:0] != 2'd0) || (dq_cmd.xsp[1:0] != 2'd0)
+    `RUNTIME_ASSERT(~(dq_rsp_fire && ~(cx_v[dq_rsp_ctx] && ~cx_rdy[dq_rsp_ctx])), ("%t: *** %s dequant: unexpected LSU response", $time, INSTANCE_ID))
+    `RUNTIME_ASSERT(~(dq_run && ((dq_cmd.dst[1:0] != 2'd0) || (dq_cmd.stride[1:0] != 2'd0) || (dq_cmd.wsp[1:0] != 2'd0) || (dq_cmd.xsp[1:0] != 2'd0)
                       || (dq_cmd.nlim == 7'd0) || (dq_cmd.nlim > 7'd64) || (dq_cmd.mlim == 4'd0) || (dq_cmd.mlim > 4'd8))),
         ("%t: *** %s tacc.st fp: bad operands (dst/stride/scales 4 B aligned, 1 <= nlim <= 64, 1 <= mlim <= 8)", $time, INSTANCE_ID))
 `else
