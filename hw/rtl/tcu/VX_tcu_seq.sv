@@ -677,6 +677,80 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
         end
     end
 
+    // ---------------------------------------------------------------------------------------------------
+    // Landed watermark (G4 feed): a tgemm may start on a W slot whose stream landing is still in flight and
+    // consume it k-group by k-group as it lands. A k-group is 64 k bytes of all 64 rows = 64 beats in both
+    // landing layouts (SIMT8: 8 k-chunks x 8 row-octets; row-major: one 64 B segment of each of the 64 rows).
+    // Per block, one tracker follows the landing currently writing the block (one TSU worker per block, one
+    // transfer at a time): a beat counter per k-group (beats may arrive in any order: masters interleave
+    // bursts) and wm = the number of leading complete groups. The tracker is cleared by the landing's done.
+    // A beat for a different slot while the tracker is busy is landed but not tracked (its tgemm falls back
+    // to the whole-transfer wait), so the watermark only ever claims groups whose 64 beats were all written.
+    // ---------------------------------------------------------------------------------------------------
+    localparam LG_N   = KT_MAX / 64;              // k-groups per slot row
+    localparam LWM_W  = `CLOG2(LG_N + 1);
+    wire [NB-1:0]              trk_v;
+    wire [1:0]                 trk_slot [NB];
+    wire [LWM_W-1:0]           trk_wm   [NB];
+    wire [NB-1:0]              lws_beat_ev;       // a beat landed in block b this cycle
+    wire [1:0]                 lws_beat_slot [NB];
+`ifdef VX_CFG_TSU_ENABLE
+`ifndef VX_CFG_TCU_SEQ_NO_LAND_WM
+    localparam LG_W   = `UP(`CLOG2(LG_N));
+    for (genvar b = 0; b < NB; ++b) begin : g_trk
+        localparam LN = b % WLL;
+        wire        bt_fire = wl_fire[LN] && (wl_blk[LN] == 2'(b));
+        wire [1:0]  bt_slot = wl_slot[LN];
+        wire [LG_W-1:0] bt_grp = wl_beat[LN].simt ? LG_W'(32'(wl_beat[LN].seg) >> 3) : LG_W'(wl_beat[LN].seg);
+        wire        dn = lws_done_ev && (lws_done_blk == 2'(b));
+        reg         v_r;
+        reg  [1:0]  slot_r;
+        reg  [6:0]  cnt_r [LG_N];
+        reg  [LWM_W-1:0] wm_r;
+        // the tracked landing ends this cycle: a beat in the same cycle starts a new one
+        wire        cur_v  = v_r && ~(dn && (lws_done_slot == slot_r));
+        wire        start  = bt_fire && ~cur_v;
+        wire        count  = bt_fire && cur_v && (bt_slot == slot_r);
+        wire        wm_adv = cur_v && (32'(wm_r) < LG_N) && (cnt_r[LG_W'(wm_r)] == 7'd64);
+        always_ff @(posedge clk) begin
+            if (reset) begin
+                v_r <= 1'b0;
+            end else begin
+                if (start) begin
+                    v_r    <= 1'b1;
+                    slot_r <= bt_slot;
+                    wm_r   <= '0;
+                    for (integer g = 0; g < LG_N; ++g) cnt_r[g] <= (LG_W'(g) == bt_grp) ? 7'd1 : 7'd0;
+                end else begin
+                    if (~cur_v) v_r <= 1'b0;
+                    if (count) cnt_r[bt_grp] <= cnt_r[bt_grp] + 7'd1;
+                    if (wm_adv) wm_r <= wm_r + LWM_W'(1);
+                end
+            end
+        end
+        `RUNTIME_ASSERT(~count || (cnt_r[bt_grp] != 7'd64),
+            ("%t: *** %s blk%0d landing k-group %0d overflows (a second landing reached slot %0d before the first closed)", $time, INSTANCE_ID, b, bt_grp, slot_r))
+        assign trk_v[b]         = v_r;
+        assign trk_slot[b]      = slot_r;
+        assign trk_wm[b]        = wm_r;
+        assign lws_beat_ev[b]   = bt_fire;
+        assign lws_beat_slot[b] = bt_slot;
+    end
+`else
+    for (genvar b = 0; b < NB; ++b) begin : g_trk
+        localparam LN = b % WLL;
+        assign trk_v[b] = 1'b0; assign trk_slot[b] = '0; assign trk_wm[b] = '0;
+        assign lws_beat_ev[b]   = wl_fire[LN] && (wl_blk[LN] == 2'(b));
+        assign lws_beat_slot[b] = wl_slot[LN];
+    end
+`endif
+`else
+    for (genvar b = 0; b < NB; ++b) begin : g_trk
+        assign trk_v[b] = 1'b0; assign trk_slot[b] = '0; assign trk_wm[b] = '0;
+        assign lws_beat_ev[b] = 1'b0; assign lws_beat_slot[b] = '0;
+    end
+`endif
+
     // W banks per block
     logic [NB-1:0][7:0]            wb_we;
     logic [NB-1:0][7:0][WA_W-1:0]  wb_wa;
@@ -989,6 +1063,11 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
             end
             // stream landings are always full 64-row slabs
             if (lws_done_ev) w_rows_r[lws_done_blk][lws_done_slot] <= 7'd64;
+            // ... and already from their first beat, for a tgemm consuming a partly landed slot (the WAR cap
+            // guarantees no earlier tgemm still reads the slot once a beat is accepted)
+            for (integer b = 0; b < NB; ++b) begin
+                if (lws_beat_ev[b]) w_rows_r[b][lws_beat_slot[b]] <= 7'd64;
+            end
         end
     end
 
@@ -1067,13 +1146,23 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
     reg [63:0] perf_lws, perf_lws_beats;   // stream landings (transfers) and landed 64 B beats
 
     wire [NB-1:0] perf_blk_busy, perf_blk_wait, perf_blk_drain;
+    wire [NB-1:0] perf_blk_lwait, perf_blk_early;   // fill stalled on a partly landed slot; tgemm started on one
+    reg  [63:0]   perf_land_wait, perf_early;
+    wire [NB-1:0] perf_blk_wx, perf_blk_ww, perf_blk_wa;   // slot_wait split by the unmet interlock (X / W / acc tile)
+    reg  [63:0]   perf_wait_x, perf_wait_w, perf_wait_a;
 
     for (genvar b = 0; b < NB; ++b) begin : g_blk
         // ------------------------------------------------ MAC fill
         gemm_cmd_t gh;
         assign gh = gm_q[b][gm_rp[b]];
         wire gh_v  = (gm_cnt[b] != 0);
-        wire gh_ok = gh_v && gen_ok(x_ld_done[gh.xs], gh.capx) && gen_ok(w_ld_done[b][gh.ws], gh.capw)
+        // W readiness: the slot's loads are all done, or (landed watermark) the one load still outstanding
+        // is the slot's head stream landing, which the block tracker is following: then the fill consumes
+        // k-group g once the watermark has passed it.
+        wire gh_w_done = gen_ok(w_ld_done[b][gh.ws], gh.capw);
+        wire gh_w_strm = ((gh.capw - w_ld_done[b][gh.ws]) == GEN_W'(1)) && (lws_cnt[b][gh.ws] != 2'd0)
+                       && trk_v[b] && (trk_slot[b] == gh.ws);
+        wire gh_ok = gh_v && gen_ok(x_ld_done[gh.xs], gh.capx) && (gh_w_done || gh_w_strm)
                           && gen_ok(a_st_done[b][gh.tile], gh.capa);
 
         // group buffers
@@ -1090,7 +1179,9 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
         reg                    fl_xdone;
         wire [KB_W-1:0]        fl_groups = KB_W'(32'(gh.k) >> 3);
         wire [CH_W-1:0]        fl_ch     = CH_W'((32'(gh.koff) >> 3) + 32'(fl_g));
-        wire                   fl_can    = fl_act && ~gb_v[fl_buf];
+        // the group's W chunk has landed (whole slot loaded, or k-group fl_ch / 8 below the landed watermark)
+        wire                   fl_w_av   = gh_w_done || (gh_w_strm && ((32'(fl_ch) >> 3) < 32'(trk_wm[b])));
+        wire                   fl_can    = fl_act && ~gb_v[fl_buf] && fl_w_av;
 
         assign xr_req[b]  = fl_can && ~fl_xdone;
         assign xr_slot[b] = gh.xs;
@@ -1446,6 +1537,11 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
         assign perf_blk_busy[b]  = mac_in_fire;
         assign perf_blk_wait[b]  = gh_v && ~gh_ok && ~fl_act;
         assign perf_blk_drain[b] = dr_fire;
+        assign perf_blk_lwait[b] = fl_act && ~gb_v[fl_buf] && ~fl_w_av;
+        assign perf_blk_early[b] = ~fl_act && gh_ok && ~gh_w_done;
+        assign perf_blk_wx[b]    = perf_blk_wait[b] && ~gen_ok(x_ld_done[gh.xs], gh.capx);
+        assign perf_blk_ww[b]    = perf_blk_wait[b] && ~(gh_w_done || gh_w_strm);
+        assign perf_blk_wa[b]    = perf_blk_wait[b] && ~gen_ok(a_st_done[b][gh.tile], gh.capa);
     end
 
     // ===================================================================================================
@@ -1492,6 +1588,7 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
         if (reset) begin
             perf_gemms <= '0; perf_gemm_k <= '0; perf_busy <= '0; perf_slot_wait <= '0; perf_drain <= '0;
             perf_ldx <= '0; perf_ldw <= '0; perf_st <= '0; perf_lws <= '0; perf_lws_beats <= '0;
+            perf_land_wait <= '0; perf_early <= '0; perf_wait_x <= '0; perf_wait_w <= '0; perf_wait_a <= '0;
         end else begin
             perf_gemms     <= perf_gemms + 64'($countones(gm_done_ev));
             perf_busy      <= perf_busy + 64'($countones(perf_blk_busy));
@@ -1502,6 +1599,11 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
             perf_lws       <= perf_lws + 64'(lws_done_ev);
             perf_lws_beats <= perf_lws_beats + 64'($countones(wl_fire));
             perf_st        <= perf_st + 64'($countones(st_done_ev));
+            perf_land_wait <= perf_land_wait + 64'($countones(perf_blk_lwait));
+            perf_early     <= perf_early + 64'($countones(perf_blk_early));
+            perf_wait_x    <= perf_wait_x + 64'($countones(perf_blk_wx));
+            perf_wait_w    <= perf_wait_w + 64'($countones(perf_blk_ww));
+            perf_wait_a    <= perf_wait_a + 64'($countones(perf_blk_wa));
             perf_gemm_k    <= perf_gemm_k + 64'(f_fire && (f_op == OP_GEMM) ? f_rs1 : 32'd0);
         end
     end
@@ -1522,8 +1624,8 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
             if (f_fire && f_async) perf_dirty <= 1'b1;
             else if (perf_dirty && perf_idle_cnt[12]) begin
                 perf_dirty <= 1'b0;
-                $display("%s: TCU-SEQ perf: busy_window=%0d tgemms=%0d gemm_k=%0d mac_beats=%0d slot_wait=%0d drain_beats=%0d ldx=%0d ldw=%0d tacc_st=%0d ldws=%0d ldws_beats=%0d",
-                    INSTANCE_ID, perf_win_cyc, perf_gemms, perf_gemm_k, perf_busy, perf_slot_wait, perf_drain, perf_ldx, perf_ldw, perf_st, perf_lws, perf_lws_beats);
+                $display("%s: TCU-SEQ perf: busy_window=%0d tgemms=%0d gemm_k=%0d mac_beats=%0d slot_wait=%0d drain_beats=%0d ldx=%0d ldw=%0d tacc_st=%0d ldws=%0d ldws_beats=%0d land_wait=%0d early=%0d wait_x=%0d wait_w=%0d wait_a=%0d",
+                    INSTANCE_ID, perf_win_cyc, perf_gemms, perf_gemm_k, perf_busy, perf_slot_wait, perf_drain, perf_ldx, perf_ldw, perf_st, perf_lws, perf_lws_beats, perf_land_wait, perf_early, perf_wait_x, perf_wait_w, perf_wait_a);
             end
         end
     end
