@@ -495,6 +495,22 @@ module VX_dxa_worker import VX_gpu_pkg::*, VX_dxa_pkg::*; #(
     // out-of-order drain).
     // ════════════════════════════════════════════════════════════════════
 
+`ifdef VX_CFG_TSU_WLAND_ONLY
+`ifndef VX_CFG_TSU_ENABLE
+    `VX_CFG_TSU_WLAND_ONLY_requires_VX_CFG_TSU_ENABLE
+`endif
+`ifndef VX_CFG_TCU_SEQ_ENABLE
+    `VX_CFG_TSU_WLAND_ONLY_requires_VX_CFG_TCU_SEQ_ENABLE
+`endif
+    // VX_CFG_TSU_WLAND_ONLY (sequencer builds): stream workers only land W slots (TILEBUF_B, the g_wland path
+    // above), so they carry no LMEM writer. A TSU transfer to LMEM on such a build is a fatal assert (it would
+    // hang: nothing drains it). Line workers keep smem_wr.
+    localparam HAS_SMEM_WR = (STREAM == 0);
+`else
+    localparam HAS_SMEM_WR = 1;
+`endif
+
+if (HAS_SMEM_WR != 0) begin : g_smem_wr
     VX_dxa_smem_wr #(
         .MAX_OUTSTANDING (MAX_OUTSTANDING),
         .CL_SIZE         (CL_BYTES),
@@ -545,6 +561,29 @@ module VX_dxa_worker import VX_gpu_pkg::*, VX_dxa_pkg::*; #(
         .lg_bkK                (ag_lg_bkK),
         .smem_base             (ag_smem_base)
     );
+end else begin : g_no_smem_wr
+    assign sm_ready         = 1'b0;
+    assign sm_release_en    = 1'b0;
+    assign sm_release_tag   = '0;
+    assign sm_transfer_done = 1'b0;
+    assign wr_done_count    = '0;
+    assign smem_req_fire    = 1'b0;
+`ifdef PERF_ENABLE
+    assign perf_lmem_writes = '0;
+`endif
+    assign smem_bus_if.req_valid = 1'b0;
+    assign smem_bus_if.req_data  = '0;
+    assign smem_bus_if.rsp_ready = 1'b0;
+    `UNUSED_VAR (smem_bus_if.req_ready)
+    `UNUSED_VAR (smem_bus_if.rsp_valid)
+    `UNUSED_VAR (smem_bus_if.rsp_data)
+    `UNUSED_VAR ({ag_cfill, active_core_id, active_uuid, active_bar_addr, active_notify_smem_done, sm_valid, sw_tag,
+                  sw_byte_offset, sw_valid_length, sw_oob, sw_k_row, sw_n_base, active_is_multicast, active_cta_mask,
+                  active_smem_stride, ag_dest_kmajor, ag_per_lane_stride_bytes, ag_elem_bytes, ag_dest_mode,
+                  ag_lg_ratio, ag_lg_tcN, ag_lg_nsteps, ag_lg_bkK, ag_smem_base})
+    `RUNTIME_ASSERT(~(transfer_active && ~setup_params.wl_en),
+        ("%t: *** %s TSU transfer to LMEM on a VX_CFG_TSU_WLAND_ONLY build (stream workers only land W slots)", $time, INSTANCE_ID))
+end
 
     // ════════════════════════════════════════════════════════════════════
     // Watchdog
