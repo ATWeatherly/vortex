@@ -35,6 +35,7 @@ module VX_dxa_core import VX_gpu_pkg::*, VX_dxa_pkg::*; #(
     // Phase-4 W-slot landing to the socket's core TCU sequencer (one core per socket)
     output wire [TSU_WL_LANES-1:0] wl_valid,
     input  wire [TSU_WL_LANES-1:0] wl_ready,
+    input  wire [TSU_WL_GO_W-1:0]  wl_go,
     output dxa_wland_beat_t [TSU_WL_LANES-1:0] wl_beat,
     output wire                 wl_done_valid,
     output dxa_wland_done_t     wl_done,
@@ -307,6 +308,7 @@ end
         `ifdef VX_CFG_TCU_SEQ_ENABLE
             `UNUSED_PIN (wl_valid),
             .wl_ready       (1'b0),
+            .wl_go          ('0),
             `UNUSED_PIN (wl_beat),
             `UNUSED_PIN (wl_done_valid),
             `UNUSED_PIN (wl_done),
@@ -390,6 +392,7 @@ end
         `ifdef VX_CFG_TCU_SEQ_ENABLE
             .wl_valid       (tw_valid[i]),
             .wl_ready       (tw_ready[i]),
+            .wl_go          (wl_go),
             .wl_beat        (tw_beat[i]),
             .wl_done_valid  (tw_done_valid[i]),
             .wl_done        (tw_done[i]),

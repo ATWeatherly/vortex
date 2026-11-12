@@ -45,6 +45,7 @@ module VX_dxa_worker import VX_gpu_pkg::*, VX_dxa_pkg::*; #(
     // Phase-4 W-slot landing (STREAM workers; line workers tie wl_ready low and never drive wl_*)
     output wire                 wl_valid,
     input  wire                 wl_ready,
+    input  wire [TSU_WL_GO_W-1:0] wl_go,      // landing start gate per {blk, slot} (sequencer)
     output dxa_wland_beat_t     wl_beat,
     output wire                 wl_done_valid,
     output dxa_wland_done_t     wl_done,
@@ -177,6 +178,23 @@ module VX_dxa_worker import VX_gpu_pkg::*, VX_dxa_pkg::*; #(
     // Stage 2: Address Generator
     // ════════════════════════════════════════════════════════════════════
 
+    // W-slot landing start gate: a TILEBUF_B transfer issues no read until the sequencer reports that its slot's
+    // expectation is queued and free to write (wl_go), so its beats never wait inside the TSU and its stream
+    // responses never back-pressure the memory system (silicon u50p5_1c100: that back-pressure blocked the core's
+    // own X loads, which the expectation was waiting behind -> deadlock).
+    wire ag_valid_raw, ag_ready_raw;
+`ifdef VX_CFG_TSU_ENABLE
+`ifdef VX_CFG_TCU_SEQ_ENABLE
+    wire ag_go = ~setup_params.wl_en || wl_go[setup_params.wl_tag[3:0]];
+`else
+    wire ag_go = 1'b1;
+`endif
+`else
+    wire ag_go = 1'b1;
+`endif
+    assign ag_valid     = ag_valid_raw && ag_go;
+    assign ag_ready_raw = ag_ready && ag_go;
+
     VX_dxa_addr_gen #(
         .GMEM_LINE_SIZE  (GMEM_BYTES),
         .GMEM_ADDR_WIDTH (GMEM_ADDR_WIDTH)
@@ -185,8 +203,8 @@ module VX_dxa_worker import VX_gpu_pkg::*, VX_dxa_pkg::*; #(
         .reset                (reset),
         .start                (pipeline_start),
         .setup_params         (setup_params),
-        .out_valid            (ag_valid),
-        .out_ready            (ag_ready),
+        .out_valid            (ag_valid_raw),
+        .out_ready            (ag_ready_raw),
         .out_cl_addr          (ag_cl_addr),
         .out_smem_byte_addr   (ag_smem_byte_addr),
         .out_byte_offset      (ag_byte_offset),

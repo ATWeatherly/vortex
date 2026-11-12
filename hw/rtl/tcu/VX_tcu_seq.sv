@@ -70,6 +70,7 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
     // phase-4 W-slot landing from the TSU (one aligned 64 B row segment per beat; done = transfer landed)
     input  wire [VX_dxa_pkg::TSU_WL_LANES-1:0] wl_valid,
     output wire [VX_dxa_pkg::TSU_WL_LANES-1:0] wl_ready,
+    output wire [VX_dxa_pkg::TSU_WL_GO_W-1:0]  wl_go,     // per {blk, slot}: a landing there may start
     input  VX_dxa_pkg::dxa_wland_beat_t [VX_dxa_pkg::TSU_WL_LANES-1:0] wl_beat,
     input  wire                         wl_done_valid,
     input  VX_dxa_pkg::dxa_wland_done_t wl_done,
@@ -676,11 +677,38 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
         assign wl_ready[l] = (32'(wl_blk[l]) < NB) && (lws_cnt[wl_blk[l]][wl_slot[l]] != 2'd0)
                           && gen_ok(w_rd_done[wl_blk[l]][wl_slot[l]], wl_head.cap) && ~wb_lsu_busy[wl_blk[l]];
         assign wl_fire[l] = wl_valid[l] && wl_ready[l];
+    `ifdef VX_DBG_LAND_MONITOR
+        // landing race monitor (simulation): beats presented with no expectation / WAR cap not met; must stay 0
+        reg [31:0] dbg_noexp, dbg_nocap;
+        always @(posedge clk) begin
+            if (reset) begin dbg_noexp <= 0; dbg_nocap <= 0; end
+            else begin
+                if (wl_valid[l] && (lws_cnt[wl_blk[l]][wl_slot[l]] == 2'd0)) dbg_noexp <= dbg_noexp + 1;
+                if (wl_valid[l] && (lws_cnt[wl_blk[l]][wl_slot[l]] != 2'd0) && ~gen_ok(w_rd_done[wl_blk[l]][wl_slot[l]], wl_head.cap))
+                    dbg_nocap <= dbg_nocap + 1;
+                if (wl_done_valid && (32'(wl_done.blk) % WLL == l))
+                    $display("%t LANDMON lane %0d done: beats waited no-exp %0d no-cap %0d", $time, l, dbg_noexp, dbg_nocap);
+            end
+        end
+    `endif
         `UNUSED_VAR (wl_head.wid)
         `RUNTIME_ASSERT(~wl_valid[l] || ((32'(wl_blk[l]) % WLL) == l),
             ("%t: *** %s landing lane %0d carries block %0d (lanes own blocks b mod %0d)", $time, INSTANCE_ID, l, wl_blk[l], WLL))
         `RUNTIME_ASSERT(~wl_fire[l] || ((wl_beat[l].simt ? (32'(wl_beat[l].seg) >> 3) : 32'(wl_beat[l].seg)) < CX),
             ("%t: *** %s stream landing segment %0d beyond KT_MAX", $time, INSTANCE_ID, wl_beat[l].seg))
+    end
+    // Landing start gate (TSU workers hold a TILEBUF_B transfer until its bit is set): the slot's oldest expectation is
+    // queued and its WAR cap is met, so every beat of that landing is accepted on arrival. Without it a transfer
+    // could start before its tbuf.ldws reached this front (the TSU issue is not ordered against TCU commands) and its
+    // beats would wait in the TSU; on silicon those stalled stream responses back-pressured HBM into the core's own
+    // X loads that the expectation was queued behind (u50p5_1c100 hang at 4 concurrent 128 KB landings).
+    for (genvar g = 0; g < VX_dxa_pkg::TSU_WL_GO_W; ++g) begin : g_wl_go
+        localparam GB = g / NWS, GS = g % NWS;
+        if (GB < NB) begin : g_b
+            assign wl_go[g] = (lws_cnt[GB][GS] != 2'd0) && gen_ok(w_rd_done[GB][GS], lws_q[GB][GS][lws_rp[GB][GS]].cap);
+        end else begin : g_nb
+            assign wl_go[g] = 1'b0;
+        end
     end
     assign lws_done_ev   = wl_done_valid;
     assign lws_done_blk  = wl_done.blk;

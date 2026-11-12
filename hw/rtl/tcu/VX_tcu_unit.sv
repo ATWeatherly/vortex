@@ -44,6 +44,7 @@ module VX_tcu_unit import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
     // phase-4 W-slot landing (TSU)
     input  wire [VX_dxa_pkg::TSU_WL_LANES-1:0] wl_valid,
     output wire [VX_dxa_pkg::TSU_WL_LANES-1:0] wl_ready,
+    output wire [VX_dxa_pkg::TSU_WL_GO_W-1:0]  wl_go,
     input  VX_dxa_pkg::dxa_wland_beat_t [VX_dxa_pkg::TSU_WL_LANES-1:0] wl_beat,
     input  wire                         wl_done_valid,
     input  VX_dxa_pkg::dxa_wland_done_t wl_done,
@@ -122,6 +123,7 @@ module VX_tcu_unit import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
     `ifdef VX_CFG_TSU_ENABLE
         .wl_valid      (wl_valid),
         .wl_ready      (wl_ready),
+        .wl_go         (wl_go),
         .wl_beat       (wl_beat),
         .wl_done_valid (wl_done_valid),
         .wl_done       (wl_done),
@@ -304,6 +306,7 @@ module VX_tcu_unit import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
     `ifdef VX_CFG_TSU_ENABLE
         .wl_valid      (wl_valid),
         .wl_ready      (wl_ready),
+        .wl_go         (wl_go),
         .wl_beat       (wl_beat),
         .wl_done_valid (wl_done_valid),
         .wl_done       (wl_done),

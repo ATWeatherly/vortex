@@ -103,6 +103,9 @@ package VX_dxa_pkg;
     // Phase-4 feed: W-slot landing lanes, one per TSU worker (worker w lands only blocks b with b mod NW == w, so
     // lanes never collide on a block and the sequencer writes all of them in one cycle).
     localparam TSU_WL_LANES = (TSU_NUM_WORKERS > 0) ? TSU_NUM_WORKERS : 1;
+    // W-slot landing start gate (sequencer -> TSU workers): bit {blk[1:0], slot[1:0]} = that slot's oldest tbuf.ldws
+    // expectation is queued and its WAR cap is met, i.e. every beat of its landing will be accepted
+    localparam TSU_WL_GO_W  = 16;
     /* verilator lint_on UNUSEDPARAM */
 
     // DXA request data — core → DXA control path.
