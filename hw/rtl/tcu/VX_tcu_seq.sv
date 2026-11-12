@@ -1108,6 +1108,7 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
         end
         reg        w_rd_d;
         reg [3:0]  w_t_d;
+        `UNUSED_VAR (w_t_d[3])     // a W read step is 0..7
         reg [CH_W-1:0] w_ch_d;
         reg        w_buf_d;
         reg [1:0]  w_ws_d;
@@ -1173,6 +1174,14 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
             gh_d <= gh;
         end
 
+        // de-skewed W read: w_rot[o] = the column of offset o (bank (o + c) mod 8)
+        logic [7:0][63:0] w_rot;
+        always_comb begin
+            for (integer o = 0; o < 8; ++o) begin
+                w_rot[o] = wb_rd[b][3'(32'(o) + 32'(w_ch_d))];
+            end
+        end
+
         // capture read data into the group buffer
         always_ff @(posedge clk) begin
             if (reset) begin
@@ -1186,11 +1195,14 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
                 end
                 if (cs_free) gb_v[cs_buf] <= 1'b0;
             end
+            // Step t wrote column n = 8t + o from bank (o + c) mod 8. Written per destination column (static n,
+            // one shared 8-way bank rotation) rather than per source bank with a dynamic column index: the
+            // latter made every buffer bit an 8-way priority write (~3 LUT per bit, ~24k LUT per block).
             if (w_rd_d) begin
-                for (integer bk = 0; bk < 8; ++bk) begin
-                    automatic logic [2:0] off = 3'(bk - 32'(w_ch_d));
-                    automatic logic [5:0] n   = 6'(32'(w_t_d) * 8 + 32'(off));
-                    gb_w[w_buf_d][n] <= (7'(n) < w_rows_r[b][w_ws_d]) ? wb_rd[b][bk] : 64'd0;
+                for (integer n = 0; n < WROWS; ++n) begin
+                    if (w_t_d[2:0] == 3'(n >> 3)) begin
+                        gb_w[w_buf_d][n] <= (7'(n) < w_rows_r[b][w_ws_d]) ? w_rot[n % 8] : 64'd0;
+                    end
                 end
             end
             if (xr_any_d && (xr_sel_d == BK_W'(b))) begin
