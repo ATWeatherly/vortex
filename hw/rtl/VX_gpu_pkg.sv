@@ -1327,6 +1327,8 @@ package VX_gpu_pkg;
         logic [PERF_CTR_BITS-1:0] tsu_land_beats;  // W-slot landing beats accepted by the sequencer
         logic [PERF_CTR_BITS-1:0] tsu_land_stall;  // cycles a landing beat waited for the sequencer
         logic [PERF_CTR_BITS-1:0] tsu_max_outst;   // max bursts outstanding in one worker
+        logic [PERF_CTR_BITS-1:0] tsu_outst_sum;   // sum over cycles of bursts outstanding (Little: latency = sum / bursts)
+        logic [PERF_CTR_BITS-1:0] tsu_busy_cyc;    // worker-cycles with >= 1 burst outstanding
     } dxa_perf_t;
 `endif
 

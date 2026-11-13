@@ -680,6 +680,7 @@ end
     reg [PERF_CTR_BITS-1:0] perf_tsu_bytes_r;
     reg [PERF_CTR_BITS-1:0] perf_land_beats_r, perf_land_stall_r;
     reg [SEQ_W-1:0]         perf_max_outst_r;
+    reg [PERF_CTR_BITS-1:0] perf_outst_sum_r, perf_busy_cyc_r;
     reg                     perf_wl_take_d, perf_wl_wait_d;
     reg [SEQ_W-1:0]         perf_outst_d;
     always @(posedge clk) begin
@@ -688,10 +689,13 @@ end
         perf_outst_d   <= sw_outstanding;
         if (reset) begin
             perf_land_beats_r <= '0; perf_land_stall_r <= '0; perf_max_outst_r <= '0;
+            perf_outst_sum_r  <= '0; perf_busy_cyc_r <= '0;
         end else begin
             perf_land_beats_r <= perf_land_beats_r + PERF_CTR_BITS'(perf_wl_take_d);
             perf_land_stall_r <= perf_land_stall_r + PERF_CTR_BITS'(perf_wl_wait_d);
             if (perf_outst_d > perf_max_outst_r) perf_max_outst_r <= perf_outst_d;
+            perf_outst_sum_r <= perf_outst_sum_r + PERF_CTR_BITS'(perf_outst_d);
+            perf_busy_cyc_r  <= perf_busy_cyc_r + PERF_CTR_BITS'(perf_outst_d != '0);
         end
     end
     always @(posedge clk) begin
@@ -731,6 +735,8 @@ end
     assign dxa_perf.tsu_land_beats = perf_land_beats_r;
     assign dxa_perf.tsu_land_stall = perf_land_stall_r;
     assign dxa_perf.tsu_max_outst  = PERF_CTR_BITS'(perf_max_outst_r);
+    assign dxa_perf.tsu_outst_sum  = perf_outst_sum_r;
+    assign dxa_perf.tsu_busy_cyc   = perf_busy_cyc_r;
 `else
     `UNUSED_VAR (stall_no_slot)
 `endif

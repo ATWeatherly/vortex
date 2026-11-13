@@ -711,6 +711,15 @@ extern "C" vx_result_t vx_device_dump_perf(vx_device_h hdevice, FILE *stream) {
         if (lb || ls)
           perf_print_core(stream, rep_core, "tsu_land: beats=%" PRIu64 " (%" PRIu64 " B), beat_stall_cycles=%" PRIu64 ", max_outstanding=%" PRIu64,
                           lb, lb * 64, ls, mo);
+      #ifdef VX_CSR_MPM_DXA_TSU_OUTST_SUM
+        uint64_t os = 0, bc = 0;
+        CHECK_ERR(vx_device_mpm_query(hdevice, mpm_class, VX_CSR_MPM_DXA_TSU_OUTST_SUM, rep_core, &os), { return err; });
+        CHECK_ERR(vx_device_mpm_query(hdevice, mpm_class, VX_CSR_MPM_DXA_TSU_BUSY_CYC,  rep_core, &bc), { return err; });
+        if (tsu_bursts)   // Little's law: mean issue->last-beat latency per burst = sum(outstanding) / bursts
+          perf_print_core(stream, rep_core, "tsu_inflight: outst_sum=%" PRIu64 ", busy_worker_cycles=%" PRIu64
+                          ", avg_inflight=%.2f, burst_latency=%.1f cycles",
+                          os, bc, safe_div((double)os, (double)bc), safe_div((double)os, (double)tsu_bursts));
+      #endif
       }
     #endif
     #endif

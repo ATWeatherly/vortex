@@ -551,6 +551,8 @@ import VX_fpu_pkg::*;
                         `CSR_READ_64(`VX_CSR_MPM_DXA_TSU_LAND_BEATS, dcr_data_w, sysmem_perf.dxa.tsu_land_beats);
                         `CSR_READ_64(`VX_CSR_MPM_DXA_TSU_LAND_STALL, dcr_data_w, sysmem_perf.dxa.tsu_land_stall);
                         `CSR_READ_64(`VX_CSR_MPM_DXA_TSU_MAX_OUTST,  dcr_data_w, sysmem_perf.dxa.tsu_max_outst);
+                        `CSR_READ_64(`VX_CSR_MPM_DXA_TSU_OUTST_SUM,  dcr_data_w, sysmem_perf.dxa.tsu_outst_sum);
+                        `CSR_READ_64(`VX_CSR_MPM_DXA_TSU_BUSY_CYC,   dcr_data_w, sysmem_perf.dxa.tsu_busy_cyc);
                         default:;
                         endcase
                     end

@@ -840,6 +840,10 @@ VX_CSR_MPM_DXA_TSU_LAND_STALL  = 0xB0C  # cycles a landing beat waited for the s
 VX_CSR_MPM_DXA_TSU_LAND_STALL_H  = 0xB8C
 VX_CSR_MPM_DXA_TSU_MAX_OUTST  = 0xB0D  # max stream bursts outstanding in one worker (high-water mark)
 VX_CSR_MPM_DXA_TSU_MAX_OUTST_H  = 0xB8D
+VX_CSR_MPM_DXA_TSU_OUTST_SUM  = 0xB0E  # sum over cycles of bursts outstanding (all workers); per-burst latency = SUM / TSU_BURSTS
+VX_CSR_MPM_DXA_TSU_OUTST_SUM_H  = 0xB8E
+VX_CSR_MPM_DXA_TSU_BUSY_CYC  = 0xB0F  # worker-cycles with >= 1 burst outstanding; avg in flight = OUTST_SUM / BUSY_CYC
+VX_CSR_MPM_DXA_TSU_BUSY_CYC_H  = 0xB8F
 
 [csr_mpm_tcu]
 # PERF: WGMMA tile-buffer (per-core; summed across blocks)
