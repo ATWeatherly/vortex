@@ -333,6 +333,9 @@ VX_CFG_NUM_TCU_SEQ_BLOCKS = 4
 # FEDP blocks (VX_tcu_core), tile buffers or TCU uop expansion; CUSTOM0 funct7=2 (WMMA/WGMMA) is not decoded.
 # The sequencer keeps the TCU LMEM port (tacc.st). Off by default.
 VX_CFG_TCU_SEQ_ONLY = false
+# Sequencer without the tbuf.ldw weight loader (requires VX_CFG_TSU_ENABLE): W slots are filled only by TSU stream
+# landing (tbuf.ldws); tbuf.ldw is illegal (RUNTIME_ASSERT). tbuf.ldx, STF and landing unchanged. Off by default.
+VX_CFG_TCU_SEQ_NO_LDW = false
 
 [dxa]
 # Cluster-level DXA engine count, decoupled from cores/socket size.

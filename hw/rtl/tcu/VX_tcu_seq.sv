@@ -109,6 +109,18 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
     localparam CH_W    = `CLOG2(KT_MAX / 8);     // chunk index within a row
     localparam NLD     = NB + 1;                 // loaders: 0 = X, 1..NB = W of block b-1
     localparam LID_W   = `CLOG2(NLD + 1);        // + the dequant store unit's LSU id (= NLD)
+`ifdef VX_CFG_TCU_SEQ_NO_LDW
+    // VX_CFG_TCU_SEQ_NO_LDW: no tbuf.ldw weight loader (W slots are filled only by TSU landing, tbuf.ldws): the
+    // per-block W loaders, their LSU requests / responses and their W-bank write ports are left out; tbuf.ldw is
+    // an illegal command (RUNTIME_ASSERT, consumed as a no-op). tbuf.ldx, the LSU client port, STF and landing are
+    // unchanged. The loader ids keep their numbering (X = 0, W = 1..NB unused, dequant = NLD).
+`ifndef VX_CFG_TSU_ENABLE
+    `VX_CFG_TCU_SEQ_NO_LDW_requires_VX_CFG_TSU_ENABLE
+`endif
+    localparam HAS_LDW = 0;
+`else
+    localparam HAS_LDW = 1;
+`endif
 `ifdef VX_CFG_TCU_SEQ_STF
     localparam NCFG    = 11;                     // + WSCALE, XSCALE, LIMITS (tacc.st fp32 dequant, G4)
 `else
@@ -327,7 +339,7 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
     always_comb begin
         case (f_op)
         OP_LDX:   f_can = (ldx_cnt != 2'(QD));
-        OP_LDW:   f_can = (ldw_cnt[f_ldw_blk] != 2'(QD)) && (32'(f_ldw_blk) < NB);
+        OP_LDW:   f_can = (HAS_LDW == 0) || ((ldw_cnt[f_ldw_blk] != 2'(QD)) && (32'(f_ldw_blk) < NB));
         OP_GEMM:  f_can = (gm_cnt[f_gm_blk] != 2'(QD)) && (32'(f_gm_blk) < NB);
         OP_ACCST: f_can = (st_cnt[f_st_blk] != (STQ_W+1)'(STQD)) && (32'(f_st_blk) < NB);
         OP_LDWS:  f_can = (32'(f_ldw_blk) < NB) && (lws_cnt[f_ldw_blk][f_rs2[1:0]] != 2'(QD));
@@ -336,7 +348,7 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
     end
     wire f_parks  = (f_op == OP_WAIT) || (f_op == OP_FENCE);
     wire f_fire   = fvalid && f_can && ~wrel_fire && (f_parks || ~res_full);
-    wire f_async  = (f_op == OP_LDX) || (f_op == OP_LDW) || (f_op == OP_GEMM) || (f_op == OP_ACCST) || (f_op == OP_LDWS);
+    wire f_async  = (f_op == OP_LDX) || ((f_op == OP_LDW) && (HAS_LDW != 0)) || (f_op == OP_GEMM) || (f_op == OP_ACCST) || (f_op == OP_LDWS);
 
     for (genvar s = 0; s < NS; ++s) begin : g_cmd_ready
         assign cmd_ready[s] = f_fire && (fsel == NS_W'(s));
@@ -466,7 +478,7 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
         end else begin
             // issue side (front)
             if (f_fire && (f_op == OP_LDX)) x_ld_iss[f_rs2[2:0]] <= x_ld_iss[f_rs2[2:0]] + GEN_W'(1);
-            if (f_fire && ((f_op == OP_LDW) || (f_op == OP_LDWS))) w_ld_iss[f_ldw_blk][f_rs2[1:0]] <= w_ld_iss[f_ldw_blk][f_rs2[1:0]] + GEN_W'(1);
+            if (f_fire && (((f_op == OP_LDW) && (HAS_LDW != 0)) || (f_op == OP_LDWS))) w_ld_iss[f_ldw_blk][f_rs2[1:0]] <= w_ld_iss[f_ldw_blk][f_rs2[1:0]] + GEN_W'(1);
             if (f_fire && (f_op == OP_GEMM)) begin
                 x_rd_iss[gc_xs] <= x_rd_iss[gc_xs] + GEN_W'(1);
                 w_rd_iss[f_gm_blk][gc_ws[1:0]] <= w_rd_iss[f_gm_blk][gc_ws[1:0]] + GEN_W'(1);
@@ -553,6 +565,8 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
         ("%t: *** %s tbuf.ldx: illegal (src=0x%0h kt=%0d rows=%0d stride=%0d)", $time, INSTANCE_ID, f_rs1, fc_kt, fc_xrows, fc_xstride))
     `RUNTIME_ASSERT(~(f_fire && (f_op == OP_LDW)) || ((fc_kt[3:0] == 4'd0) && (fc_kt <= 32'(KT_MAX)) && (fc_wrows >= 32'd1) && (fc_wrows <= 32'd64) && (f_rs1[1:0] == 2'd0) && (fc_wstride[1:0] == 2'd0)),
         ("%t: *** %s tbuf.ldw: illegal (src=0x%0h kt=%0d rows=%0d stride=%0d; v1: rows <= 64)", $time, INSTANCE_ID, f_rs1, fc_kt, fc_wrows, fc_wstride))
+    `RUNTIME_ASSERT(~(f_fire && (f_op == OP_LDW) && (HAS_LDW == 0)),
+        ("%t: *** %s tbuf.ldw on a VX_CFG_TCU_SEQ_NO_LDW build (W slots are filled only by tbuf.ldws stream landing)", $time, INSTANCE_ID))
     `RUNTIME_ASSERT(~(f_fire && (f_op == OP_ACCST)) || ((f_rs1[1:0] == 2'd0) && (fc_accstr[1:0] == 2'd0)),
         ("%t: *** %s tacc.st: unaligned dst 0x%0h / stride %0d", $time, INSTANCE_ID, f_rs1, fc_accstr))
 
@@ -572,7 +586,7 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
                 ldx_cnt <= ldx_cnt + 2'(push) - 2'(ldx_pop);
             end
             for (integer b = 0; b < NB; ++b) begin
-                automatic logic pw = f_fire && (f_op == OP_LDW)  && (f_ldw_blk == 2'(b));
+                automatic logic pw = f_fire && (f_op == OP_LDW)  && (f_ldw_blk == 2'(b)) && (HAS_LDW != 0);
                 automatic logic pg = f_fire && (f_op == OP_GEMM) && (f_gm_blk  == 2'(b));
                 automatic logic ps = f_fire && (f_op == OP_ACCST) && (f_st_blk == 2'(b));
                 if (pw) begin ldw_q[b][ldw_wp[b]] <= f_ldw; ldw_wp[b] <= ~ldw_wp[b]; end
@@ -889,7 +903,7 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
         assign lc_kt[b+1]       = lw_head[b].kt;
         assign lc_layout[b+1]   = lw_head[b].layout;
         assign lc_stride[b+1]   = lw_head[b].stride;
-        assign lc_ready[b+1]    = (ldw_cnt[b] != 0) && gen_ok(w_rd_done[b][lw_head[b].slot], lw_head[b].cap);
+        assign lc_ready[b+1]    = (HAS_LDW != 0) && (ldw_cnt[b] != 0) && gen_ok(w_rd_done[b][lw_head[b].slot], lw_head[b].cap);
     end
 
 `ifdef VX_CFG_LMEM_ENABLE
@@ -1088,7 +1102,7 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
             if (rsp_tag.lid == LID_W'(0)) begin
                 row = rsp_tag.row;
                 ch  = CH_W'((32'(rsp_tag.kw) + 32'(2 * p)) >> 1);
-            end else if (lc_layout[rsp_is_dq ? LID_W'(0) : rsp_tag.lid]) begin
+            end else if ((HAS_LDW != 0) && lc_layout[rsp_is_dq ? LID_W'(0) : rsp_tag.lid]) begin
                 row = rsp_tag.row + 8'(p);
                 ch  = CH_W'(32'(rsp_tag.kw) >> 1);
             end else begin
@@ -1106,7 +1120,7 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
                     xb_wbe[bk] = be;
                 end else begin
                     for (integer b = 0; b < NB; ++b) begin
-                        if (rsp_tag.lid == LID_W'(b + 1)) begin
+                        if ((HAS_LDW != 0) && (rsp_tag.lid == LID_W'(b + 1))) begin
                             automatic logic [2:0] bk = 3'(32'(row) + 32'(ch));
                             wb_we[b][bk]  = 1'b1;
                             wb_wa[b][bk]  = WA_W'((32'(lw_head[b].slot) * WROWS + 32'(row)) * CX + (32'(ch) >> 3));
@@ -1142,7 +1156,7 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
     `endif
     end
     for (genvar b = 0; b < NB; ++b) begin : g_wb_lsu_busy
-        assign wb_lsu_busy[b] = rsp_fire && (|mem_if.rsp_data.mask) && (rsp_tag.lid == LID_W'(b + 1));
+        assign wb_lsu_busy[b] = (HAS_LDW != 0) && rsp_fire && (|mem_if.rsp_data.mask) && (rsp_tag.lid == LID_W'(b + 1));
     end
 
     // loader completion events, row-count registers
