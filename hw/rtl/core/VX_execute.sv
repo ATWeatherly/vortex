@@ -27,6 +27,9 @@ module VX_execute import VX_gpu_pkg::*; #(
     input pipeline_perf_t   pipeline_perf,
 `ifdef VX_CFG_EXT_TCU_ENABLE
     output tcu_perf_t       tcu_perf,
+`ifdef VX_CFG_TCU_SEQ_ENABLE
+    output tcu_seq_perf_t   tcu_seq_perf,
+`endif
 `endif
 `endif
 
@@ -144,6 +147,9 @@ module VX_execute import VX_gpu_pkg::*; #(
         .reset          (reset),
     `ifdef PERF_ENABLE
         .tcu_perf       (tcu_perf),
+    `ifdef VX_CFG_TCU_SEQ_ENABLE
+        .tcu_seq_perf   (tcu_seq_perf),
+    `endif
     `endif
     `ifdef TCU_LMEM_PORT_ENABLE
         .tcu_lmem_if    (tcu_lmem_if),

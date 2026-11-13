@@ -166,6 +166,10 @@ module VX_core import VX_gpu_pkg::*, VX_tlb_pkg::*; #(
 `ifdef VX_CFG_EXT_TCU_ENABLE
     tcu_perf_t tcu_perf;
     assign pipeline_perf.tcu = tcu_perf;
+`ifdef VX_CFG_TCU_SEQ_ENABLE
+    tcu_seq_perf_t tcu_seq_perf;
+    assign pipeline_perf.tcu_seq = tcu_seq_perf;
+`endif
 `endif
     sysmem_perf_t sysmem_perf_w, sysmem_perf_tmp;
     always @(*) begin
@@ -333,6 +337,9 @@ module VX_core import VX_gpu_pkg::*, VX_tlb_pkg::*; #(
         .pipeline_perf  (pipeline_perf),
     `ifdef VX_CFG_EXT_TCU_ENABLE
         .tcu_perf       (tcu_perf),
+    `ifdef VX_CFG_TCU_SEQ_ENABLE
+        .tcu_seq_perf   (tcu_seq_perf),
+    `endif
     `endif
     `endif
 

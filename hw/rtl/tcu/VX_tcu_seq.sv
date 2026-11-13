@@ -66,6 +66,11 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
     // core store drain (tfence)
     input wire                      store_drained,
 
+`ifdef PERF_ENABLE
+    // silicon-readable accounting (class TCU, VX_CSR_MPM_TCU_SEQ_*)
+    output tcu_seq_perf_t           seq_perf,
+`endif
+
 `ifdef VX_CFG_TSU_ENABLE
     // phase-4 W-slot landing from the TSU (one aligned 64 B row segment per beat; done = transfer landed)
     input  wire [VX_dxa_pkg::TSU_WL_LANES-1:0] wl_valid,
@@ -2117,6 +2122,50 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
             perf_gemm_k    <= perf_gemm_k + 64'(f_fire && (f_op == OP_GEMM) ? f_rs1 : 32'd0);
         end
     end
+`ifdef PERF_ENABLE
+    // Per-cycle increments are registered first, then accumulated (no long add chains behind the event logic).
+    localparam PB = `CLOG2(NB + 1);
+    reg [PB-1:0] pi_mac, pi_exec, pi_wx, pi_ww, pi_wa, pi_lw, pi_early, pi_st, pi_xld, pi_tw, pi_gemm, pi_ldw, pi_stc;
+    reg          pi_ldx, pi_ldws;
+    tcu_seq_perf_t sp;
+    always_ff @(posedge clk) begin
+        pi_mac   <= PB'($countones(perf_blk_busy));
+        pi_exec  <= PB'($countones(acb_exec));
+        pi_wx    <= PB'($countones(perf_blk_wx));
+        pi_ww    <= PB'($countones(perf_blk_ww));
+        pi_wa    <= PB'($countones(perf_blk_wa));
+        pi_lw    <= PB'($countones(perf_blk_lwait));
+        pi_early <= PB'($countones(perf_blk_early));
+        pi_st    <= PB'($countones(acb_st));
+        pi_xld   <= PB'($countones(acb_xld));
+        pi_tw    <= PB'($countones(acb_tw));
+        pi_gemm  <= PB'($countones(gm_done_ev));
+        pi_ldw   <= PB'($countones(ldw_done_ev));
+        pi_stc   <= PB'($countones(st_done_ev));
+        pi_ldx   <= ldx_done_ev;
+        pi_ldws  <= lws_done_ev;
+        if (reset) begin
+            sp <= '0;
+        end else begin
+            sp.mac       <= sp.mac       + PERF_CTR_BITS'(pi_mac);
+            sp.exec      <= sp.exec      + PERF_CTR_BITS'(pi_exec);
+            sp.wait_x    <= sp.wait_x    + PERF_CTR_BITS'(pi_wx);
+            sp.wait_w    <= sp.wait_w    + PERF_CTR_BITS'(pi_ww);
+            sp.wait_a    <= sp.wait_a    + PERF_CTR_BITS'(pi_wa);
+            sp.land_wait <= sp.land_wait + PERF_CTR_BITS'(pi_lw);
+            sp.early     <= sp.early     + PERF_CTR_BITS'(pi_early);
+            sp.st_cyc    <= sp.st_cyc    + PERF_CTR_BITS'(pi_st);
+            sp.xld_cyc   <= sp.xld_cyc   + PERF_CTR_BITS'(pi_xld);
+            sp.tw_cyc    <= sp.tw_cyc    + PERF_CTR_BITS'(pi_tw);
+            sp.n_gemm    <= sp.n_gemm    + PERF_CTR_BITS'(pi_gemm);
+            sp.n_ldx     <= sp.n_ldx     + PERF_CTR_BITS'(pi_ldx);
+            sp.n_ldw     <= sp.n_ldw     + PERF_CTR_BITS'(pi_ldw);
+            sp.n_ldws    <= sp.n_ldws    + PERF_CTR_BITS'(pi_ldws);
+            sp.n_st      <= sp.n_st      + PERF_CTR_BITS'(pi_stc);
+        end
+    end
+    assign seq_perf = sp;
+`endif
 `ifndef SYNTHESIS
     // Hosts that never close the device skip final blocks: also print the cumulative counters each time every
     // warp's pending count has stayed zero for 4096 cycles after new work (one line per kernel call).

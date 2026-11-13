@@ -512,6 +512,11 @@ end
             dxa_perf.noslot_stalls += worker_dxa_perf[w].noslot_stalls;
             dxa_perf.tsu_bursts  += worker_dxa_perf[w].tsu_bursts;
             dxa_perf.tsu_bytes   += worker_dxa_perf[w].tsu_bytes;
+            dxa_perf.tsu_land_beats += worker_dxa_perf[w].tsu_land_beats;
+            dxa_perf.tsu_land_stall += worker_dxa_perf[w].tsu_land_stall;
+            dxa_perf.tsu_outst_sum  += worker_dxa_perf[w].tsu_outst_sum;
+            dxa_perf.tsu_busy_cyc   += worker_dxa_perf[w].tsu_busy_cyc;
+            if (worker_dxa_perf[w].tsu_max_outst > dxa_perf.tsu_max_outst) dxa_perf.tsu_max_outst = worker_dxa_perf[w].tsu_max_outst;
         end
     end
 `endif

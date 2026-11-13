@@ -548,6 +548,11 @@ import VX_fpu_pkg::*;
                         `CSR_READ_64(`VX_CSR_MPM_DXA_NOSLOT_STALLS, dcr_data_w, sysmem_perf.dxa.noslot_stalls);
                         `CSR_READ_64(`VX_CSR_MPM_DXA_TSU_BURSTS, dcr_data_w, sysmem_perf.dxa.tsu_bursts);
                         `CSR_READ_64(`VX_CSR_MPM_DXA_TSU_BYTES,  dcr_data_w, sysmem_perf.dxa.tsu_bytes);
+                        `CSR_READ_64(`VX_CSR_MPM_DXA_TSU_LAND_BEATS, dcr_data_w, sysmem_perf.dxa.tsu_land_beats);
+                        `CSR_READ_64(`VX_CSR_MPM_DXA_TSU_LAND_STALL, dcr_data_w, sysmem_perf.dxa.tsu_land_stall);
+                        `CSR_READ_64(`VX_CSR_MPM_DXA_TSU_MAX_OUTST,  dcr_data_w, sysmem_perf.dxa.tsu_max_outst);
+                        `CSR_READ_64(`VX_CSR_MPM_DXA_TSU_OUTST_SUM,  dcr_data_w, sysmem_perf.dxa.tsu_outst_sum);
+                        `CSR_READ_64(`VX_CSR_MPM_DXA_TSU_BUSY_CYC,   dcr_data_w, sysmem_perf.dxa.tsu_busy_cyc);
                         default:;
                         endcase
                     end
@@ -572,6 +577,23 @@ import VX_fpu_pkg::*;
                         `CSR_READ_64(`VX_CSR_MPM_TCU_WG_COMMIT,      dcr_data_w, pipeline_perf.tcu.wg_commit_stalls);
                         `CSR_READ_64(`VX_CSR_MPM_TCU_WG_STARVE,      dcr_data_w, pipeline_perf.tcu.wg_starve);
                         `CSR_READ_64(`VX_CSR_MPM_TCU_WG_IDLE,        dcr_data_w, pipeline_perf.tcu.wg_idle);
+                    `endif
+                    `ifdef VX_CFG_TCU_SEQ_ENABLE
+                        `CSR_READ_64(`VX_CSR_MPM_TCU_SEQ_MAC,       dcr_data_w, pipeline_perf.tcu_seq.mac);
+                        `CSR_READ_64(`VX_CSR_MPM_TCU_SEQ_EXEC,      dcr_data_w, pipeline_perf.tcu_seq.exec);
+                        `CSR_READ_64(`VX_CSR_MPM_TCU_SEQ_WAIT_X,    dcr_data_w, pipeline_perf.tcu_seq.wait_x);
+                        `CSR_READ_64(`VX_CSR_MPM_TCU_SEQ_WAIT_W,    dcr_data_w, pipeline_perf.tcu_seq.wait_w);
+                        `CSR_READ_64(`VX_CSR_MPM_TCU_SEQ_WAIT_A,    dcr_data_w, pipeline_perf.tcu_seq.wait_a);
+                        `CSR_READ_64(`VX_CSR_MPM_TCU_SEQ_LAND_WAIT, dcr_data_w, pipeline_perf.tcu_seq.land_wait);
+                        `CSR_READ_64(`VX_CSR_MPM_TCU_SEQ_EARLY,     dcr_data_w, pipeline_perf.tcu_seq.early);
+                        `CSR_READ_64(`VX_CSR_MPM_TCU_SEQ_ST_CYC,    dcr_data_w, pipeline_perf.tcu_seq.st_cyc);
+                        `CSR_READ_64(`VX_CSR_MPM_TCU_SEQ_XLD_CYC,   dcr_data_w, pipeline_perf.tcu_seq.xld_cyc);
+                        `CSR_READ_64(`VX_CSR_MPM_TCU_SEQ_TWAIT_CYC, dcr_data_w, pipeline_perf.tcu_seq.tw_cyc);
+                        `CSR_READ_64(`VX_CSR_MPM_TCU_SEQ_N_GEMM,    dcr_data_w, pipeline_perf.tcu_seq.n_gemm);
+                        `CSR_READ_64(`VX_CSR_MPM_TCU_SEQ_N_LDX,     dcr_data_w, pipeline_perf.tcu_seq.n_ldx);
+                        `CSR_READ_64(`VX_CSR_MPM_TCU_SEQ_N_LDW,     dcr_data_w, pipeline_perf.tcu_seq.n_ldw);
+                        `CSR_READ_64(`VX_CSR_MPM_TCU_SEQ_N_LDWS,    dcr_data_w, pipeline_perf.tcu_seq.n_ldws);
+                        `CSR_READ_64(`VX_CSR_MPM_TCU_SEQ_N_ST,      dcr_data_w, pipeline_perf.tcu_seq.n_st);
                     `endif
                         default:;
                         endcase

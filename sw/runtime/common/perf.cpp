@@ -702,6 +702,26 @@ extern "C" vx_result_t vx_device_dump_perf(vx_device_h hdevice, FILE *stream) {
         perf_print_core(stream, rep_core, "tsu: bursts=%" PRIu64 ", bytes=%" PRIu64 ", avg_burst=%.1f B",
                         tsu_bursts, tsu_bytes, safe_div((double)tsu_bytes, (double)tsu_bursts));
       }
+    #ifdef VX_CSR_MPM_DXA_TSU_LAND_BEATS
+      {
+        uint64_t lb = 0, ls = 0, mo = 0;
+        CHECK_ERR(vx_device_mpm_query(hdevice, mpm_class, VX_CSR_MPM_DXA_TSU_LAND_BEATS, rep_core, &lb), { return err; });
+        CHECK_ERR(vx_device_mpm_query(hdevice, mpm_class, VX_CSR_MPM_DXA_TSU_LAND_STALL, rep_core, &ls), { return err; });
+        CHECK_ERR(vx_device_mpm_query(hdevice, mpm_class, VX_CSR_MPM_DXA_TSU_MAX_OUTST,  rep_core, &mo), { return err; });
+        if (lb || ls)
+          perf_print_core(stream, rep_core, "tsu_land: beats=%" PRIu64 " (%" PRIu64 " B), beat_stall_cycles=%" PRIu64 ", max_outstanding=%" PRIu64,
+                          lb, lb * 64, ls, mo);
+      #ifdef VX_CSR_MPM_DXA_TSU_OUTST_SUM
+        uint64_t os = 0, bc = 0;
+        CHECK_ERR(vx_device_mpm_query(hdevice, mpm_class, VX_CSR_MPM_DXA_TSU_OUTST_SUM, rep_core, &os), { return err; });
+        CHECK_ERR(vx_device_mpm_query(hdevice, mpm_class, VX_CSR_MPM_DXA_TSU_BUSY_CYC,  rep_core, &bc), { return err; });
+        if (tsu_bursts)   // Little's law: mean issue->last-beat latency per burst = sum(outstanding) / bursts
+          perf_print_core(stream, rep_core, "tsu_inflight: outst_sum=%" PRIu64 ", busy_worker_cycles=%" PRIu64
+                          ", avg_inflight=%.2f, burst_latency=%.1f cycles",
+                          os, bc, safe_div((double)os, (double)bc), safe_div((double)os, (double)tsu_bursts));
+      #endif
+      }
+    #endif
     #endif
     }
     {
@@ -815,6 +835,24 @@ extern "C" vx_result_t vx_device_dump_perf(vx_device_h hdevice, FILE *stream) {
 #endif
 #else
       (void)wg_instrs; (void)wg_stalls; (void)uops; (void)exec_stalls; (void)busy;
+#endif
+#ifdef VX_CSR_MPM_TCU_SEQ_MAC
+      {   // TCU sequencer accounting (block-summed): exec/wait/st/xld/twait are disjoint block-cycle classes
+        static const uint32_t ka[15] = {VX_CSR_MPM_TCU_SEQ_MAC, VX_CSR_MPM_TCU_SEQ_EXEC, VX_CSR_MPM_TCU_SEQ_WAIT_X,
+          VX_CSR_MPM_TCU_SEQ_WAIT_W, VX_CSR_MPM_TCU_SEQ_WAIT_A, VX_CSR_MPM_TCU_SEQ_LAND_WAIT, VX_CSR_MPM_TCU_SEQ_EARLY,
+          VX_CSR_MPM_TCU_SEQ_ST_CYC, VX_CSR_MPM_TCU_SEQ_XLD_CYC, VX_CSR_MPM_TCU_SEQ_TWAIT_CYC, VX_CSR_MPM_TCU_SEQ_N_GEMM,
+          VX_CSR_MPM_TCU_SEQ_N_LDX, VX_CSR_MPM_TCU_SEQ_N_LDW, VX_CSR_MPM_TCU_SEQ_N_LDWS, VX_CSR_MPM_TCU_SEQ_N_ST};
+        uint64_t v[15] = {};
+        for (int i = 0; i < 15; ++i)
+          CHECK_ERR(vx_device_mpm_query(hdevice, mpm_class, ka[i], core_id, &v[i]), { return err; });
+        perf_print_core(stream, core_id,
+          "tcu_seq: mac=%" PRIu64 ", exec=%" PRIu64 ", wait_x=%" PRIu64 ", wait_w=%" PRIu64 ", wait_a=%" PRIu64
+          ", land_wait=%" PRIu64 ", early=%" PRIu64 ", st=%" PRIu64 ", xld=%" PRIu64 ", twait=%" PRIu64,
+          v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8], v[9]);
+        perf_print_core(stream, core_id,
+          "tcu_seq_cmds: tgemm=%" PRIu64 ", ldx=%" PRIu64 ", ldw=%" PRIu64 ", ldws=%" PRIu64 ", tacc_st=%" PRIu64,
+          v[10], v[11], v[12], v[13], v[14]);
+      }
 #endif
       tot_tbuf_stalls  += tbuf_stalls;
       tot_tbuf_cache_hits += tbuf_cache_hits;

@@ -128,6 +128,11 @@ module VX_dxa_worker import VX_gpu_pkg::*, VX_dxa_pkg::*; #(
     wire [15:0]                 sw_k_row;
     wire [15:0]                 sw_n_base;
     wire [SEQ_W-1:0]            sw_outstanding;
+    wire                        perf_wl_take;    // a landing beat left the burst tracker toward the sequencer
+    wire                        perf_wl_wait;    // a landing beat is presented but cannot leave
+`ifndef PERF_ENABLE
+    `UNUSED_VAR ({perf_wl_take, perf_wl_wait})
+`endif
 
     // smem_wr → gmem_req (release)
     wire                        sw_release_en;
@@ -502,7 +507,11 @@ module VX_dxa_worker import VX_gpu_pkg::*, VX_dxa_pkg::*; #(
              $time, INSTANCE_ID, wl_off, wl_lgkt))
         `RUNTIME_ASSERT(~(sm_release_en && wl_take), ("%t: *** %s W-landing / smem_wr release collision", $time, INSTANCE_ID))
         `UNUSED_VAR (wl_k)
+        assign perf_wl_take = wl_take;
+        assign perf_wl_wait = sw_valid && wl_mode && ~sw_ready;
     end else begin : g_no_wland
+        assign perf_wl_take = 1'b0;
+        assign perf_wl_wait = 1'b0;
         assign wl_valid       = 1'b0;
         assign wl_beat        = '0;
         assign wl_done_valid  = 1'b0;
@@ -521,6 +530,8 @@ module VX_dxa_worker import VX_gpu_pkg::*, VX_dxa_pkg::*; #(
     assign sw_release_en  = sm_release_en;
     assign sw_release_tag = sm_release_tag;
     assign transfer_done  = sm_transfer_done;
+    assign perf_wl_take   = 1'b0;
+    assign perf_wl_wait   = 1'b0;
 `endif
 
     // Line workers drive the VX_CFG_MEM_ADDR_WIDTH memory bus: a descriptor base above it (full-width
@@ -536,6 +547,8 @@ module VX_dxa_worker import VX_gpu_pkg::*, VX_dxa_pkg::*; #(
     assign sw_release_en  = sm_release_en;
     assign sw_release_tag = sm_release_tag;
     assign transfer_done  = sm_transfer_done;
+    assign perf_wl_take   = 1'b0;
+    assign perf_wl_wait   = 1'b0;
 `endif
 
     // ════════════════════════════════════════════════════════════════════
@@ -665,6 +678,26 @@ end
     reg [PERF_CTR_BITS-1:0] perf_noslot_r;
     reg [PERF_CTR_BITS-1:0] perf_tsu_bursts_r;
     reg [PERF_CTR_BITS-1:0] perf_tsu_bytes_r;
+    reg [PERF_CTR_BITS-1:0] perf_land_beats_r, perf_land_stall_r;
+    reg [SEQ_W-1:0]         perf_max_outst_r;
+    reg [PERF_CTR_BITS-1:0] perf_outst_sum_r, perf_busy_cyc_r;
+    reg                     perf_wl_take_d, perf_wl_wait_d;
+    reg [SEQ_W-1:0]         perf_outst_d;
+    always @(posedge clk) begin
+        perf_wl_take_d <= perf_wl_take;
+        perf_wl_wait_d <= perf_wl_wait;
+        perf_outst_d   <= sw_outstanding;
+        if (reset) begin
+            perf_land_beats_r <= '0; perf_land_stall_r <= '0; perf_max_outst_r <= '0;
+            perf_outst_sum_r  <= '0; perf_busy_cyc_r <= '0;
+        end else begin
+            perf_land_beats_r <= perf_land_beats_r + PERF_CTR_BITS'(perf_wl_take_d);
+            perf_land_stall_r <= perf_land_stall_r + PERF_CTR_BITS'(perf_wl_wait_d);
+            if (perf_outst_d > perf_max_outst_r) perf_max_outst_r <= perf_outst_d;
+            perf_outst_sum_r <= perf_outst_sum_r + PERF_CTR_BITS'(perf_outst_d);
+            perf_busy_cyc_r  <= perf_busy_cyc_r + PERF_CTR_BITS'(perf_outst_d != '0);
+        end
+    end
     always @(posedge clk) begin
         if (reset) begin
             perf_transfers_r   <= '0;
@@ -699,6 +732,11 @@ end
     assign dxa_perf.noslot_stalls = perf_noslot_r;
     assign dxa_perf.tsu_bursts   = perf_tsu_bursts_r;
     assign dxa_perf.tsu_bytes    = perf_tsu_bytes_r;
+    assign dxa_perf.tsu_land_beats = perf_land_beats_r;
+    assign dxa_perf.tsu_land_stall = perf_land_stall_r;
+    assign dxa_perf.tsu_max_outst  = PERF_CTR_BITS'(perf_max_outst_r);
+    assign dxa_perf.tsu_outst_sum  = perf_outst_sum_r;
+    assign dxa_perf.tsu_busy_cyc   = perf_busy_cyc_r;
 `else
     `UNUSED_VAR (stall_no_slot)
 `endif

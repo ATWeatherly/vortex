@@ -23,6 +23,9 @@ module VX_tcu_unit import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
 
 `ifdef PERF_ENABLE
     output tcu_perf_t       tcu_perf,
+`ifdef VX_CFG_TCU_SEQ_ENABLE
+    output tcu_seq_perf_t   tcu_seq_perf,
+`endif
 `endif
 
 `ifdef TCU_LMEM_PORT_ENABLE
@@ -120,6 +123,9 @@ module VX_tcu_unit import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
         .unlock_valid  (sched_unlock_if.valid),
         .unlock_wid    (sched_unlock_if.wid),
         .store_drained (store_drained),
+    `ifdef PERF_ENABLE
+        .seq_perf      (tcu_seq_perf),
+    `endif
     `ifdef VX_CFG_TSU_ENABLE
         .wl_valid      (wl_valid),
         .wl_ready      (wl_ready),
@@ -303,6 +309,9 @@ module VX_tcu_unit import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
         .unlock_valid  (sched_unlock_if.valid),
         .unlock_wid    (sched_unlock_if.wid),
         .store_drained (store_drained),
+    `ifdef PERF_ENABLE
+        .seq_perf      (tcu_seq_perf),
+    `endif
     `ifdef VX_CFG_TSU_ENABLE
         .wl_valid      (wl_valid),
         .wl_ready      (wl_ready),
