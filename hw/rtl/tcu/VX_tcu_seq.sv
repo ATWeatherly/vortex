@@ -879,6 +879,10 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
     wire [NLD-1:0]           ld_reqs_done;
     wire [7:0]               ld_row  [NLD];   // X: m, W row-major: n, W simt: n0
     wire [KB_W-1:0]          ld_k    [NLD];   // byte offset (row-major) or chunk*8 (simt)
+    // Loader line origin (default): src + row*stride (row-major) or src + chunk*stride (SIMT8), kept incrementally
+    // (+stride when the strided index advances), so the request address needs no row x stride multiply (2-core /
+    // 1-core post-place 175 MHz critical path). Opt-out: -DVX_CFG_TCU_SEQ_LDADDR_MUL (the multiply).
+    wire [31:0]              ld_lo   [NLD];
 
     // current command per loader
     wire [31:0]       lc_src    [NLD];
@@ -920,10 +924,18 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
             lq_req[l].rw = 1'b0;
             if (lc_layout[l]) begin
                 // SIMT8: chunk c = ld_k/8, rows n0..n0+3, 8 B each
+            `ifdef VX_CFG_TCU_SEQ_LDADDR_MUL
                 base   = lc_src[l] + (32'(ld_k[l]) >> 3) * lc_stride[l] + 32'(ld_row[l]) * 32'd8;
+            `else
+                base   = ld_lo[l] + 32'(ld_row[l]) * 32'd8;
+            `endif
                 nlanes = ((32'(lc_rows[l]) - 32'(ld_row[l])) >= 32'd4) ? 4'd8 : 4'(2 * (32'(lc_rows[l]) - 32'(ld_row[l])));
             end else begin
+            `ifdef VX_CFG_TCU_SEQ_LDADDR_MUL
                 base   = lc_src[l] + 32'(ld_row[l]) * lc_stride[l] + 32'(ld_k[l]);
+            `else
+                base   = ld_lo[l] + 32'(ld_k[l]);
+            `endif
                 nlanes = ((32'(lc_kt[l]) - 32'(ld_k[l])) >= 32'd32) ? 4'd8 : 4'((32'(lc_kt[l]) - 32'(ld_k[l])) >> 2);
             end
             for (integer i = 0; i < NL; ++i) begin
@@ -1013,17 +1025,38 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
 
     // responses
     assign mem_if.rsp_ready = 1'b1;
+    // LSU response as seen by the loaders / bank writes / dequant unit. Default: registered once (rsp_ready is
+    // always 1, so a plain pipeline register): the LSU / LMEM-switch response cone and the W/X-bank write-port
+    // cone (address, bank rotation, byte enables) no longer chain into one cycle (u50p5g post-place: 156 of the
+    // 300 worst kernel paths). The bank writes, wb_lsu_busy (landing interlock) and the loader word counts all
+    // use the registered response, so they stay consistent. Opt-out: -DVX_CFG_TCU_SEQ_RSP_NOREG.
+    wire           lrsp_valid;
+    lsu_rsp_data_t lrsp_data;
+`ifdef VX_CFG_TCU_SEQ_RSP_NOREG
+    assign lrsp_valid = mem_if.rsp_valid;
+    assign lrsp_data  = mem_if.rsp_data;
+`else
+    reg            lrsp_valid_r;
+    lsu_rsp_data_t lrsp_data_r;
+    always_ff @(posedge clk) begin
+        if (reset) lrsp_valid_r <= 1'b0;
+        else       lrsp_valid_r <= mem_if.rsp_valid;
+        lrsp_data_r <= mem_if.rsp_data;
+    end
+    assign lrsp_valid = lrsp_valid_r;
+    assign lrsp_data  = lrsp_data_r;
+`endif
     ld_tag_t rsp_tag;
-    assign rsp_tag = ld_tag_t'(mem_if.rsp_data.tag[$bits(ld_tag_t)-1:0]);
-    `UNUSED_VAR (mem_if.rsp_data.sop)
-    `UNUSED_VAR (mem_if.rsp_data.eop)
+    assign rsp_tag = ld_tag_t'(lrsp_data.tag[$bits(ld_tag_t)-1:0]);
+    `UNUSED_VAR (lrsp_data.sop)
+    `UNUSED_VAR (lrsp_data.eop)
     if (LSU_CLIENT_TAG_WIDTH > $bits(ld_tag_t)) begin : g_tag_unused
-        `UNUSED_VAR (mem_if.rsp_data.tag[LSU_CLIENT_TAG_WIDTH-1:$bits(ld_tag_t)])
+        `UNUSED_VAR (lrsp_data.tag[LSU_CLIENT_TAG_WIDTH-1:$bits(ld_tag_t)])
     end
     wire rsp_is_dq = (rsp_tag.lid == LID_W'(NLD));
-    wire rsp_fire  = mem_if.rsp_valid && ~rsp_is_dq;     // loader responses (the dequant unit's: dq_rsp_fire)
-    wire dq_rsp_fire = mem_if.rsp_valid && rsp_is_dq;
-    wire [3:0] rsp_nwords = 4'($countones(mem_if.rsp_data.mask));
+    wire rsp_fire  = lrsp_valid && ~rsp_is_dq;     // loader responses (the dequant unit's: dq_rsp_fire)
+    wire dq_rsp_fire = lrsp_valid && rsp_is_dq;
+    wire [3:0] rsp_nwords = 4'($countones(lrsp_data.mask));
 
     // loader sequencing
     wire [NLD-1:0] ld_start, ld_finish;
@@ -1032,6 +1065,11 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
         reg [7:0]       row_r;
         reg [KB_W-1:0]  k_r;
         reg [31:0]      words_exp_r, words_got_r;
+        reg [31:0]      lo_r;
+        assign ld_lo[l] = lo_r;
+    `ifdef VX_CFG_TCU_SEQ_LDADDR_MUL
+        `UNUSED_VAR (ld_lo[l])
+    `endif
         wire got = rsp_fire && (rsp_tag.lid == LID_W'(l));
         assign ld_start[l]     = ~act_r && lc_ready[l];
         assign ld_act[l]       = act_r;
@@ -1056,6 +1094,7 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
                     k_r         <= '0;
                     words_exp_r <= (32'(lc_rows[l]) * 32'(lc_kt[l])) >> 2;
                     words_got_r <= '0;
+                    lo_r        <= lc_src[l];
                 end else begin
                     if (lq_grant[l]) begin
                         if (lc_layout[l]) begin
@@ -1064,6 +1103,7 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
                                 row_r <= '0;
                                 if ((32'(k_r) + 32'd8) >= 32'(lc_kt[l])) reqs_done_r <= 1'b1;
                                 k_r <= k_r + KB_W'(8);
+                                lo_r <= lo_r + lc_stride[l];
                             end else begin
                                 row_r <= row_r + 8'd4;
                             end
@@ -1072,6 +1112,7 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
                                 k_r <= '0;
                                 if ((32'(row_r) + 32'd1) >= 32'(lc_rows[l])) reqs_done_r <= 1'b1;
                                 row_r <= row_r + 8'd1;
+                                lo_r <= lo_r + lc_stride[l];
                             end else begin
                                 k_r <= k_r + KB_W'(32);
                             end
@@ -1094,7 +1135,7 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
         xb_we = '0; xb_wa = '0; xb_wd = '0; xb_wbe = '0;
         wb_we = '0; wb_wa = '0; wb_wd = '0; wb_wbe = '0;
         for (integer p = 0; p < 4; ++p) begin
-            automatic logic [1:0]  m2 = mem_if.rsp_data.mask[2*p +: 2];
+            automatic logic [1:0]  m2 = lrsp_data.mask[2*p +: 2];
             automatic logic [7:0]  row;
             automatic logic [CH_W-1:0] ch;
             automatic logic [63:0] d;
@@ -1109,7 +1150,7 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
                 row = rsp_tag.row;
                 ch  = CH_W'((32'(rsp_tag.kw) + 32'(2 * p)) >> 1);
             end
-            d  = {mem_if.rsp_data.data[2*p+1], mem_if.rsp_data.data[2*p]};
+            d  = {lrsp_data.data[2*p+1], lrsp_data.data[2*p]};
             be = {{4{m2[1]}}, {4{m2[0]}}};
             if (rsp_fire && (m2 != 2'b00)) begin
                 if (rsp_tag.lid == LID_W'(0)) begin
@@ -1156,7 +1197,7 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
     `endif
     end
     for (genvar b = 0; b < NB; ++b) begin : g_wb_lsu_busy
-        assign wb_lsu_busy[b] = (HAS_LDW != 0) && rsp_fire && (|mem_if.rsp_data.mask) && (rsp_tag.lid == LID_W'(b + 1));
+        assign wb_lsu_busy[b] = (HAS_LDW != 0) && rsp_fire && (|lrsp_data.mask) && (rsp_tag.lid == LID_W'(b + 1));
     end
 
     // loader completion events, row-count registers
@@ -1598,7 +1639,18 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
         // chunk (j, m) of quarter q: 8 int32 = beats 0..7 of the quarter, lane (j, m)
         wire       so_j = so_i[3];
         wire [2:0] so_m = so_i[2:0];
+    `ifdef VX_CFG_TCU_SEQ_ST_NOAREG
         wire [31:0] so_addr = sh.dst + 32'(so_m) * sh.stride + (32'(so_j) * 32 + 32'(so_q) * 8) * 4;
+    `else
+        // row bases dst + m*stride, written during phase 1 (so_i passes 0..7 there before phase 2 starts), so the
+        // LMEM write address in phase 2 needs no stride multiply (u50p5g: st_q stride -> LMEM BRAM paths).
+        // Opt-out: -DVX_CFG_TCU_SEQ_ST_NOAREG.
+        reg  [31:0] so_rb [8];
+        always_ff @(posedge clk) begin
+            if ((so_ph == 3'd1) && (so_i < 4'd8)) so_rb[so_i[2:0]] <= sh.dst + 32'(so_i[2:0]) * sh.stride;
+        end
+        wire [31:0] so_addr = so_rb[so_m] + (32'(so_j) * 32 + 32'(so_q) * 8) * 4;
+    `endif
         wire [2:0]  so_off  = so_addr[4:2];
         `UNUSED_VAR (so_addr)
         logic [7:0][31:0] so_chunk;
@@ -1859,6 +1911,16 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
     // store FIFO
     reg  [5:0]       dq_sf_n [DQ_SFD];
     reg  [255:0]     dq_sf_d [DQ_SFD];
+    reg  [31:0]      dq_sf_a [DQ_SFD];           // row store byte address dst + n*stride (computed at push)
+`ifdef VX_CFG_TCU_SEQ_STF_NOAREG
+    for (genvar i = 0; i < DQ_SFD; ++i) begin : g_dq_sf_a_unused
+        `UNUSED_VAR (dq_sf_a[i])
+    end
+`else
+    for (genvar i = 0; i < DQ_SFD; ++i) begin : g_dq_sf_n_unused
+        `UNUSED_VAR (dq_sf_n[i])
+    end
+`endif
     reg  [2:0]       dq_sf_wp, dq_sf_rp;
     wire             dq_sf_push = dq_row_done && ~dq_row_skip;
     wire             dq_st_req  = dq_run && (dq_sf_cnt != 4'd0);
@@ -1884,7 +1946,13 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
             automatic ld_tag_t t;
             automatic logic [31:0] ra;
             t = '0; t.lid = DQ_LID;
+        `ifdef VX_CFG_TCU_SEQ_STF_NOAREG
             ra = dq_cmd.dst + 32'(dq_sf_n[dq_sf_rp]) * dq_cmd.stride;
+        `else
+            // precomputed at push (opt-out -DVX_CFG_TCU_SEQ_STF_NOAREG): the request cone from the store FIFO /
+            // running context into the LSU queue has no stride multiply (2-core post-place: dq_sf_rp / dq_rc paths)
+            ra = dq_sf_a[dq_sf_rp];
+        `endif
             dqr_req.rw = 1'b1;
             for (integer l = 0; l < 8; ++l) begin
                 dqr_req.mask[l]   = (4'(l) < dq_cmd.mlim);
@@ -1920,7 +1988,7 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
                 cx_k[dq_fc] <= cx_k[dq_fc] + 4'd1;
                 cx_wexp[dq_fc] <= cx_wexp[dq_fc] + 8'(dq_scl_fire ? $countones(dq_kmask) : 0);
             end
-            if (dq_rsp_fire) cx_wgot[dq_rsp_ctx] <= cx_wgot[dq_rsp_ctx] + 8'($countones(mem_if.rsp_data.mask));
+            if (dq_rsp_fire) cx_wgot[dq_rsp_ctx] <= cx_wgot[dq_rsp_ctx] + 8'($countones(lrsp_data.mask));
             for (integer c = 0; c < 2; ++c) begin
                 if (cx_v[c] && ~cx_rdy[c] && (cx_k[c] == 4'd9) && (cx_wgot[c] == cx_wexp[c])
                     && ~(dq_rsp_fire && (dq_rsp_ctx == 1'(c)))) cx_rdy[c] <= 1'b1;
@@ -1947,6 +2015,7 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
             dq_rows_fl <= dq_rows_fl + 4'(dq_can_issue && dq_row_start) - 4'(dq_row_done);
             if (dq_sf_push) begin
                 dq_sf_n[dq_sf_wp] <= dq_on;
+                dq_sf_a[dq_sf_wp] <= dq_cmd.dst + 32'(dq_on) * dq_cmd.stride;
                 dq_sf_d[dq_sf_wp] <= {dq_o1, dq_o0, dq_rowb[5], dq_rowb[4], dq_rowb[3], dq_rowb[2], dq_rowb[1], dq_rowb[0]};
                 dq_sf_wp <= dq_sf_wp + 3'd1;
             end
@@ -1955,9 +2024,9 @@ module VX_tcu_seq import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
         end
         if (dq_rsp_fire) begin
             for (integer l = 0; l < 8; ++l) begin
-                if (mem_if.rsp_data.mask[l]) begin
-                    if (rsp_tag.row[3:0] == 4'd8) cx_xs[dq_rsp_ctx][l] <= mem_if.rsp_data.data[l];
-                    else                          cx_ws[dq_rsp_ctx][{rsp_tag.row[2:0], 3'(l)}] <= mem_if.rsp_data.data[l];
+                if (lrsp_data.mask[l]) begin
+                    if (rsp_tag.row[3:0] == 4'd8) cx_xs[dq_rsp_ctx][l] <= lrsp_data.data[l];
+                    else                          cx_ws[dq_rsp_ctx][{rsp_tag.row[2:0], 3'(l)}] <= lrsp_data.data[l];
                 end
             end
         end
